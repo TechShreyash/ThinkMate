@@ -1,0 +1,29 @@
+2026-06-12 12:16:03 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 12:16:22 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 12:16:50 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 12:16:51 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 12:16:51 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 12:16:51 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 12:16:58 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 12:16:59 | INFO     | __main__:test_live:7 - Initializing LLMService...
+2026-06-12 12:16:59 | INFO     | __main__:test_live:11 - Testing generate_response...
+2026-06-12 12:17:01 | ERROR    | app.services.llm_service:generate_response:26 - Chat generation API call failed: Error code: 401 - {'detail': {'error': {'message': 'Invalid API key.', 'type': 'authentication_error', 'code': 401}}}
+2026-06-12 12:17:23 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 12:17:23 | INFO     | __main__:test_live:8 - Initializing LLMService...
+2026-06-12 12:17:23 | INFO     | __main__:test_live:12 - Testing generate_response...
+2026-06-12 12:17:24 | ERROR    | app.services.llm_service:generate_response:26 - Chat generation API call failed: Error code: 401 - {'detail': {'error': {'message': 'Invalid API key.', 'type': 'authentication_error', 'code': 401}}}
+2026-06-12 12:17:24 | WARNING  | __main__:test_live:38 - ============================================================
+2026-06-12 12:17:24 | WARNING  | __main__:test_live:39 - LLM client connected successfully, but the API key was rejected.
+2026-06-12 12:17:24 | WARNING  | __main__:test_live:40 - Error detail: Error code: 401 - {'detail': {'error': {'message': 'Invalid API key.', 'type': 'authentication_error', 'code': 401}}}
+2026-06-12 12:17:24 | WARNING  | __main__:test_live:41 - Please verify that your API key is active and correct.
+2026-06-12 12:17:24 | WARNING  | __main__:test_live:42 - ============================================================
+2026-06-12 13:25:03 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 13:25:04 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:04 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:04 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:17 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
