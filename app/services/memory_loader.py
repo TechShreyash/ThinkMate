@@ -1,47 +1,31 @@
 import json
-from aiosqlite import Connection
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 
-async def build_memory_block(db: Connection, user_id: int) -> tuple[str, bool]:
+async def build_memory_block(db: AsyncIOMotorDatabase, user_id: int) -> tuple[str, bool]:
     """
-    Loads all 4 components of the user's memory from SQLite and compiles them into a structured text block.
+    Loads all components of the user's memory from MongoDB and compiles them into a structured text block.
     Returns:
         (compiled_memory_text, needs_compression_flag)
     """
-    # 1. Fetch profile summary and communication style
-    async with db.execute(
-        "SELECT profile_summary, communication_style FROM user_profiles WHERE user_id = ?",
-        (user_id,)
-    ) as cursor:
-        profile = await cursor.fetchone()
-        profile_summary = profile["profile_summary"] if profile and profile["profile_summary"] else ""
-        comm_style = profile["communication_style"] if profile and profile["communication_style"] else ""
+    # Fetch unified user profile
+    doc = await db["user_profiles"].find_one({"_id": user_id})
+    if not doc:
+        doc = {}
 
-    # 2. Fetch active facts
-    async with db.execute(
-        "SELECT category, content FROM facts WHERE user_id = ? AND is_active = 1",
-        (user_id,)
-    ) as cursor:
-        facts = await cursor.fetchall()
+    profile_summary = doc.get("profile_summary") or ""
+    comm_style = doc.get("communication_style") or ""
+    facts = doc.get("facts") or []
+    beliefs = doc.get("beliefs") or []
+    events = doc.get("events") or []
+    emotional_state = doc.get("emotional_state") or None
 
-    # 3. Fetch events
-    async with db.execute(
-        "SELECT description, event_date, significance FROM events WHERE user_id = ? ORDER BY id ASC",
-        (user_id,)
-    ) as cursor:
-        events = await cursor.fetchall()
-
-    # 4. Fetch latest emotional state
-    async with db.execute(
-        "SELECT mood, intensity, trigger FROM emotional_log WHERE user_id = ? ORDER BY detected_at DESC LIMIT 1",
-        (user_id,)
-    ) as cursor:
-        mood_row = await cursor.fetchone()
-        mood_str = ""
-        if mood_row:
-            mood_str = f"Mood: {mood_row['mood']} (intensity: {mood_row['intensity']})"
-            if mood_row['trigger']:
-                mood_str += f", Triggered by: {mood_row['trigger']}"
+    mood_str = ""
+    if emotional_state:
+        mood_str = f"Mood: {emotional_state.get('mood', 'calm')} (intensity: {emotional_state.get('intensity', 0.5)})"
+        trigger = emotional_state.get('trigger')
+        if trigger:
+            mood_str += f", Triggered by: {trigger}"
 
     # Format the sections
     lines = []
@@ -56,22 +40,32 @@ async def build_memory_block(db: Connection, user_id: int) -> tuple[str, bool]:
     lines.append("=== CORE FACTS ===")
     if facts:
         for f in facts:
-            lines.append(f"- [{f['category']}] {f['content']}")
+            lines.append(f"- [{f.get('category')}] {f.get('content')}")
     else:
         lines.append("(No facts stored)")
     lines.append("")
 
-    # Section 3: Life Events Timeline
+    # Section 3: Subjective Beliefs
+    lines.append("=== SUBJECTIVE BELIEFS ===")
+    if beliefs:
+        for b in beliefs:
+            lines.append(f"- {b.get('content')}")
+    else:
+        lines.append("(No beliefs stored)")
+    lines.append("")
+
+    # Section 4: Life Events Timeline
     lines.append("=== LIFE EVENTS TIMELINE ===")
     if events:
         for ev in events:
-            date_str = f" ({ev['event_date']})" if ev['event_date'] else ""
-            lines.append(f"- [{ev['significance']}] {ev['description']}{date_str}")
+            date_str = f" ({ev.get('event_date')})" if ev.get('event_date') else ""
+            emotion_str = f" — felt {ev.get('emotional_context')}" if ev.get('emotional_context') else ""
+            lines.append(f"- [{ev.get('significance', 'minor')}] {ev.get('description')}{date_str}{emotion_str}")
     else:
         lines.append("(No timeline events logged)")
     lines.append("")
 
-    # Section 4: Current Mood
+    # Section 5: Current Mood
     lines.append("=== CURRENT MOOD ===")
     if mood_str:
         lines.append(mood_str)

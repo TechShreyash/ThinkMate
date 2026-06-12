@@ -1,36 +1,19 @@
-import os
 import pytest
-import pytest_asyncio
-from aiosqlite import Connection
 from app.config import config
 from app.database import connection, models
 from app.services.memory_loader import build_memory_block
 from app.services.schemas import MemoryCompression, CompressedFact, CompressedEvent, EmotionLog
-from app.services.llm_service import LLMService
-
-@pytest_asyncio.fixture
-async def temp_db():
-    original_db_path = connection.DB_PATH
-    connection.DB_PATH = "data/test_guards_db.sqlite"
-    await connection.init_db()
-    yield connection.DB_PATH
-    if os.path.exists(connection.DB_PATH):
-        try:
-            os.remove(connection.DB_PATH)
-        except Exception:
-            pass
-    connection.DB_PATH = original_db_path
 
 @pytest.mark.asyncio
 async def test_input_guard_config():
-    # Verify new configuration variables exist and have correct defaults
-    assert config.USER_MEMORY_BUDGET_CHARS == 10000
+    # Verify new configuration variables exist and have correct defaults (memory budget is 4000)
+    assert config.USER_MEMORY_BUDGET_CHARS == 4000
     assert config.CHARS_PER_TOKEN == 4
     assert config.MAX_INPUT_CHARS == 1000
     assert config.MAX_RESPONSE_CHARS == 1000
 
 @pytest.mark.asyncio
-async def test_build_memory_block_and_compression_flag(temp_db):
+async def test_build_memory_block_and_compression_flag():
     async with connection.db_session() as db:
         user_id = 11111
         await models.ensure_user(db, user_id, "testuser", "Test User")
@@ -48,11 +31,17 @@ async def test_build_memory_block_and_compression_flag(temp_db):
         config.USER_MEMORY_BUDGET_CHARS = 50  # Lower budget to trigger compression
         try:
             # Let's insert a fact that makes total length > 50
-            await db.execute(
-                "INSERT INTO facts (user_id, category, content) VALUES (?, ?, ?)",
-                (user_id, "preference", "This is a very long fact description to exceed budget.")
+            await db["user_profiles"].update_one(
+                {"_id": user_id},
+                {
+                    "$push": {
+                        "facts": {
+                            "category": "preference",
+                            "content": "This is a very long fact description to exceed budget."
+                        }
+                    }
+                }
             )
-            await db.commit()
             
             mem_text2, needs_comp2 = await build_memory_block(db, user_id)
             assert needs_comp2
@@ -60,21 +49,21 @@ async def test_build_memory_block_and_compression_flag(temp_db):
             config.USER_MEMORY_BUDGET_CHARS = original_budget
 
 @pytest.mark.asyncio
-async def test_replace_user_memory(temp_db):
+async def test_replace_user_memory():
     async with connection.db_session() as db:
         user_id = 22222
         await models.ensure_user(db, user_id, "compuser", "Compressed User")
         
-        # Add some initial facts and events
-        await db.execute(
-            "INSERT INTO facts (user_id, category, content) VALUES (?, 'personal', 'Lives in Seattle')",
-            (user_id,)
+        # Add some initial facts and events in MongoDB
+        await db["user_profiles"].update_one(
+            {"_id": user_id},
+            {
+                "$push": {
+                    "facts": {"category": "personal", "content": "Lives in Seattle", "confidence": 1.0},
+                    "events": {"description": "Bought a car", "event_date": "2026-01", "significance": "minor"}
+                }
+            }
         )
-        await db.execute(
-            "INSERT INTO events (user_id, description, event_date, significance) VALUES (?, 'Bought a car', '2026-01', 'minor')",
-            (user_id,)
-        )
-        await db.commit()
         
         # Prepare compression updates
         compression = MemoryCompression(
@@ -90,38 +79,31 @@ async def test_replace_user_memory(temp_db):
             emotional_state=EmotionLog(mood="calm", intensity=0.7, trigger="weekend")
         )
         
-        # Perform replacement
+        # Perform replacement (this overwrites the collections because we hard delete during replacement/update)
         await models.replace_user_memory(db, user_id, compression)
         
+        # Fetch profile doc
+        profile = await db["user_profiles"].find_one({"_id": user_id})
+        
         # 1. Verify user profile fields
-        async with db.execute("SELECT profile_summary, communication_style FROM user_profiles WHERE user_id = ?", (user_id,)) as cursor:
-            profile = await cursor.fetchone()
-            assert profile["profile_summary"] == "An developer from Seattle."
-            assert profile["communication_style"] == "Direct and logical."
+        assert profile["profile_summary"] == "An developer from Seattle."
+        assert profile["communication_style"] == "Direct and logical."
             
-        # 2. Verify active facts: old one should be soft-deleted (is_active=0) and new ones active
-        async with db.execute("SELECT content, is_active FROM facts WHERE user_id = ?", (user_id,)) as cursor:
-            facts = await cursor.fetchall()
-            assert len(facts) == 3
-            # Active facts should be the compressed ones
-            active_facts = [f["content"] for f in facts if f["is_active"] == 1]
-            inactive_facts = [f["content"] for f in facts if f["is_active"] == 0]
-            assert len(active_facts) == 2
-            assert "Resides in Seattle, WA" in active_facts
-            assert "Enjoys typing code" in active_facts
-            assert "Lives in Seattle" in inactive_facts
+        # 2. Verify active facts: old ones are replaced (hard deletes are used)
+        active_facts = [f["content"] for f in profile["facts"]]
+        assert len(active_facts) == 2
+        assert "Resides in Seattle, WA" in active_facts
+        assert "Enjoys typing code" in active_facts
+        assert "Lives in Seattle" not in active_facts
             
         # 3. Verify events: old one should be deleted completely and new one inserted
-        async with db.execute("SELECT description, event_date, significance FROM events WHERE user_id = ?", (user_id,)) as cursor:
-            events = await cursor.fetchall()
-            assert len(events) == 1
-            assert events[0]["description"] == "Bought a Tesla"
-            assert events[0]["event_date"] == "2026-01-15"
-            assert events[0]["significance"] == "major"
+        events = profile["events"]
+        assert len(events) == 1
+        assert events[0]["description"] == "Bought a Tesla"
+        assert events[0]["event_date"] == "2026-01-15"
+        assert events[0]["significance"] == "major"
             
-        # 4. Verify mood logged
-        async with db.execute("SELECT mood, intensity, trigger FROM emotional_log WHERE user_id = ? ORDER BY detected_at DESC LIMIT 1", (user_id,)) as cursor:
-            mood = await cursor.fetchone()
-            assert mood["mood"] == "calm"
-            assert mood["intensity"] == 0.7
-            assert mood["trigger"] == "weekend"
+        # 4. Verify mood logged directly
+        assert profile["emotional_state"]["mood"] == "calm"
+        assert profile["emotional_state"]["intensity"] == 0.7
+        assert profile["emotional_state"]["trigger"] == "weekend"

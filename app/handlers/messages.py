@@ -1,13 +1,13 @@
 from aiogram import Router, F
 from aiogram.types import Message
-from aiosqlite import Connection
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.services.user_task_manager import user_task_manager
 
 router = Router(name="messages")
 
 @router.message(F.text)
-async def handle_user_message(message: Message, db: Connection):
+async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
     user_id = message.from_user.id
     user_text = message.text
 

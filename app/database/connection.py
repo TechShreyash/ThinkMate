@@ -1,87 +1,35 @@
-import os
-import aiosqlite
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from contextlib import asynccontextmanager
 from loguru import logger
+from app.config import config
 
-DB_PATH = os.path.join("data", "database.sqlite")
+# Global client singleton
+_client: AsyncIOMotorClient | None = None
 
-async def get_db_connection() -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(DB_PATH)
-    conn.row_factory = aiosqlite.Row
-    # Enable WAL mode to prevent locks during concurrent writes
-    await conn.execute("PRAGMA journal_mode=WAL;")
-    await conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+def get_db_client() -> AsyncIOMotorClient:
+    global _client
+    if _client is None:
+        logger.info("Initializing AsyncIOMotorClient...")
+        _client = AsyncIOMotorClient(config.MONGODB_URI)
+    return _client
+
+def get_db() -> AsyncIOMotorDatabase:
+    client = get_db_client()
+    return client[config.MONGODB_DB]
 
 @asynccontextmanager
 async def db_session():
-    db = await get_db_connection()
-    try:
-        yield db
-    finally:
-        await db.close()
+    """Context manager yielding the active MongoDB database instance."""
+    db = get_db()
+    yield db
 
 async def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    async with db_session() as db:
-        schema = """
-        -- 1. Main User Profiles
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            display_name TEXT,
-            profile_summary TEXT DEFAULT '',
-            communication_style TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 2. Core Facts (Atomic fragments of user preferences, details, and habits)
-        CREATE TABLE IF NOT EXISTS facts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            category TEXT NOT NULL,          -- 'personal', 'work', 'preference', 'health', 'hobby', 'relationship'
-            content TEXT NOT NULL,
-            confidence REAL DEFAULT 1.0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_active BOOLEAN DEFAULT 1,     -- Soft delete flag
-            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE
-        );
-
-        -- 3. Life Events Timeline (Important chronological events)
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            description TEXT NOT NULL,
-            event_date TEXT,                 -- ISO date or string ("June 2026", "yesterday")
-            significance TEXT DEFAULT 'minor', -- 'major', 'minor', 'routine'
-            emotional_context TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE
-        );
-
-        -- 4. Emotional Log (Logs user mood trends detected by LLM analysis)
-        CREATE TABLE IF NOT EXISTS emotional_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            mood TEXT NOT NULL,
-            intensity REAL DEFAULT 0.5,      -- Value from 0.0 (weak) to 1.0 (strong)
-            trigger TEXT DEFAULT '',
-            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE
-        );
-
-        -- 5. Chat Buffer (Temporary timeline of conversation histories for sliding windows)
-        CREATE TABLE IF NOT EXISTS chat_buffer (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,              -- 'user' or 'assistant'
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE
-        );
-        """
-        await db.executescript(schema)
-        await db.commit()
-    logger.info("SQLite database tables initialized successfully.")
+    """Initializes MongoDB indexes for optimized query performance."""
+    db = get_db()
+    logger.info("Initializing MongoDB indexes...")
+    
+    # 1. Compound index on llm_audit_log for queries filtered by user_id and sorted by timestamp
+    await db["llm_audit_log"].create_index([("user_id", 1), ("timestamp", -1)])
+    
+    logger.info("MongoDB indexes initialized successfully.")

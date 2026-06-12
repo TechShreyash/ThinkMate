@@ -6,21 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiogram.types import Message
 from app.config import config
 from app.database import connection, models
+import app.services.memory_compressor
+import app.services.memory_extractor
 from app.services.user_task_manager import user_task_manager
 from app.services.chat_manager import handle_message
 
 @pytest_asyncio.fixture
 async def temp_db():
-    original_db_path = connection.DB_PATH
-    connection.DB_PATH = "data/test_batch_concurrency_db.sqlite"
     await connection.init_db()
-    yield connection.DB_PATH
-    if os.path.exists(connection.DB_PATH):
-        try:
-            os.remove(connection.DB_PATH)
-        except Exception:
-            pass
-    connection.DB_PATH = original_db_path
+    yield
 
 @pytest.mark.asyncio
 async def test_message_batching_delay(temp_db):
@@ -79,21 +73,23 @@ async def test_character_count_extraction_trigger(temp_db):
             await models.ensure_user(db, user_id, "testuser", "Test User")
             
             # Insert short messages (should not trigger extraction)
-            with patch("app.services.chat_manager.extract_and_trim", new_callable=AsyncMock) as mock_extract:
+            with patch("app.services.user_task_manager.user_task_manager.run_extractor", new_callable=AsyncMock) as mock_run_extractor:
                 with patch("app.services.llm_service.LLMService.generate_response", new_callable=AsyncMock) as mock_response:
                     mock_response.return_value = "Fine, thanks."
                     
                     # 1. Total chars ~ 20 (Hello + Fine, thanks)
                     await handle_message(db, user_id, "Hello")
-                    mock_extract.assert_not_called()
+                    await asyncio.sleep(0.01)
+                    mock_run_extractor.assert_not_called()
                     
                     # 2. Insert a very long message to breach 100 char limit
                     long_msg = "This is a very long text message designed to exceed the character limit trigger set in config."
                     await handle_message(db, user_id, long_msg)
-                    mock_extract.assert_called_once()
+                    await asyncio.sleep(0.01)
+                    mock_run_extractor.assert_called_once()
     finally:
         config.CHAT_BUFFER_MAX_CHARS = original_max_chars
-
+ 
 @pytest.mark.asyncio
 async def test_memory_extraction_excludes_latest_trim(temp_db):
     user_id = 77777
@@ -117,7 +113,7 @@ async def test_memory_extraction_excludes_latest_trim(temp_db):
                 mock_extract_llm.return_value = MemoryExtraction()
                 
                 from app.services.memory_extractor import extract_and_trim
-                await extract_and_trim(db, user_id)
+                await extract_and_trim(user_id)
                 
                 # Check what was passed to extract_memory
                 # It should take buffer messages except the latest CHAT_BUFFER_TRIM (3 messages).

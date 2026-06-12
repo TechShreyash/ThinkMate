@@ -27,3 +27,294 @@
 2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
 2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
 2026-06-12 13:25:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:18 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:00:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:18 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:55 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:00:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:00:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:10 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:01:16 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:16 | DEBUG    | app.services.user_task_manager:_typing_loop:56 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:01:16 | INFO     | app.services.user_task_manager:_process_batch:87 - Processing batch of 2 messages for user 99999
+2026-06-12 16:01:16 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:16 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:01:16 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:17 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:01:17 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:17 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:17 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:17 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:17 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:17 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:26 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:01:28 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:28 | DEBUG    | app.services.user_task_manager:_typing_loop:56 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:01:28 | INFO     | app.services.user_task_manager:_process_batch:87 - Processing batch of 2 messages for user 99999
+2026-06-12 16:01:28 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:28 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:01:28 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:28 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:01:28 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:28 | INFO     | app.services.user_task_manager:run_compressor:111 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 16:01:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:01:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:51 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:05:53 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:53 | DEBUG    | app.services.user_task_manager:_typing_loop:73 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:05:53 | INFO     | app.services.user_task_manager:_process_batch:106 - Processing batch of 2 messages for user 99999
+2026-06-12 16:05:54 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:54 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:05:54 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:54 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:05:54 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:54 | INFO     | app.services.user_task_manager:run_compressor:130 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 16:05:54 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:54 | DEBUG    | app.services.user_task_manager:_typing_loop:73 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:05:54 | INFO     | app.services.user_task_manager:_process_batch:106 - Processing batch of 4 messages for user 55555
+2026-06-12 16:05:54 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:05:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:05 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:06:07 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:07 | DEBUG    | app.services.user_task_manager:_typing_loop:73 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:06:07 | INFO     | app.services.user_task_manager:_process_batch:106 - Processing batch of 2 messages for user 99999
+2026-06-12 16:06:07 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:07 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:06:07 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:07 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:06:07 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:07 | INFO     | app.services.user_task_manager:run_compressor:130 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 16:06:07 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:07 | DEBUG    | app.services.user_task_manager:_typing_loop:73 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:06:08 | INFO     | app.services.user_task_manager:_process_batch:106 - Processing batch of 4 messages for user 55555
+2026-06-12 16:06:08 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:08 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:08 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:08 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:06:08 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:27 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:08:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:29 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:29 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 16:08:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:29 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:08:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:29 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:08:29 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:29 | INFO     | app.services.user_task_manager:run_compressor:135 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:30 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:30 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:30 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 16:08:30 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:30 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:40 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:08:42 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:42 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:43 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 16:08:43 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:43 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:08:43 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:43 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:08:43 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:43 | INFO     | app.services.user_task_manager:run_compressor:135 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 16:08:43 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:43 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:44 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 16:08:44 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:44 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 16:08:44 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:44 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:44 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:44 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:44 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:44 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:54 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 16:08:54 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:54 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:55 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 16:08:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:55 | INFO     | app.services.chat_manager:handle_message:21 - Buffer overflow triggered for user 88888 (112 characters). Processing memory extraction...
+2026-06-12 16:08:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:55 | INFO     | app.services.memory_extractor:extract_and_trim:51 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 16:08:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:55 | INFO     | app.services.user_task_manager:run_compressor:135 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 16:08:55 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:55 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:55 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 16:08:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:56 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 16:08:56 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 16:08:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 16:08:56 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:30:42 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 17:32:10 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 17:32:19 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 17:32:19 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:19 | DEBUG    | app.services.user_task_manager:_typing_loop:79 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 17:32:20 | INFO     | app.services.user_task_manager:_process_batch:112 - Processing batch of 2 messages for user 99999
+2026-06-12 17:32:20 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:20 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:20 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:20 | INFO     | app.services.user_task_manager:run_compressor:148 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 17:32:20 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:20 | DEBUG    | app.services.user_task_manager:_typing_loop:79 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 17:32:21 | INFO     | app.services.user_task_manager:_process_batch:112 - Processing batch of 4 messages for user 55555
+2026-06-12 17:32:21 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:21 | WARNING  | app.services.user_task_manager:enqueue_message:39 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 17:32:21 | DEBUG    | app.services.user_task_manager:_typing_loop:79 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 17:32:21 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:21 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:21 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:21 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:21 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:38 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 17:32:38 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:38 | DEBUG    | app.services.user_task_manager:_typing_loop:79 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 17:32:38 | INFO     | app.services.user_task_manager:_process_batch:112 - Processing batch of 2 messages for user 99999
+2026-06-12 17:32:39 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:39 | INFO     | app.services.chat_manager:handle_message:20 - Buffer overflow triggered for user 88888 (112 characters). Launching background extraction...
+2026-06-12 17:32:39 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:39 | INFO     | app.services.memory_extractor:extract_and_trim:16 - Memory extraction triggered in background for user 77777...
+2026-06-12 17:32:39 | INFO     | app.services.memory_extractor:extract_and_trim:56 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 17:32:39 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:39 | INFO     | app.services.user_task_manager:run_compressor:148 - Memory compressor already running for user 66666, skipping new launch.
+2026-06-12 17:32:39 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:39 | DEBUG    | app.services.user_task_manager:_typing_loop:79 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 17:32:39 | INFO     | app.services.user_task_manager:_process_batch:112 - Processing batch of 4 messages for user 55555
+2026-06-12 17:32:40 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:40 | WARNING  | app.services.user_task_manager:enqueue_message:39 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 17:32:40 | DEBUG    | app.services.user_task_manager:_typing_loop:79 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 17:32:40 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:40 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:40 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:40 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 17:32:40 | INFO     | app.database.connection:init_db:87 - SQLite database tables initialized successfully.
+2026-06-12 18:36:03 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:36:28 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:36:42 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:37:37 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:42:12 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:42:12 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:12 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:28 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:29 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:42:29 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:29 | INFO     | app.services.memory_extractor:extract_and_trim:16 - Memory extraction triggered in background for user 77777...
+2026-06-12 18:42:29 | INFO     | app.services.memory_extractor:extract_and_trim:57 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:29 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:29 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:42:30 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 18:42:30 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:30 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:30 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 18:42:30 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:42:30 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:30 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:37 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:42:38 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:38 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:54 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:55 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:42:55 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:55 | INFO     | app.services.chat_manager:handle_message:20 - Buffer overflow triggered for user 88888 (112 characters). Launching background extraction...
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:55 | INFO     | app.services.memory_extractor:extract_and_trim:16 - Memory extraction triggered in background for user 77777...
+2026-06-12 18:42:55 | INFO     | app.services.memory_extractor:extract_and_trim:57 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:55 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:55 | INFO     | app.services.user_task_manager:run_compressor:147 - Memory lock already held for user 66666, skipping compressor launch.
+2026-06-12 18:42:56 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:56 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:56 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:42:56 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 18:42:56 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:56 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:42:56 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 18:42:56 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:42:56 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:42:56 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:33 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:49:33 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:33 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:33 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:49:34 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:34 | INFO     | app.services.chat_manager:handle_message:20 - Buffer overflow triggered for user 88888 (112 characters). Launching background extraction...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:34 | INFO     | app.services.memory_extractor:extract_and_trim:16 - Memory extraction triggered in background for user 77777...
+2026-06-12 18:49:34 | INFO     | app.services.memory_extractor:extract_and_trim:57 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:34 | INFO     | app.services.user_task_manager:run_compressor:147 - Memory lock already held for user 66666, skipping compressor launch.
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:34 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:49:34 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:49:34 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 18:49:34 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:49:34 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:50 | INFO     | app:<module>:24 - ThinkMate application logger initialized.
+2026-06-12 18:50:50 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:50 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:50 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:50:51 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 2 messages for user 99999
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:51 | INFO     | app.services.chat_manager:handle_message:20 - Buffer overflow triggered for user 88888 (112 characters). Launching background extraction...
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:51 | INFO     | app.services.memory_extractor:extract_and_trim:16 - Memory extraction triggered in background for user 77777...
+2026-06-12 18:50:51 | INFO     | app.services.memory_extractor:extract_and_trim:57 - Memory extraction completed. Trimmed oldest 5 messages from user 77777's buffer.
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:51 | INFO     | app.services.user_task_manager:run_compressor:147 - Memory lock already held for user 66666, skipping compressor launch.
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:51 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:51 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:50:51 | INFO     | app.services.user_task_manager:_process_batch:111 - Processing batch of 4 messages for user 55555
+2026-06-12 18:50:52 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:52 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.
+2026-06-12 18:50:52 | WARNING  | app.services.user_task_manager:enqueue_message:38 - User 44444 message queue exceeded maximum limit (2). Dropping message.
+2026-06-12 18:50:52 | DEBUG    | app.services.user_task_manager:_typing_loop:78 - Failed to send typing chat action: object MagicMock can't be used in 'await' expression
+2026-06-12 18:50:52 | INFO     | app.database.connection:init_db:30 - Initializing MongoDB indexes...
+2026-06-12 18:50:52 | INFO     | app.database.connection:init_db:35 - MongoDB indexes initialized successfully.

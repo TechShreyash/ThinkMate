@@ -1,14 +1,14 @@
 from aiogram import Router, html
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiosqlite import Connection
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.database import models
 from app.services.memory_loader import build_memory_block
 
 router = Router(name="commands")
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, db: Connection):
+async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
     user_id = message.from_user.id
     username = message.from_user.username
     display_name = message.from_user.first_name
@@ -24,7 +24,7 @@ async def cmd_start(message: Message, db: Connection):
     await message.answer(welcome_text, parse_mode="HTML")
 
 @router.message(Command("profile"))
-async def cmd_profile(message: Message, db: Connection):
+async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
     user_id = message.from_user.id
     
     # Generate memory card using memory loader

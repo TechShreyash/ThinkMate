@@ -1,26 +1,24 @@
 import os
 import asyncio
 from loguru import logger
-from aiosqlite import Connection
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.database import models
 from app.services.llm_service import LLMService
 from app.services.memory_loader import build_memory_block
-from app.services.memory_extractor import extract_and_trim
-from app.services.memory_compressor import compress_user_memory
 
 llm = LLMService()
 
-async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
+async def handle_message(db: AsyncIOMotorDatabase, user_id: int, user_text: str) -> str:
     # 1. Append incoming user message to buffer
     await models.add_message_to_buffer(db, user_id, "user", user_text)
     
-    # 2. Check for buffer overflow
+    # 2. Check for buffer overflow → trigger non-blocking background extraction
     buffer_chars = await models.get_buffer_char_count(db, user_id)
     if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
-        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_chars} characters). Processing memory extraction...")
-        # Run extraction and trim oldest messages
-        await extract_and_trim(db, user_id)
+        from app.services.user_task_manager import user_task_manager
+        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_chars} characters). Launching background extraction...")
+        asyncio.create_task(user_task_manager.run_extractor(user_id))
 
     # 3. Read editable persona file
     persona_path = config.PERSONA_FILE
@@ -41,7 +39,7 @@ async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
     active_history = await models.get_chat_buffer(db, user_id)
 
     # 7. Query chatbot response
-    reply_text = await llm.generate_response(system_prompt, active_history)
+    reply_text = await llm.generate_response(user_id, system_prompt, active_history)
 
     # 8. Append bot response back to buffer
     await models.add_message_to_buffer(db, user_id, "assistant", reply_text)

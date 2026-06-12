@@ -11,7 +11,7 @@ class UserState:
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.chat_lock = asyncio.Lock()
-        self.compressor_lock = asyncio.Lock()
+        self.memory_lock = asyncio.Lock()
         self.pending_messages = []  # list of dict: {"text": str, "message": Message}
         self.batch_task = None
         self.typing_task = None
@@ -129,13 +129,25 @@ class UserTaskManager:
                     if state.typing_task:
                         state.typing_task.cancel()
 
-    async def run_compressor(self, user_id: int):
+    async def run_extractor(self, user_id: int):
+        """Run memory extraction in background. At most 1 per user."""
         state = await self.get_state(user_id)
-        if state.compressor_lock.locked():
-            logger.info(f"Memory compressor already running for user {user_id}, skipping new launch.")
+        if state.memory_lock.locked():
+            logger.info(f"Memory lock already held for user {user_id}, skipping extractor launch.")
+            return
+
+        async with state.memory_lock:
+            from app.services.memory_extractor import extract_and_trim
+            await extract_and_trim(user_id)
+
+    async def run_compressor(self, user_id: int):
+        """Run memory compression in background. At most 1 per user."""
+        state = await self.get_state(user_id)
+        if state.memory_lock.locked():
+            logger.info(f"Memory lock already held for user {user_id}, skipping compressor launch.")
             return
             
-        async with state.compressor_lock:
+        async with state.memory_lock:
             from app.services.memory_compressor import compress_user_memory
             await compress_user_memory(user_id)
 

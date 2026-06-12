@@ -32,7 +32,7 @@ async def compress_user_memory(user_id: int):
             
             # 3. Call LLM compression service
             llm = LLMService()
-            compression_res = await llm.compress_memory(system_prompt, memory_text)
+            compression_res = await llm.compress_memory(user_id, system_prompt, memory_text)
             
             # 4. Save/replace in DB atomically
             await models.replace_user_memory(db, user_id, compression_res)
