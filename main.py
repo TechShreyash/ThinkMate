@@ -3,7 +3,7 @@ from aiogram import Bot, Dispatcher
 from loguru import logger
 from app.config import config
 from app.handlers import main_router
-from app.handlers.middlewares import DbSessionMiddleware, AutoTypingMiddleware
+from app.handlers.middlewares import DbSessionMiddleware, AutoTypingMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db
 
 async def main():
@@ -14,6 +14,8 @@ async def main():
     dp = Dispatcher()
 
     # Register Global Middlewares
+    # ThrottlingMiddleware throttles spammers before any database connection is opened
+    dp.update.outer_middleware(ThrottlingMiddleware())
     # DbSessionMiddleware must be registered on the outer update layer
     dp.update.outer_middleware(DbSessionMiddleware())
     # AutoTypingMiddleware is registered as an inner middleware on messages

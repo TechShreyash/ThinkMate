@@ -6,7 +6,7 @@ This document covers the core memory architecture of ThinkMate, detailing the sl
 
 ## 🛠️ Chat Manager Orchestration (`chat_manager.py`)
 
-The orchestration process in [chat_manager.py](file:///d:/ThinkMate/app/services/chat_manager.py) coordinates message updates, triggers memory extraction, compiles prompts, and runs chat generation:
+The orchestration process in [chat_manager.py](../../app/services/chat_manager.py) coordinates message updates, triggers memory extraction, compiles prompts, and runs chat generation:
 
 ```python
 # app/services/chat_manager.py
@@ -19,7 +19,6 @@ from app.database import models
 from app.services.llm_service import LLMService
 from app.services.memory_loader import build_memory_block
 from app.services.memory_extractor import extract_and_trim
-from app.services.memory_compressor import compress_user_memory
 
 llm = LLMService()
 
@@ -28,9 +27,9 @@ async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
     await models.add_message_to_buffer(db, user_id, "user", user_text)
     
     # 2. Check for buffer overflow
-    buffer_count = await models.get_buffer_count(db, user_id)
-    if buffer_count >= config.CHAT_BUFFER_MAX:
-        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_count} messages). Processing memory extraction...")
+    buffer_chars = await models.get_buffer_char_count(db, user_id)
+    if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
+        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_chars} characters). Processing memory extraction...")
         # Run extraction and trim oldest messages
         await extract_and_trim(db, user_id)
 
@@ -58,10 +57,11 @@ async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
     # 8. Append bot response back to buffer
     await models.add_message_to_buffer(db, user_id, "assistant", reply_text)
     
-    # 9. Trigger non-blocking memory compression in background if threshold exceeded
+    # 9. Trigger non-blocking memory compression in the background if threshold exceeded
     if needs_compression:
+        from app.services.user_task_manager import user_task_manager
         logger.info(f"Memory size exceeded limit. Launching background compression task for user {user_id}...")
-        asyncio.create_task(compress_user_memory(user_id))
+        asyncio.create_task(user_task_manager.run_compressor(user_id))
         
     return reply_text
 ```
@@ -70,7 +70,7 @@ async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
 
 ## 🔍 Memory Extraction Logic (`memory_extractor.py`)
 
-The memory extraction pipeline in [memory_extractor.py](file:///d:/ThinkMate/app/services/memory_extractor.py) extracts key details from conversation histories and saves them to the database. 
+The memory extraction pipeline in [memory_extractor.py](../../app/services/memory_extractor.py) extracts key details from conversation histories and saves them to the database. 
 
 Rather than parsing raw text, the system uses the custom Pydantic-based `llm_service.extract_memory()` wrapper to load updates:
 
@@ -87,9 +87,14 @@ from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 llm = LLMService()
 
 async def extract_and_trim(db: Connection, user_id: int):
-    # 1. Fetch the oldest CHAT_BUFFER_TRIM messages
-    trim_size = config.CHAT_BUFFER_TRIM
     buffer_messages = await models.get_chat_buffer(db, user_id)
+    # We keep the latest CHAT_BUFFER_TRIM messages as active context
+    keep_count = config.CHAT_BUFFER_TRIM
+    
+    if len(buffer_messages) <= keep_count:
+        return
+        
+    trim_size = len(buffer_messages) - keep_count
     extraction_segment = buffer_messages[:trim_size]
     
     # Format segment as a readable conversation text block
@@ -167,9 +172,9 @@ async def compress_user_memory(user_id: int):
 ## ⚖️ Cost/Context Trade-offs
 
 You can configure the sliding window behaviour via the `.env` settings:
-*   **Larger Buffer Max (`CHAT_BUFFER_MAX = 40`)**:
-    *   *Pros*: The bot keeps longer conversational context in memory, resulting in more natural and relevant replies.
-    *   *Cons*: Increases API token costs and LLM response latency.
-*   **Smaller Buffer Max (`CHAT_BUFFER_MAX = 10`)**:
+*   **Larger Buffer Max Characters (`CHAT_BUFFER_MAX_CHARS = 10000`)**:
+    *   *Pros*: The bot keeps longer conversational context (more messages) in active history before triggering memory extraction, resulting in more natural and contextually deep conversations.
+    *   *Cons*: Increases API token costs and LLM response latency since prompts are larger.
+*   **Smaller Buffer Max Characters (`CHAT_BUFFER_MAX_CHARS = 4000`)**:
     *   *Pros*: Reduces API token costs and ensures fast response times.
-    *   *Cons*: The bot runs memory extraction more frequently, which can increase overall API usage costs and result in choppy transitions as context is summarized.
+    *   *Cons*: The bot runs memory extraction and trims history more frequently, which can increase overall extraction API call volume.

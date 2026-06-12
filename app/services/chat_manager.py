@@ -16,9 +16,9 @@ async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
     await models.add_message_to_buffer(db, user_id, "user", user_text)
     
     # 2. Check for buffer overflow
-    buffer_count = await models.get_buffer_count(db, user_id)
-    if buffer_count >= config.CHAT_BUFFER_MAX:
-        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_count} messages). Processing memory extraction...")
+    buffer_chars = await models.get_buffer_char_count(db, user_id)
+    if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
+        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_chars} characters). Processing memory extraction...")
         # Run extraction and trim oldest messages
         await extract_and_trim(db, user_id)
 
@@ -48,7 +48,8 @@ async def handle_message(db: Connection, user_id: int, user_text: str) -> str:
     
     # 9. Trigger non-blocking memory compression in the background if threshold exceeded
     if needs_compression:
+        from app.services.user_task_manager import user_task_manager
         logger.info(f"Memory size exceeded limit. Launching background compression task for user {user_id}...")
-        asyncio.create_task(compress_user_memory(user_id))
+        asyncio.create_task(user_task_manager.run_compressor(user_id))
         
     return reply_text

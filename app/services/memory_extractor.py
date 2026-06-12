@@ -9,16 +9,14 @@ from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 llm = LLMService()
 
 async def extract_and_trim(db: Connection, user_id: int):
-    # 1. Fetch the oldest CHAT_BUFFER_TRIM messages
-    trim_size = config.CHAT_BUFFER_TRIM
     buffer_messages = await models.get_chat_buffer(db, user_id)
-    if len(buffer_messages) < trim_size:
-        # Avoid trimming if buffer doesn't have enough messages yet
-        trim_size = len(buffer_messages)
-        
-    if trim_size == 0:
+    # We keep the latest CHAT_BUFFER_TRIM messages as active context
+    keep_count = config.CHAT_BUFFER_TRIM
+    
+    if len(buffer_messages) <= keep_count:
         return
         
+    trim_size = len(buffer_messages) - keep_count
     extraction_segment = buffer_messages[:trim_size]
     
     # Format segment as a readable conversation text block

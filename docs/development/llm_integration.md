@@ -97,7 +97,7 @@ class MemoryCompression(BaseModel):
 
 ## 🔌 Robust LLM Service Client Wrapper (`llm_service.py`)
 
-Here is the implementation of [llm_service.py](file:///d:/ThinkMate/app/services/llm_service.py) that handles structured parsing with local fallback functionality:
+Here is the implementation of [llm_service.py](../../app/services/llm_service.py) that handles structured parsing with local fallback functionality:
 
 ```python
 # app/services/llm_service.py

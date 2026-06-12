@@ -15,7 +15,8 @@ Unlike synchronous bot frameworks, `aiogram 3.x` is built on top of `asyncio`. T
 
 ## 🧱 Setup & Dependency Injection Middlewares
 
-We will implement two middlewares:
+We will implement three middlewares:
+- `ThrottlingMiddleware`: Rate-limits rapid message floods at memory-level, blocking updates before database connection allocation or handler execution.
 - `DbSessionMiddleware`: Opens a transactional SQLite connection, injects it into the handler, and safely closes it after execution.
 - `AutoTypingMiddleware`: Checks if the handler is marked with a `long_operation` flag and automatically displays "typing..." in the chat window.
 
@@ -93,7 +94,7 @@ from aiogram import Bot, Dispatcher
 from loguru import logger
 from app.config import config
 from app.handlers import main_router
-from app.handlers.middlewares import DbSessionMiddleware, AutoTypingMiddleware
+from app.handlers.middlewares import DbSessionMiddleware, AutoTypingMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db
 
 async def main():
@@ -104,6 +105,8 @@ async def main():
     dp = Dispatcher()
 
     # Register Global Middlewares
+    # ThrottlingMiddleware throttles spammers before any database connection is opened
+    dp.update.outer_middleware(ThrottlingMiddleware())
     # DbSessionMiddleware must be registered on the outer update layer
     dp.update.outer_middleware(DbSessionMiddleware())
     # AutoTypingMiddleware is registered as an inner middleware on messages
@@ -173,7 +176,7 @@ async def cmd_profile(message: Message, db: Connection):
 
 ### 2. Conversational Message Router (`app/handlers/messages.py`)
 
-Using the `long_operation` flag in routing enables the auto-typing middleware automatically:
+Messages are enqueued using the `user_task_manager` to support message batching, queue serialization, and automated typing action management:
 
 ```python
 # app/handlers/messages.py
@@ -181,12 +184,11 @@ from aiogram import Router, F
 from aiogram.types import Message
 from aiosqlite import Connection
 from app.config import config
-from app.services.chat_manager import handle_message
+from app.services.user_task_manager import user_task_manager
 
 router = Router(name="messages")
 
-# Set the flags dictionary containing "long_operation"
-@router.message(F.text, flags={"long_operation": True})
+@router.message(F.text)
 async def handle_user_message(message: Message, db: Connection):
     user_id = message.from_user.id
     user_text = message.text
@@ -198,9 +200,8 @@ async def handle_user_message(message: Message, db: Connection):
         )
         return  # Complete ignore (no buffer, no LLM call)
 
-    # Run core orchestration via injected DB session
-    reply_text = await handle_message(db, user_id, user_text)
-    await message.answer(reply_text)
+    # Enqueue conversational message for batching/processing
+    await user_task_manager.enqueue_message(message.bot, user_id, user_text, message)
 ```
 
 ---

@@ -43,37 +43,42 @@ The LLM receives exactly **three components** to generate its responses:
 
 ## 🔄 The Sliding Window Memory Engine
 
-The bot maintains a sliding window buffer of the latest messages. Once this buffer exceeds a configured threshold (e.g., 20 messages), an asynchronous memory extraction process is triggered.
+The bot maintains a sliding window buffer of the latest messages. Once the buffer's total character count exceeds a configured threshold (`CHAT_BUFFER_MAX_CHARS`), an asynchronous memory extraction process is triggered. Incoming messages are batched using `UserTaskManager` to handle rapid-fire messages and avoid redundant LLM invocations.
 
 ```mermaid
 graph TD
-    A[Incoming Message] --> B[Insert Message to chat_buffer Table]
-    B --> C{Buffer Size >= CHAT_BUFFER_MAX?}
-    C -->|No| D[Load persona.md & Compile Memory Profile]
-    C -->|Yes| E[Trigger Memory Extraction Job]
+    A[Incoming Message] --> B[Enqueue to UserTaskManager]
+    B --> C[Wait for MESSAGE_BATCH_DELAY_SECS Inactivity]
+    C --> D[Acquire Chat Lock & Combine Batch]
+    D --> E[Insert Combined Message to chat_buffer Table]
+    E --> F{Buffer Chars >= CHAT_BUFFER_MAX_CHARS?}
+    F -->|No| G[Load persona.md & Compile Memory Profile]
+    F -->|Yes| H[Trigger Memory Extraction Job]
     
     subgraph Memory Extraction Pipeline
-        E --> E1[Fetch oldest CHAT_BUFFER_TRIM messages]
-        E1 --> E2[Fetch current Memory Profile]
-        E2 --> E3[Send to LLM with Extraction Prompt]
-        E3 --> E4[LLM outputs structured JSON adjustments]
-        E4 --> E5[Apply JSON changes to database tables]
-        E5 --> E6[Delete oldest CHAT_BUFFER_TRIM messages from buffer]
+        H --> H1[Fetch all buffer messages except latest CHAT_BUFFER_TRIM]
+        H1 --> H2[Fetch current Memory Profile]
+        H2 --> H3[Send to LLM with Extraction Prompt]
+        H3 --> H4[LLM outputs structured JSON adjustments]
+        H4 --> H5[Apply JSON changes to database tables]
+        H5 --> H6[Delete processed segment from buffer]
     end
     
-    E6 --> D
-    D --> F[Send Persona + Memory + Active History to LLM]
-    F --> G[Generate Response]
-    G --> H[Insert Bot Response into chat_buffer Table]
-    H --> I[Send Response to User via Telegram]
+    H6 --> G
+    G --> I[Send Persona + Memory + Active History to LLM]
+    I --> J[Generate Response & Send to User]
+    J --> K[Insert Bot Response into chat_buffer Table]
+    K --> L[Release Chat Lock]
 ```
 
 ### Step-by-Step Processing Flow
 
-1.  **Buffer Append**: Every message (both incoming User messages and outgoing Assistant responses) is immediately written to the database buffer.
-2.  **Threshold Check**: The system counts the number of messages in the buffer for that user.
-3.  **Extraction Trigger**: If the count matches or exceeds `CHAT_BUFFER_MAX` (default 20):
-    *   The oldest `CHAT_BUFFER_TRIM` (default 10) messages are read.
+1.  **Enqueue & Coalescing**: When the user sends a message, it is enqueued. A batching timer (`MESSAGE_BATCH_DELAY_SECS`, default 1.5 seconds) runs. If the user sends another message before it expires, the timer resets. To prevent infinite postponement from spammers, a hard deadline (`MAX_BATCH_DELAY_SECS`, default 5.0 seconds) is enforced from the first message in the batch. Once this deadline is crossed, the batch is immediately forced to process. The bot sends a Telegram "typing..." action during this delay and the subsequent generation.
+2.  **Lock Acquisition**: Once the batch delay expires or the deadline is hit, the system acquires the user's `chat_lock`. This serialized lock ensures that only one response pipeline runs at a time per user. Any messages sent by the user during LLM processing accumulate in the queue and are processed in the next batch.
+3.  **Buffer Append**: The combined messages are written to the database buffer.
+4.  **Threshold Check**: The system computes the total character length of the messages in `chat_buffer` for that user.
+5.  **Extraction Trigger**: If the character count matches or exceeds `CHAT_BUFFER_MAX_CHARS` (default 10,000 characters):
+    *   All messages in the buffer **except** the latest `CHAT_BUFFER_TRIM` (default 10) messages are read (these constitute the older "queued" messages).
     *   The current facts, events, and profile summary are retrieved.
     *   The system calls the extraction model (`LLM_EXTRACTION_MODEL`) requesting updates to the user profile.
     *   The returned JSON contains lists of:
@@ -82,14 +87,13 @@ graph TD
         *   `events`: Important occurrences to append to the event timeline.
         *   `emotional_state`: Shifts in user mood, intensity, and triggers.
     *   The changes are transactionally written to the database.
-    *   The oldest `CHAT_BUFFER_TRIM` messages are removed from `chat_buffer`.
-4.  **Memory Compression (Background Task)**: When compiling the memory profile, if its length exceeds `USER_MEMORY_BUDGET_CHARS` (default 10,000 characters), a non-blocking `compress_user_memory()` background task is spawned. This task sends all 4 memory components to the extraction LLM to compress them to ≤ 80% of the budget (8,000 characters), then replaces them atomically in the database without delaying the user's chat response.
-5.  **Prompt Assembly**: The chat manager loads the personality from `persona.md` and reads the memory blocks to build a comprehensive system prompt.
-6.  **Input/Output Guards**:
+    *   The processed segment (older messages) is deleted from `chat_buffer`.
+6.  **Memory Compression (Background Task)**: When compiling the memory profile, if its length exceeds `USER_MEMORY_BUDGET_CHARS` (default 10,000 characters), a non-blocking background task is spawned. The `UserTaskManager` ensures only **one** memory compressor lock (`compressor_lock`) is acquired per user; concurrent compression tasks are skipped. This task sends all 4 memory components to the LLM to compress them to ≤ 80% of the budget, then replaces them atomically in the database.
+7.  **Prompt Assembly**: The chat manager loads the personality from `persona.md` and reads the memory blocks to build a comprehensive system prompt.
+8.  **Input/Output Guards**:
     *   *Input Guard*: User messages longer than `MAX_INPUT_CHARS` (default 1,000 characters) are ignored immediately to prevent essay/code abuse.
     *   *Output Guard*: Bot responses are capped by derived `max_tokens` (based on `MAX_RESPONSE_CHARS`, default 1,000 characters) to ensure concise conversation.
-7.  **Generation**: The main chatbot model (`LLM_MODEL`) generates a response.
-8.  **Response Handling**: The response is saved to the buffer and sent back to Telegram.
+9.  **Generation & Send**: The main chatbot model (`LLM_MODEL`) generates a response, which is saved to the buffer, sent back to Telegram, and the `chat_lock` is released.
 
 ---
 
@@ -131,11 +135,11 @@ graph TB
 Built with `aiogram 3.x`, this layer registers routers and filters. It extracts Telegram message information, ensures async operation, and manages bot-side interactions (like displaying the typing state to users while waiting for the LLM).
 
 ### 2. Business Logic & Services (`app/services/`)
-*   **[chat_manager.py](file:///d:/ThinkMate/app/services/chat_manager.py)**: The central transaction pipeline orchestrating the buffer checks, memory compilation, calling the LLM wrapper, and updating history.
-*   **[memory_loader.py](file:///d:/ThinkMate/app/services/memory_loader.py)**: Compiles raw database tables (Facts, Events, Moods) into a human-readable text block formatted specifically for LLM context ingestion.
-*   **[memory_extractor.py](file:///d:/ThinkMate/app/services/memory_extractor.py)**: Handles the structured parsing of past conversations, transforming text history into database modifications.
-*   **[memory_compressor.py](file:///d:/ThinkMate/app/services/memory_compressor.py)**: Runs non-blocking background compression. When the total characters of compiled user memories exceed `USER_MEMORY_BUDGET_CHARS`, it triggers an LLM compression job to condense the user details, facts, and events into 80% of the budget.
-*   **[llm_service.py](file:///d:/ThinkMate/app/services/llm_service.py)**: Low-level API connector. Handles retries, connection configurations, base URLs, API keys, and responses in JSON format.
+*   **[chat_manager.py](../app/services/chat_manager.py)**: The central transaction pipeline orchestrating the buffer checks, memory compilation, calling the LLM wrapper, and updating history.
+*   **[memory_loader.py](../app/services/memory_loader.py)**: Compiles raw database tables (Facts, Events, Moods) into a human-readable text block formatted specifically for LLM context ingestion.
+*   **[memory_extractor.py](../app/services/memory_extractor.py)**: Handles the structured parsing of past conversations, transforming text history into database modifications.
+*   **[memory_compressor.py](../app/services/memory_compressor.py)**: Runs non-blocking background compression. When the total characters of compiled user memories exceed `USER_MEMORY_BUDGET_CHARS`, it triggers an LLM compression job to condense the user details, facts, and events into 80% of the budget.
+*   **[llm_service.py](../app/services/llm_service.py)**: Low-level API connector. Handles retries, connection configurations, base URLs, API keys, and responses in JSON format.
 
 ### 3. Database Layer (`app/database/`)
 Powered by `aiosqlite`. It manages connections, initializes database tables, and executes transactional updates. It ensures database locks are avoided by configuring SQLite to run in **WAL (Write-Ahead Logging)** mode.

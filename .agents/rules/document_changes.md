@@ -5,7 +5,7 @@ description: Instructs the Antigravity agent to track all codebase changes, main
 
 # Documentation Tracker Rule
 
-Whenever any file in this repository is modified, created, or deleted, you MUST update the corresponding documentation files in the [docs](file:///d:/ThinkMate/docs) directory or the root [README.md](file:///d:/ThinkMate/README.md) to reflect these changes accurately.
+Whenever any file in this repository is modified, created, or deleted, you MUST update the corresponding documentation files in the [docs](../../docs) directory or the root [README.md](../../README.md) to reflect these changes accurately.
 
 ## Core Directives
 
@@ -18,21 +18,21 @@ Whenever any file in this repository is modified, created, or deleted, you MUST 
 
 3. **Proper Linking & Navigation**:
    - Provide proper navigation headers or indexes in all guides (e.g., Table of Contents, Back to Top, Next/Previous section links).
-   - Ensure thorough cross-linking between files. If a document references a database model, link directly to the [database.md](file:///d:/ThinkMate/docs/development/database.md) file.
-   - Use correct file paths with the `file://` scheme when referencing files (e.g., `[README.md](file:///d:/ThinkMate/README.md)`).
+   - Ensure thorough cross-linking between files. If a document references a database model, link directly to the [database.md](../../docs/development/database.md) file.
+   - Use correct file paths with the `file://` scheme when referencing files (e.g., `[README.md](../../README.md)`).
 
 4. **Update root README.md**:
-   - When introducing high-level changes, features, new requirements, or config structures, update the root [README.md](file:///d:/ThinkMate/README.md) to keep it updated as the primary entry point for the project.
+   - When introducing high-level changes, features, new requirements, or config structures, update the root [README.md](../../README.md) to keep it updated as the primary entry point for the project.
 
 5. **Documentation Alignment Mapping**:
-   - **Root Readme & Entry**: If changing features, project structure, or high-level details, update [README.md](file:///d:/ThinkMate/README.md).
-   - **Architecture & System Flows**: If changing the sliding window memory logic, data flow, or system topology, update [architecture.md](file:///d:/ThinkMate/docs/architecture.md).
-   - **Environment, Setup & Config**: If adding/editing environment variables or installation steps, update [setup_guide.md](file:///d:/ThinkMate/docs/setup_guide.md) and [.env.example](file:///d:/ThinkMate/.env.example).
-   - **Project Checklist / Milestones**: If implementing a new feature or completing a plan item, mark off the task as done in [project_plan.md](file:///d:/ThinkMate/docs/project_plan.md).
-   - **Telegram Handlers**: If modifying bots, routers, filters, or middleware, update [docs/development/telegram_bot.md](file:///d:/ThinkMate/docs/development/telegram_bot.md).
-   - **Database Schema & Async Queries**: If adding tables, indexes, or CRUD logic, update [docs/development/database.md](file:///d:/ThinkMate/docs/development/database.md).
-   - **LLM Integrations & System Prompts**: If changing templates, JSON validation schemas, or the OpenAI client wrapper, update [docs/development/llm_integration.md](file:///d:/ThinkMate/docs/development/llm_integration.md).
-   - **Memory Engine Mechanics**: If updating consolidation prompts, facts extraction, or sliding window buffers, update [docs/development/memory_engine.md](file:///d:/ThinkMate/docs/development/memory_engine.md).
+   - **Root Readme & Entry**: If changing features, project structure, or high-level details, update [README.md](../../README.md).
+   - **Architecture & System Flows**: If changing the sliding window memory logic, data flow, or system topology, update [architecture.md](../../docs/architecture.md).
+   - **Environment, Setup & Config**: If adding/editing environment variables or installation steps, update [setup_guide.md](../../docs/setup_guide.md) and [.env.example](../../.env.example).
+   - **Project Checklist / Milestones**: If implementing a new feature or completing a plan item, mark off the task as done in [project_plan.md](../../docs/project_plan.md).
+   - **Telegram Handlers**: If modifying bots, routers, filters, or middleware, update [docs/development/telegram_bot.md](../../docs/development/telegram_bot.md).
+   - **Database Schema & Async Queries**: If adding tables, indexes, or CRUD logic, update [docs/development/database.md](../../docs/development/database.md).
+   - **LLM Integrations & System Prompts**: If changing templates, JSON validation schemas, or the OpenAI client wrapper, update [docs/development/llm_integration.md](../../docs/development/llm_integration.md).
+   - **Memory Engine Mechanics**: If updating consolidation prompts, facts extraction, or sliding window buffers, update [docs/development/memory_engine.md](../../docs/development/memory_engine.md).
 
 6. **Style and Detail**:
    - Document technical choices, class/method names, and API payloads clearly.

@@ -12,7 +12,7 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 *   **Character-Budget Memory Profile**: Consolidates user profiles, facts, events, and moods into a unified text block. If the text block size exceeds `USER_MEMORY_BUDGET_CHARS` (default 10,000 chars), a non-blocking background compression task is triggered to reduce memory usage to ≤ 80% of the budget.
 *   **Input/Output Guards**: Early-return input guards ignore overly long user messages (preventing essays/code abuse), and output guards cap LLM response lengths at API level.
 *   **Custom LLM Endpoint Compatibility**: Works with standard OpenAI models or any local/self-hosted LLM engines via OpenAI-compatible APIs (LM Studio, Ollama, vLLM, OpenRouter).
-*   **Editable Persona**: Change the bot's tone, rules, and traits dynamically by editing the [persona.md](file:///d:/ThinkMate/persona.md) markdown file—no service restart required.
+*   **Editable Persona**: Change the bot's tone, rules, and traits dynamically by editing the [persona.md](persona.md) markdown file—no service restart required.
 *   **Data Isolation**: Built-in support for multi-user chat with strict per-user database isolation.
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `aiosqlite` for high performance and standard async workflow.
 
@@ -55,7 +55,8 @@ ThinkMate/
 │   │   ├── chat_manager.py         # Response flow orchestrator
 │   │   ├── memory_extractor.py     # Memory extraction LLM interface
 │   │   ├── memory_loader.py        # System prompt memory compiler
-│   │   └── memory_compressor.py    # LLM-powered memory compressor
+│   │   ├── memory_compressor.py    # LLM-powered memory compressor
+│   │   └── user_task_manager.py    # Concurrency, batching, queues & typing indicators
 │   │
 │   ├── database/                   # Database interaction layers
 │   │   ├── __init__.py
@@ -82,14 +83,14 @@ ThinkMate/
 
 To implement or contribute to this project, please consult the specialized guides in order:
 
-1.  **[Architecture & Design](file:///d:/ThinkMate/docs/architecture.md)**: Details how the sliding window functions and how components interact.
-2.  **[Setup Guide](file:///d:/ThinkMate/docs/setup_guide.md)**: Configures Telegram Bot tokens, local/remote LLM endpoints, and databases.
-3.  **[Step-by-Step Project Plan](file:///d:/ThinkMate/docs/project_plan.md)**: A complete, checkbox-driven roadmap from start to deployment.
-4.  **[Development Guides](file:///d:/ThinkMate/docs/development/telegram_bot.md)**:
-    *   [Telegram Bot (`aiogram 3.x`) Integration](file:///d:/ThinkMate/docs/development/telegram_bot.md)
-    *   [Async Relational Database (`aiosqlite`) Design](file:///d:/ThinkMate/docs/development/database.md)
-    *   [LLM Client & Prompt Engineering](file:///d:/ThinkMate/docs/development/llm_integration.md)
-    *   [Sliding Window & Memory Engine Mechanics](file:///d:/ThinkMate/docs/development/memory_engine.md)
+1.  **[Architecture & Design](docs/architecture.md)**: Details how the sliding window functions and how components interact.
+2.  **[Setup Guide](docs/setup_guide.md)**: Configures Telegram Bot tokens, local/remote LLM endpoints, and databases.
+3.  **[Step-by-Step Project Plan](docs/project_plan.md)**: A complete, checkbox-driven roadmap from start to deployment.
+4.  **[Development Guides](docs/development/telegram_bot.md)**:
+    *   [Telegram Bot (`aiogram 3.x`) Integration](docs/development/telegram_bot.md)
+    *   [Async Relational Database (`aiosqlite`) Design](docs/development/database.md)
+    *   [LLM Client & Prompt Engineering](docs/development/llm_integration.md)
+    *   [Sliding Window & Memory Engine Mechanics](docs/development/memory_engine.md)
 
 ---
 

@@ -38,6 +38,14 @@ async def get_buffer_count(db: Connection, user_id: int) -> int:
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
 
+async def get_buffer_char_count(db: Connection, user_id: int) -> int:
+    async with db.execute(
+        "SELECT SUM(LENGTH(content)) as total_chars FROM chat_buffer WHERE user_id = ?",
+        (user_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row["total_chars"] if row and row["total_chars"] is not None else 0
+
 async def delete_oldest_buffer_messages(db: Connection, user_id: int, count: int):
     await db.execute(
         """

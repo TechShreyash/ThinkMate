@@ -128,10 +128,12 @@ Open your `.env` file and review the following configurations:
 | `LLM_API_KEY` | String | `none` | API authentication header. |
 | `LLM_MODEL` | String | `gpt-4o` | Identifier of the LLM for main conversational interactions. |
 | `LLM_EXTRACTION_MODEL` | String | `gpt-4o-mini` | Identifier of the LLM for sliding-window memory extraction. |
-| `CHAT_BUFFER_MAX` | Integer | `20` | Max number of messages allowed in the buffer before extraction triggers. |
-| `CHAT_BUFFER_TRIM` | Integer | `10` | The count of oldest messages trimmed from active buffer and summarized. |
+| `CHAT_BUFFER_MAX_CHARS` | Integer | `10000` | Max character count allowed in the buffer before extraction triggers. |
+| `CHAT_BUFFER_TRIM` | Integer | `10` | The count of oldest messages kept/trimmed from active buffer and summarized. |
 | `USER_MEMORY_BUDGET_CHARS` | Integer | `10000` | Character-budget limit for the compiled memory profile. Exceeding this triggers compression. |
 | `CHARS_PER_TOKEN` | Integer | `4` | Character-to-token ratio for deriving token limits. |
+| `MESSAGE_BATCH_DELAY_SECS` | Float | `1.5` | Delay in seconds the bot waits after receiving a message to batch rapid messages. |
+| `MAX_BATCH_DELAY_SECS` | Float | `5.0` | Max seconds from first message in a batch before processing is forced (prevents infinite postponement). |
 | `MAX_INPUT_CHARS` | Integer | `1000` | Max message length in characters. Messages exceeding this are ignored. |
 | `MAX_RESPONSE_CHARS` | Integer | `1000` | Max response length in characters. Used to cap model generations. |
 | `PERSONA_FILE` | Path | `persona.md` | Location of the Markdown configuration defining the bot's tone. |
