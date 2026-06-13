@@ -93,12 +93,12 @@ graph TD
     - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions to conversational, length-guard, or empty-sender behavior)
     - _Requirements: 3.1, 3.3, 3.4_
 
-- [~] 4. Correct documentation
+- [x] 4. Correct documentation
   - Update `docs/development/group_chat.md` "Behavior by chat type" table so the Private (DM) row clearly states bot commands are excluded / not treated as conversation (not replied to), rather than implying every message is answered
   - Keep the change minimal and consistent with the rest of the doc
   - _Requirements: 2.3_
 
-- [~] 5. Checkpoint - Ensure all tests pass
+- [x] 5. Checkpoint - Ensure all tests pass
   - Run the full test suite (`uv run pytest` or the project's configured command) and ensure all tests pass
   - Confirm the exploration test passes and preservation tests show no regressions
   - Ask the user if any questions arise

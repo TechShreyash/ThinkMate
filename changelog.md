@@ -11,6 +11,7 @@ All notable changes to the ThinkMate project will be documented in this file.
 
 ### Fixed
 - **DM catch-all no longer treats bot commands as conversation** (`app/handlers/messages.py`): added a command guard to `handle_user_message`. A message is treated as a command when its text starts with `/` OR a `bot_command` entity sits at offset 0, and is then ignored (no LLM reply, no enqueue to the memory pipeline). Unregistered slash commands like `/foo` previously fell through the `@router.message(F.text)` catch-all and were answered + saved to memory. The empty-sender guard, length guard, and conversational enqueue path are unchanged; text like `2/3` is still treated as conversation. Verified by 18 command-skip + 21 preservation tests (39 passing).
+- **Docs corrected** (`docs/development/group_chat.md`): the "Behavior by chat type" Private (DM) row now states bot/slash commands are excluded from conversation, with a clarifying note that registered commands are handled by their handlers and unregistered slash commands are ignored (no reply, no enqueue). Full suite: 75 passing.
 
 ## [2026-06-14] - Documentation Overhaul: Unified Build Path, Performance/Scaling, Group-Chat Integration
 

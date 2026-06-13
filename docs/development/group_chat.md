@@ -11,9 +11,15 @@ spammy or abusing the LLM API, and how per-user affinity tunes its chattiness.
 
 | Chat type | Behavior |
 |---|---|
-| **Private (DM)** | Reply to every message (must not reply to bot commands). |
+| **Private (DM)** | Reply to every *conversational* message. **Bot (slash) commands are excluded** — they are not treated as conversation and are not replied to. |
 | **Group / supergroup** | **Always** reply when *addressed* (bot @mentioned, bot's name used, or a reply to the bot's message). Otherwise run the **ambient gate** — sometimes chime in on the wider conversation (birthdays, jokes, questions…), modulated by affinity. |
 | **Channel** | Ignored. |
+
+> **Bot commands in DMs are never treated as conversation.** Registered commands
+> (`/start`, `/help`, `/profile`, `/reset`) are handled by their dedicated command
+> handlers. Any unregistered slash command (e.g. `/foo`) falls through to the catch-all
+> text handler, which ignores it — no LLM reply and no memory enqueue. Normal
+> conversational messages are still replied to as before.
 
 ## Data model
 
