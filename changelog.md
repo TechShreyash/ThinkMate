@@ -2,6 +2,11 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 9 Group Chat: Spec (Requirements + Design + Tasks)
+
+### Added
+- **Group-chat feature spec** under `.kiro/specs/group-chat/`: `requirements.md` (EARS criteria across DM preservation, group routing/identity, ambient gate, affinity, multi-party extraction, commands, config/observability), `design.md` (additive-plumbing architecture, `chat_members` data model, augmented buffer messages, the no-LLM ambient-gate funnel, 8 correctness properties, testing strategy), and `tasks.md` (DAG plan, 8 waves). Grounded in `docs/development/group_chat.md` and the actual current code. Top constraint: DMs remain byte-for-byte identical (`chat_id == user_id`).
+
 ## [2026-06-14] - DM Skip Bot Commands Bugfix: Spec + Exploratory/Preservation Tests
 
 ### Added
