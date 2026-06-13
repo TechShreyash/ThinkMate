@@ -1,6 +1,15 @@
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
+# --- CONVERSATIONAL OUTPUT SCHEMA ---
+class ReplyBundle(BaseModel):
+    """Combined output of a single chat call: the reply plus an optional emoji reaction."""
+    reply: str = Field(description="The natural, conversational reply text to send to the user.")
+    reaction: Optional[str] = Field(
+        None,
+        description="A single Telegram emoji reaction for the user's message, or null if none fits.",
+    )
+
 # --- FACT SCHEMAS ---
 class FactExtract(BaseModel):
     category: Literal["personal", "work", "preference", "health", "hobby", "relationship"] = Field(

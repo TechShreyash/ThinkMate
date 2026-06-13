@@ -1,12 +1,53 @@
 # LLM Integration, Schemas & Centralized Audit Trail
 
-This document describes how ThinkMate integrates with LLM backends, leveraging **Pydantic** structures for OpenAI Structured Outputs, and provides a detailed look at the centralized MongoDB-backed audit log architecture.
+This document describes how ThinkMate integrates with LLM backends, the structured-output
+strategy, the single combined reply call, retry behavior, and the MongoDB-backed audit log.
+
+All LLM access goes through one shared `LLMService` instance (`app/services/llm_service.py`,
+exported as `llm_service`) so the whole process reuses a single client and connection pool.
 
 ---
 
-## ⚡ Structured Outputs with Pydantic
+## ⚡ Structured Outputs: `json_object` by default
 
-Structured outputs guarantee that response payloads conform strictly to Pydantic schemas. By utilizing OpenAI's `beta.chat.completions.parse` method, ThinkMate guarantees that inputs and outputs validate automatically. For local/custom engines (e.g. Ollama, Llama.cpp, LM Studio) that do not support the native parse API, ThinkMate falls back to standard JSON mode and validates the output manually against the Pydantic schemas.
+Every structured call is validated against a **Pydantic** schema. The *mechanism* used to
+get JSON from the model is controlled by `LLM_STRUCTURED_MODE`:
+
+* **`json_object` (default)** — sends `response_format={"type": "json_object"}` with the
+  schema appended to the system prompt, then validates the result with Pydantic. This is
+  the only mode that works across Gemini proxies, Ollama, LM Studio, and OpenRouter.
+* **`native_parse`** — uses OpenAI's `beta.chat.completions.parse`. Use this **only** on a
+  genuine OpenAI endpoint.
+
+> ⚠️ **Why not native parse everywhere?** The OpenAI SDK injects `additionalProperties: false`
+> into the JSON schema. Google's Gemini backend rejects that field with a `400 INVALID_ARGUMENT`,
+> so native parsing fails on Gemini-compatible proxies. Defaulting to `json_object` avoids a
+> guaranteed failed round-trip on every extraction/compression. (Verified live, 2026-06-13 —
+> see `docs/development/hardening_plan.md`.)
+
+### Transient-error retries
+`_with_retries` wraps API calls and retries transient failures (timeout, connection, 429,
+5xx) with exponential backoff (`LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECS`). Client errors
+like `400` are not retried.
+
+---
+
+## 💬 Single combined reply call (`generate_reply_bundle`)
+
+The conversational reply and the optional Telegram emoji reaction are produced in **one**
+LLM call (not two). `generate_reply_bundle` requests a strict JSON object:
+
+```json
+{"reply": "<natural conversational message>", "reaction": "<single emoji or empty>"}
+```
+
+The `reply` and the `reaction` are **independent choices** the model makes in the same call:
+the `reply` is plain conversational text (emojis within it are fine, per the persona), while
+the `reaction` is a separate Telegram reaction applied to the *user's* message. The reaction is
+normalized against Telegram's accepted emoji set (`app/services/reactions.py`, tolerant of
+variation selectors like `❤️` → `❤`) and dropped if invalid or if `ENABLE_MESSAGE_REACTIONS=False`.
+If the model returns non-JSON, the raw text is used as the reply and no reaction is sent — the
+user always gets an answer.
 
 ---
 
@@ -93,42 +134,36 @@ class MemoryCompression(BaseModel):
 
 ## 🔎 Centralized Database Audit Trail (`llm_audit_log`)
 
-All three LLM calls (`chat_reply`, `memory_extraction`, and `memory_compression`) execute inside tracing blocks in `LLMService`. This guarantees a complete record of prompt inputs, assistant outputs, raw completions, structured parsed schemas, status strings, and execution errors.
+The three LLM call types — `chat_reply` (reply **and** reaction), `memory_extraction`, and
+`memory_compression` — are traced in `LLMService`, recording prompt inputs, outputs, parsed
+JSON, status, and error tracebacks.
 
-### Logging Mechanism inside `LLMService`
-The client executes database writes asynchronously on the `llm_audit_log` collection:
+Three properties keep this safe at scale:
+
+1. **Off the hot path.** `_fire_log` schedules the write as a background task, so a user's
+   reply is never delayed by an audit insert.
+2. **TTL-friendly timestamp.** `timestamp` is stored as a real `datetime` (not an ISO string)
+   so the TTL index in `init_db` (`AUDIT_LOG_RETENTION_DAYS`) actually expires old entries.
+3. **Bounded size.** Long strings (prompts, histories) are truncated via `_truncate` before
+   insertion, so a single document can't balloon.
 
 ```python
-async def _log_llm_call(
-    self,
-    user_id: int,
-    call_type: str,
-    inputs: dict,
-    outputs: dict | None = None,
-    status: str = "success",
-    error: str | None = None
-):
-    try:
-        db = get_db()
-        log_doc = {
-            "user_id": user_id,
-            "call_type": call_type,
-            "inputs": inputs,
-            "outputs": outputs or {"raw_text": None, "parsed_json": None},
-            "status": status,
-            "error": error,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-        await db["llm_audit_log"].insert_one(log_doc)
-    except Exception as e:
-        logger.error(f"Failed to log LLM call to database for user {user_id}: {e}")
+def _fire_log(self, *args, **kwargs):
+    """Schedule an audit write without blocking the caller (keeps it off the hot path)."""
+    task = asyncio.get_running_loop().create_task(self._log_llm_call(*args, **kwargs))
+    self._bg_tasks.add(task)
+    task.add_done_callback(self._bg_tasks.discard)
 ```
 
-Every response generation, extraction, and compression task invokes this tracer. For example, during generation:
-* **Success**: Records `status = "success"`, raw completion text, and `error = None`.
-* **Failure**: Catches exceptions, captures the complete traceback string, logs `status = "failed"` with the error, and re-raises the exception.
+* **Success**: `status = "success"`, raw completion text, parsed JSON, `error = None`.
+* **Failure**: captures the traceback, logs `status = "failed"`. Chat replies re-raise (the
+  batch processor sends a friendly fallback message); extraction/compression return an empty
+  model so a bad response never crashes a background task.
+
+> The emoji reaction is part of the `chat_reply` call — there is no separate reaction LLM call.
 
 ---
+
 
 ## ✍️ Prompt Engineering Templates (`app/prompts/`)
 

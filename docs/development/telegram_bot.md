@@ -1,91 +1,60 @@
 # Telegram Bot Integration Guide (aiogram 3.x)
 
-This document details the configuration and implementation guidelines for the Telegram interaction layer of ThinkMate, using the asynchronous framework **aiogram 3.x** and modern enterprise best practices (such as dependency injection and automatic ChatAction middleware).
+This document details the Telegram interaction layer of ThinkMate, built on the asynchronous
+framework **aiogram 3.x** with dependency injection and per-user batching.
 
 ---
 
 ## 🛠️ Modern aiogram 3.x Architecture
 
-Unlike synchronous bot frameworks, `aiogram 3.x` is built on top of `asyncio`. To write professional-grade bots, we avoid putting business logic, database setup, or typing actions directly inside handlers. Instead, we use:
-1.  **Outer Middlewares**: To handle system-wide tasks like logging, rate limiting, and initializing database connections.
-2.  **Context Dependency Injection**: Passing database connections and configurations directly to handlers via the middleware's `data` payload.
-3.  **Handler Flags**: Using metadata tags on handlers to dynamically adjust bot behaviors (like starting a typing indicator automatically).
+`aiogram 3.x` is built on `asyncio`. We keep business logic out of handlers and rely on:
+
+1.  **Outer Middlewares** for system-wide concerns — rate limiting and database-session injection.
+2.  **Context Dependency Injection** — the active MongoDB database (`db`) is passed to handlers via the middleware `data` payload.
+3.  **A dedicated task manager** (`UserTaskManager`) that batches messages, serializes per-user work, and drives the "typing…" indicator across both the batching delay and generation.
+
+> **Typing indicators are *not* a middleware.** An earlier design used an `AutoTypingMiddleware`
+> keyed on a `long_operation` flag, but it never fired (no handler set the flag) and typing is
+> better handled by `UserTaskManager`, whose typing loop spans the whole batch+generation window.
+> The middleware was removed.
 
 ---
 
-## 🧱 Setup & Dependency Injection Middlewares
+## 🧱 Middlewares (`app/handlers/middlewares.py`)
 
-We will implement three middlewares:
-- `ThrottlingMiddleware`: Rate-limits rapid message floods at memory-level, blocking updates before database connection allocation or handler execution.
-- `DbSessionMiddleware`: Opens a transactional SQLite connection, injects it into the handler, and safely closes it after execution.
-- `AutoTypingMiddleware`: Checks if the handler is marked with a `long_operation` flag and automatically displays "typing..." in the chat window.
+Two outer middlewares are registered on the update pipeline:
 
-### 1. Database Connection Injection Middleware
-
-Create a middleware in `app/handlers/middlewares.py` to auto-inject the database session:
+- **`ThrottlingMiddleware`** — a per-user sliding-window rate limiter, applied *before* any DB
+  session is opened so floods are dropped cheaply. Its in-memory map is pruned periodically so
+  it can't grow unbounded across many users.
+- **`DbSessionMiddleware`** — yields the shared async MongoDB database and injects it as `db`.
 
 ```python
 # app/handlers/middlewares.py
 from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
-from app.database.connection import get_db_connection
+from app.database.connection import db_session
+
 
 class DbSessionMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any]
+        data: Dict[str, Any],
     ) -> Any:
-        # Open an async connection from the connection pool
-        async with await get_db_connection() as db:
-            # Inject connection object into handler parameters
+        async with db_session() as db:
             data["db"] = db
-            # Execute handler pipeline (including other middlewares)
-            result = await handler(event, data)
-            # Connection is automatically closed by the context manager
-            return result
-```
-
----
-
-### 2. Auto-Typing Middleware via Handler Flags
-
-Typing indicators are essential to indicate processing. Rather than manually writing `ChatActionSender` contexts in every text handler, we use an inner middleware that detects custom flags:
-
-```python
-# app/handlers/middlewares.py (continued)
-from aiogram.types import Message
-from aiogram.utils.chat_action import ChatActionSender
-from aiogram.dispatcher.flags import get_flag
-
-class AutoTypingMiddleware(BaseMiddleware):
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: Dict[str, Any]
-    ) -> Any:
-        # Ensure the event is a message
-        if not isinstance(event, Message):
             return await handler(event, data)
-
-        # Check if the handler was flagged with "long_operation"
-        long_op = get_flag(data, "long_operation")
-        if long_op:
-            bot = data["bot"]
-            async with ChatActionSender.typing(bot=bot, chat_id=event.chat.id):
-                return await handler(event, data)
-        
-        return await handler(event, data)
 ```
+
+The `motor` client is a process-wide singleton with its own connection pool, so the "session"
+here is simply the shared database handle — there are no per-request connections to leak.
 
 ---
 
 ## 🔀 Registering Middlewares and Routers (`main.py`)
-
-Hook the middlewares into the dispatcher inside your main entry point:
 
 ```python
 # main.py
@@ -94,25 +63,21 @@ from aiogram import Bot, Dispatcher
 from loguru import logger
 from app.config import config
 from app.handlers import main_router
-from app.handlers.middlewares import DbSessionMiddleware, AutoTypingMiddleware, ThrottlingMiddleware
-from app.database.connection import init_db
+from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
+from app.database.connection import init_db, ping_db
+
 
 async def main():
-    logger.info("Initializing SQLite tables...")
-    await init_db()
+    logger.info("Verifying MongoDB connection...")
+    await ping_db()                      # fail fast if the database is unreachable
+    logger.info("Initializing MongoDB indexes...")
+    await init_db()                      # compound + audit TTL indexes
 
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
 
-    # Register Global Middlewares
-    # ThrottlingMiddleware throttles spammers before any database connection is opened
-    dp.update.outer_middleware(ThrottlingMiddleware())
-    # DbSessionMiddleware must be registered on the outer update layer
-    dp.update.outer_middleware(DbSessionMiddleware())
-    # AutoTypingMiddleware is registered as an inner middleware on messages
-    dp.message.middleware(AutoTypingMiddleware())
-
-    # Register main router containing all sub-routers
+    dp.update.outer_middleware(ThrottlingMiddleware())  # throttle before DB work
+    dp.update.outer_middleware(DbSessionMiddleware())   # then inject the db session
     dp.include_router(main_router)
 
     logger.info("Polling Telegram Bot...")
@@ -120,94 +85,99 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
 ---
 
-## ⚙️ Clean, Dependency-Injected Handlers
+## ⚙️ Dependency-Injected Handlers
 
-Since our database connection (`db`) is injected via the middleware, our handlers can access it directly as a parameter.
+Handlers receive the MongoDB database (`AsyncIOMotorDatabase`) directly.
 
-### 1. Commands Handler (`app/handlers/commands.py`)
+### 1. Commands (`app/handlers/commands.py`)
+
+`/start`, `/help`, `/profile`, and `/reset` are implemented. `/reset` requires explicit
+confirmation (`/reset confirm`) before wiping a user's stored state.
 
 ```python
-# app/handlers/commands.py
 from aiogram import Router, html
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
-from aiosqlite import Connection
-from app.services.memory_loader import build_memory_block
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.database import models
 
 router = Router(name="commands")
 
-@router.message(Command("start"))
-async def cmd_start(message: Message, db: Connection):
-    user_id = message.from_user.id
-    username = message.from_user.username
-    display_name = message.from_user.first_name
-    
-    # ensure_user uses the injected database connection
-    await models.ensure_user(db, user_id, username, display_name)
-    
-    welcome_text = (
-        f"Hi {html.bold(display_name)}! 👋\n\n"
-        f"I am ThinkMate, an AI companion who remembers our past chats.\n"
-        f"Use /profile to view what I remember, or /help to see all commands."
-    )
-    await message.answer(welcome_text, parse_mode="HTML")
 
-@router.message(Command("profile"))
-async def cmd_profile(message: Message, db: Connection):
-    user_id = message.from_user.id
-    
-    # Generate memory card using the active DB session
-    profile_data = await build_memory_block(db, user_id)
-    
-    if not profile_data.strip():
-        await message.answer("I don't have any saved memories for you yet. Let's chat more first!")
+@router.message(Command("start"))
+async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
+    user = message.from_user
+    if not user:
         return
-        
-    await message.answer(f"📋 {html.bold('My Memories of You:')}\n\n{html.code(profile_data)}", parse_mode="HTML")
+    await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
+    await message.answer(f"Hi {html.bold(user.first_name or 'there')}! 👋 ...", parse_mode="HTML")
+
+
+@router.message(Command("reset"))
+async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
+    if (command.args or "").strip().lower() != "confirm":
+        await message.answer("⚠️ This erases everything I remember. To confirm, send: /reset confirm")
+        return
+    await models.reset_user(db, message.from_user.id)
+    await message.answer("Done — I've cleared everything. 🌱")
 ```
 
-### 2. Conversational Message Router (`app/handlers/messages.py`)
+### 2. Conversational Router (`app/handlers/messages.py`)
 
-Messages are enqueued using the `user_task_manager` to support message batching, queue serialization, and automated typing action management:
+Text messages are guarded for length and enqueued for batching. Service/channel posts with
+no real sender are ignored.
 
 ```python
-# app/handlers/messages.py
 from aiogram import Router, F
 from aiogram.types import Message
-from aiosqlite import Connection
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.services.user_task_manager import user_task_manager
 
 router = Router(name="messages")
 
+
 @router.message(F.text)
-async def handle_user_message(message: Message, db: Connection):
-    user_id = message.from_user.id
-    user_text = message.text
-
-    # --- INPUT LENGTH GUARD ---
+async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    user_text = message.text or ""
     if len(user_text) > config.MAX_INPUT_CHARS:
-        await message.answer(
-            "that's a lot of text 😅 keep it short — i'm better at conversations than essays"
-        )
-        return  # Complete ignore (no buffer, no LLM call)
+        await message.answer("that's a lot of text 😅 keep it short ...")
+        return
+    await user_task_manager.enqueue_message(message.bot, message.from_user.id, user_text, message)
+```
 
-    # Enqueue conversational message for batching/processing
-    await user_task_manager.enqueue_message(message.bot, user_id, user_text, message)
+### 3. Dynamic Message Reactions — one call
+
+The reply and the optional emoji reaction come from a **single** LLM call: `handle_message`
+returns `(reply_text, reaction)`. The batch processor applies the reaction (already normalized
+to Telegram's accepted set) and sends the reply. Reaction failures (e.g. a chat that disallows
+reactions) are caught and never block delivery.
+
+```python
+# app/services/user_task_manager.py (batch processing snippet)
+async with db_session() as db:
+    reply_text, reaction = await handle_message(db, user_id, combined_text)
+
+if reaction:
+    try:
+        await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
+    except Exception as react_err:
+        logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
+
+await last_message.answer(reply_text)
 ```
 
 ---
 
 ## 💡 Key Architectural Guidelines
 
-1.  **Zero Manual Transactions in Handlers**: Handlers should never call `db.commit()` or open database sessions. Handlers call models or services, passing the injected `db` connection.
-2.  **No Direct SQLite Connections**: Handlers never run `aiosqlite.connect()`. All connections are managed by the `DbSessionMiddleware` block to prevent file locks or leaks.
-3.  **Strict Middleware Filtering**: Only register `AutoTypingMiddleware` on message routing pools. Command routines (like `/start`) respond instantly and do not require typing indicators.
+1.  **No business logic in handlers** — handlers validate, then call services/models with the injected `db`.
+2.  **No direct database clients in handlers** — the `motor` client/session is owned by `connection.py` and injected by `DbSessionMiddleware`.
+3.  **Typing is owned by `UserTaskManager`**, not a middleware — it spans the batching delay and generation, and stops when the queue drains.
+4.  **Throttle before DB work** — `ThrottlingMiddleware` runs on the outer update layer so floods never reach the database or the LLM.

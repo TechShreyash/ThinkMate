@@ -1,16 +1,61 @@
-from datetime import datetime
+"""MongoDB document accessors (CRUD) for ThinkMate.
+
+Each function takes the active ``AsyncIOMotorDatabase`` as its first argument so sessions
+can be injected by middleware and swapped for an in-memory mock under test. All state is
+keyed on the Telegram ``user_id`` for strict per-user isolation.
+
+Buffer trimming uses an atomic ``$pull`` on a ``created_at`` cutoff rather than a
+read-slice-overwrite, so messages appended concurrently by the chat path are never
+clobbered by a background extractor (see docs/development/hardening_plan.md, B1).
+"""
+import threading
+from datetime import datetime, timezone, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
+from app.config import config
 from app.services.schemas import MemoryExtraction, MemoryCompression
 
+_ts_lock = threading.Lock()
+_last_ts: datetime | None = None
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _monotonic_utcnow() -> datetime:
+    """Wall-clock UTC, strictly increasing within this process at millisecond resolution.
+
+    Buffer messages are ordered and trimmed by ``created_at``. BSON stores dates with only
+    millisecond precision, so the monotonic step must be a full millisecond — otherwise two
+    writes in the same millisecond collide once persisted and the cutoff trim can't separate
+    them. Real user messages are seconds apart, so this never drifts in practice.
+    """
+    global _last_ts
+    with _ts_lock:
+        now = datetime.now(timezone.utc)
+        now = now.replace(microsecond=(now.microsecond // 1000) * 1000)  # align to BSON ms
+        if _last_ts is not None and now <= _last_ts:
+            now = _last_ts + timedelta(milliseconds=1)
+        _last_ts = now
+        return now
+
+
+def _normalize(text: str | None) -> str:
+    """Casefold + collapse whitespace for tolerant matching of free-text memory items."""
+    return " ".join((text or "").split()).casefold()
+
+
 async def ensure_user(db: AsyncIOMotorDatabase, user_id: int, username: str, display_name: str):
-    """Upserts the user profile document in the user_profiles collection."""
+    """Upsert the user profile document in the user_profiles collection."""
+    now = _utcnow()
     await db["user_profiles"].update_one(
         {"_id": user_id},
         {
             "$set": {
                 "username": username,
                 "display_name": display_name,
-                "updated_at": datetime.utcnow()
+                "updated_at": now,
             },
             "$setOnInsert": {
                 "profile_summary": "",
@@ -19,188 +64,227 @@ async def ensure_user(db: AsyncIOMotorDatabase, user_id: int, username: str, dis
                 "facts": [],
                 "beliefs": [],
                 "events": [],
-                "created_at": datetime.utcnow()
-            }
+                "created_at": now,
+            },
         },
-        upsert=True
+        upsert=True,
     )
 
-async def add_message_to_buffer(db: AsyncIOMotorDatabase, user_id: int, role: str, content: str):
-    """Appends a chat message to the messages array in the user's chat_buffers document."""
-    now = datetime.utcnow()
-    await db["chat_buffers"].update_one(
+
+async def reset_user(db: AsyncIOMotorDatabase, user_id: int):
+    """Hard-delete all stored state for a user (profile + chat buffer)."""
+    await db["user_profiles"].delete_one({"_id": user_id})
+    await db["chat_buffers"].delete_one({"_id": user_id})
+
+
+async def add_message_to_buffer(
+    db: AsyncIOMotorDatabase, user_id: int, role: str, content: str
+) -> list[dict]:
+    """Append a message to the buffer and return the resulting messages array.
+
+    Returning the post-update array lets the caller derive the char count and active
+    history without extra round-trips. A ``$slice`` hard cap bounds the array so a
+    stalled extractor can never let it grow without limit.
+    """
+    now = _monotonic_utcnow()
+    doc = await db["chat_buffers"].find_one_and_update(
         {"_id": user_id},
         {
             "$push": {
                 "messages": {
-                    "role": role,
-                    "content": content,
-                    "created_at": now
+                    "$each": [{"role": role, "content": content, "created_at": now}],
+                    "$slice": -config.CHAT_BUFFER_HARD_CAP,
                 }
             },
-            "$set": {"updated_at": now}
+            "$set": {"updated_at": now},
         },
-        upsert=True
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
+    return doc.get("messages", []) if doc else []
+
 
 async def get_chat_buffer(db: AsyncIOMotorDatabase, user_id: int) -> list[dict]:
-    """Retrieves the array of chat messages in active history for the user."""
+    """Return the active chat history as role/content dicts (LLM message format)."""
     doc = await db["chat_buffers"].find_one({"_id": user_id})
     if doc and "messages" in doc:
         return [{"role": m["role"], "content": m["content"]} for m in doc["messages"]]
     return []
 
+
 async def get_buffer_count(db: AsyncIOMotorDatabase, user_id: int) -> int:
-    """Returns the total number of messages in the active chat buffer."""
+    """Return the number of messages in the active chat buffer."""
     doc = await db["chat_buffers"].find_one({"_id": user_id})
     if doc and "messages" in doc:
         return len(doc["messages"])
     return 0
 
+
 async def get_buffer_char_count(db: AsyncIOMotorDatabase, user_id: int) -> int:
-    """Returns the sum of character lengths of all messages in the chat buffer."""
+    """Return the summed character length of all messages in the chat buffer."""
     doc = await db["chat_buffers"].find_one({"_id": user_id})
     if doc and "messages" in doc:
         return sum(len(m["content"]) for m in doc["messages"])
     return 0
 
+
 async def delete_oldest_buffer_messages(db: AsyncIOMotorDatabase, user_id: int, count: int):
-    """Trims the chat buffer by slicing away the oldest messages from the array."""
-    doc = await db["chat_buffers"].find_one({"_id": user_id})
-    if doc and "messages" in doc:
-        remaining = doc["messages"][count:]
+    """Atomically trim the ``count`` oldest messages from the buffer.
+
+    Removal is done with ``$pull`` on a ``created_at`` cutoff, so messages appended after
+    this snapshot (e.g. by a concurrent chat batch) are preserved rather than clobbered.
+    """
+    if count <= 0:
+        return
+    doc = await db["chat_buffers"].find_one({"_id": user_id}, {"messages": 1})
+    if not doc or "messages" not in doc:
+        return
+    messages = doc["messages"]
+    if count >= len(messages):
+        await db["chat_buffers"].update_one(
+            {"_id": user_id}, {"$set": {"messages": [], "updated_at": _utcnow()}}
+        )
+        return
+    cutoff = messages[count].get("created_at")
+    if cutoff is None:
+        # Legacy messages without created_at: fall back to a positional slice.
         await db["chat_buffers"].update_one(
             {"_id": user_id},
-            {"$set": {"messages": remaining, "updated_at": datetime.utcnow()}}
+            {"$set": {"messages": messages[count:], "updated_at": _utcnow()}},
         )
+        return
+    await db["chat_buffers"].update_one(
+        {"_id": user_id},
+        {
+            "$pull": {"messages": {"created_at": {"$lt": cutoff}}},
+            "$set": {"updated_at": _utcnow()},
+        },
+    )
 
-async def save_extracted_memories(db: AsyncIOMotorDatabase, user_id: int, extraction: MemoryExtraction):
-    """Surgically applies extracted profile style, facts, beliefs, events, and emotional states to the user record."""
+
+async def save_extracted_memories(
+    db: AsyncIOMotorDatabase, user_id: int, extraction: MemoryExtraction
+):
+    """Apply extracted profile style, facts, beliefs, events, and mood to the user record.
+
+    Free-text matches (removals/updates) are normalized (casefold + whitespace-collapse)
+    so minor LLM phrasing drift still resolves to the stored item, and new items are
+    de-duplicated against existing ones.
+    """
     profile = await db["user_profiles"].find_one({"_id": user_id})
     if not profile:
         await ensure_user(db, user_id, "", "")
         profile = await db["user_profiles"].find_one({"_id": user_id})
-        
+
     facts = profile.get("facts", [])
     beliefs = profile.get("beliefs", [])
     events = profile.get("events", [])
-    now = datetime.utcnow()
-    
-    # 1. Profile Style
-    set_fields = {}
+    now = _utcnow()
+
+    set_fields: dict = {}
+
+    # 1. Profile style
     if extraction.profile_updates and extraction.profile_updates.communication_style:
         set_fields["communication_style"] = extraction.profile_updates.communication_style
-        
-    # 2. Direct Emotional State Update
+
+    # 2. Direct emotional state update
     if extraction.emotional_state:
         set_fields["emotional_state"] = {
             "mood": extraction.emotional_state.mood,
             "intensity": extraction.emotional_state.intensity,
             "trigger": extraction.emotional_state.trigger or "",
-            "detected_at": now
+            "detected_at": now,
         }
-        
-    # 3. Facts CRUD (Hard Deletes)
-    removed_contents = {f.content for f in extraction.removed_facts}
-    updated_old_contents = {f.old_content for f in extraction.updated_facts}
-    exclude_facts = removed_contents.union(updated_old_contents)
-    
-    # Filter out removed and updated facts
-    facts = [f for f in facts if f["content"] not in exclude_facts]
-    
-    # Append new facts
+
+    # 3. Facts CRUD (hard deletes, normalized matching)
+    exclude_facts = {_normalize(f.content) for f in extraction.removed_facts}
+    exclude_facts |= {_normalize(f.old_content) for f in extraction.updated_facts}
+    facts = [f for f in facts if _normalize(f["content"]) not in exclude_facts]
+
+    seen_facts = {_normalize(f["content"]) for f in facts}
     for f in extraction.new_facts:
+        key = _normalize(f.content)
+        if key in seen_facts:
+            continue
+        seen_facts.add(key)
         facts.append({
-            "category": f.category,
-            "content": f.content,
-            "confidence": 1.0,
-            "created_at": now,
-            "updated_at": now
+            "category": f.category, "content": f.content,
+            "confidence": 1.0, "created_at": now, "updated_at": now,
         })
-        
-    # Append updated facts (as replacement content)
     for f in extraction.updated_facts:
+        key = _normalize(f.new_content)
+        if key in seen_facts:
+            continue
+        seen_facts.add(key)
         facts.append({
-            "category": f.category,
-            "content": f.new_content,
-            "confidence": 1.0,
-            "created_at": now,
-            "updated_at": now
-        })
-        
-    # 4. Beliefs CRUD (Hard Deletes)
-    removed_beliefs = {b.content for b in extraction.removed_beliefs}
-    updated_old_beliefs = {b.old_content for b in extraction.updated_beliefs}
-    exclude_beliefs = removed_beliefs.union(updated_old_beliefs)
-    
-    # Filter out removed and updated beliefs
-    beliefs = [b for b in beliefs if b["content"] not in exclude_beliefs]
-    
-    # Append new beliefs
-    for b in extraction.new_beliefs:
-        beliefs.append({
-            "content": b.content,
-            "created_at": now,
-            "updated_at": now
-        })
-        
-    # Append updated beliefs
-    for b in extraction.updated_beliefs:
-        beliefs.append({
-            "content": b.new_content,
-            "created_at": now,
-            "updated_at": now
-        })
-        
-    # 5. Events CRUD (Hard Deletes)
-    removed_events = {e.description for e in extraction.removed_events}
-    updated_old_events = {e.old_description for e in extraction.updated_events}
-    exclude_events = removed_events.union(updated_old_events)
-    
-    # Filter out removed and updated events
-    events = [e for e in events if e["description"] not in exclude_events]
-    
-    # Append new events
-    for e in extraction.new_events:
-        events.append({
-            "description": e.description,
-            "event_date": e.date,
-            "significance": e.significance,
-            "emotional_context": e.emotion or "",
-            "created_at": now
-        })
-        
-    # Append updated events (preserving created_at and emotional_context if event existed)
-    for update in extraction.updated_events:
-        old_ev = next((e for e in profile.get("events", []) if e["description"] == update.old_description), None)
-        description = update.new_description
-        date = update.date if update.date is not None else (old_ev["event_date"] if old_ev else None)
-        significance = update.significance if update.significance is not None else (old_ev["significance"] if old_ev else "minor")
-        emotion = old_ev["emotional_context"] if old_ev else ""
-        events.append({
-            "description": description,
-            "event_date": date,
-            "significance": significance,
-            "emotional_context": emotion,
-            "created_at": old_ev["created_at"] if old_ev else now
+            "category": f.category, "content": f.new_content,
+            "confidence": 1.0, "created_at": now, "updated_at": now,
         })
 
-    # Save consolidated state back to user_profiles
+    # 4. Beliefs CRUD
+    exclude_beliefs = {_normalize(b.content) for b in extraction.removed_beliefs}
+    exclude_beliefs |= {_normalize(b.old_content) for b in extraction.updated_beliefs}
+    beliefs = [b for b in beliefs if _normalize(b["content"]) not in exclude_beliefs]
+
+    seen_beliefs = {_normalize(b["content"]) for b in beliefs}
+    for b in extraction.new_beliefs:
+        key = _normalize(b.content)
+        if key in seen_beliefs:
+            continue
+        seen_beliefs.add(key)
+        beliefs.append({"content": b.content, "created_at": now, "updated_at": now})
+    for b in extraction.updated_beliefs:
+        key = _normalize(b.new_content)
+        if key in seen_beliefs:
+            continue
+        seen_beliefs.add(key)
+        beliefs.append({"content": b.new_content, "created_at": now, "updated_at": now})
+
+    # 5. Events CRUD
+    exclude_events = {_normalize(e.description) for e in extraction.removed_events}
+    exclude_events |= {_normalize(e.old_description) for e in extraction.updated_events}
+    original_events = list(profile.get("events", []))
+    events = [e for e in events if _normalize(e["description"]) not in exclude_events]
+
+    seen_events = {_normalize(e["description"]) for e in events}
+    for e in extraction.new_events:
+        key = _normalize(e.description)
+        if key in seen_events:
+            continue
+        seen_events.add(key)
+        events.append({
+            "description": e.description, "event_date": e.date,
+            "significance": e.significance, "emotional_context": e.emotion or "",
+            "created_at": now,
+        })
+    for update in extraction.updated_events:
+        old_ev = next(
+            (e for e in original_events if _normalize(e["description"]) == _normalize(update.old_description)),
+            None,
+        )
+        events.append({
+            "description": update.new_description,
+            "event_date": update.date if update.date is not None else (old_ev["event_date"] if old_ev else None),
+            "significance": update.significance if update.significance is not None else (old_ev["significance"] if old_ev else "minor"),
+            "emotional_context": old_ev["emotional_context"] if old_ev else "",
+            "created_at": old_ev["created_at"] if old_ev else now,
+        })
+
     set_fields["facts"] = facts
     set_fields["beliefs"] = beliefs
     set_fields["events"] = events
     set_fields["updated_at"] = now
-    
-    await db["user_profiles"].update_one(
-        {"_id": user_id},
-        {"$set": set_fields}
-    )
 
-async def replace_user_memory(db: AsyncIOMotorDatabase, user_id: int, compression: MemoryCompression):
-    """Replaces profile summary, style preference, facts, beliefs, and events arrays with compressed layouts."""
-    now = datetime.utcnow()
-    set_fields = {}
-    
+    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+
+
+async def replace_user_memory(
+    db: AsyncIOMotorDatabase, user_id: int, compression: MemoryCompression
+):
+    """Replace profile summary, style, facts, beliefs, and events with compressed layouts."""
+    now = _utcnow()
+    set_fields: dict = {}
+
     if compression.profile_summary is not None:
         set_fields["profile_summary"] = compression.profile_summary
     if compression.communication_style is not None:
@@ -210,51 +294,30 @@ async def replace_user_memory(db: AsyncIOMotorDatabase, user_id: int, compressio
             "mood": compression.emotional_state.mood,
             "intensity": compression.emotional_state.intensity,
             "trigger": compression.emotional_state.trigger or "",
-            "detected_at": now
+            "detected_at": now,
         }
-        
-    # Compressed Facts
-    facts = []
-    for fact in compression.compressed_facts:
-        facts.append({
-            "category": fact.category,
-            "content": fact.content,
-            "confidence": 1.0,
-            "created_at": now,
-            "updated_at": now
-        })
-    set_fields["facts"] = facts
-    
-    # Compressed Beliefs
-    beliefs = []
-    for belief in compression.compressed_beliefs:
-        beliefs.append({
-            "content": belief.content,
-            "created_at": now,
-            "updated_at": now
-        })
-    set_fields["beliefs"] = beliefs
-    
-    # Compressed Events
-    events = []
-    for event in compression.compressed_events:
-        events.append({
-            "description": event.description,
-            "event_date": event.date,
-            "significance": event.significance,
-            "emotional_context": "",
-            "created_at": now
-        })
-    set_fields["events"] = events
+
+    set_fields["facts"] = [
+        {"category": fact.category, "content": fact.content,
+         "confidence": 1.0, "created_at": now, "updated_at": now}
+        for fact in compression.compressed_facts
+    ]
+    set_fields["beliefs"] = [
+        {"content": belief.content, "created_at": now, "updated_at": now}
+        for belief in compression.compressed_beliefs
+    ]
+    set_fields["events"] = [
+        {"description": event.description, "event_date": event.date,
+         "significance": event.significance, "emotional_context": "", "created_at": now}
+        for event in compression.compressed_events
+    ]
     set_fields["updated_at"] = now
-    
-    await db["user_profiles"].update_one(
-        {"_id": user_id},
-        {"$set": set_fields}
-    )
+
+    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+
 
 async def get_active_facts(db: AsyncIOMotorDatabase, user_id: int) -> list[dict]:
-    """Retrieves all active facts inside the user_profiles document (for test compatibility)."""
+    """Return all active facts in the user_profiles document (used by tests)."""
     doc = await db["user_profiles"].find_one({"_id": user_id})
     if doc and "facts" in doc:
         return [

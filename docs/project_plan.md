@@ -85,6 +85,7 @@ Hook up the Telegram network adapters, register command routers, and database in
     *   `/start`: Welcomes users and initializes their profile.
     *   `/profile`: Compiles and displays their current memory card.
 -   [x] **5.5 Text Routing Handler**: Write message interception in `messages.py` marked with `flags={"long_operation": True}`.
+-   [x] **5.6 Dynamic Message Reactions**: Query LLM concurrently for emoji reactions during message batch processing and send them gracefully to Telegram.
 
 ---
 
@@ -105,6 +106,21 @@ Write automated unit tests and run end-to-end user checks.
 -   [x] **7.2 MongoDB Test Cases**: Create `test_database.py` and `test_guards_and_compression.py` to test MongoDB CRUD transactions, hard-deletion, direct mood writing, and budget triggers using `mongomock` in-memory clients.
 -   [x] **7.3 Memory Engine Test Cases**: Write mock LLM test suites in `test_batching_and_concurrency.py` verifying message batching, throttling, queue overflows, and sequential background locks.
 -   [x] **7.4 Testing Documentation**: Document the testing suite structure and database mocks in [testing_guide.md](development/testing_guide.md).
+
+---
+
+### Phase 8: Production Hardening & Scaling (2026-06)
+Single-instance hardening for 50k+ users. Full detail and rationale in
+[hardening_plan.md](development/hardening_plan.md).
+
+-   [x] **8.1 One combined LLM call**: reply + reaction returned as strict JSON in a single `generate_reply_bundle` call (was two calls). Verified live on the Gemini proxy.
+-   [x] **8.2 Structured-output strategy**: default to `json_object` (the only mode the Gemini proxy accepts) and drop the always-failing native-parse round-trip; `native_parse` kept as an opt-in for OpenAI. Retries with backoff on transient errors.
+-   [x] **8.3 Atomic buffer trim**: `$pull`-on-cutoff with monotonic millisecond timestamps — fixes the silent message-loss race; buffer hard-capped.
+-   [x] **8.4 Memory robustness**: normalized/deduped fact-belief-event CRUD; deterministic post-compression budget enforcement + per-user cooldown (fixes the compression re-trigger loop).
+-   [x] **8.5 Bounded memory & responsiveness**: idle per-user state eviction, throttle-map pruning, persona cached by mtime, hot-path Mongo round-trips reduced.
+-   [x] **8.6 Audit lifecycle**: timestamps stored as `datetime`, off-hot-path writes, field truncation, TTL retention index. Startup Mongo ping.
+-   [x] **8.7 Commands & cleanup**: `/help` and `/reset` added; dead `AutoTypingMiddleware` removed; null guards; stale SQLite strings fixed; `logs/` git-ignored.
+-   [x] **8.8 Tests**: regression tests for the trim race, cooldown, dedup, reset, budget enforcement, state eviction, and the combined call. Zero deprecation warnings.
 
 ---
 

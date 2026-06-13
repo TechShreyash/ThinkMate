@@ -88,12 +88,12 @@ graph TD
         *   `new_beliefs` / `updated_beliefs` / `removed_beliefs`: Full CRUD operations to keep subjective beliefs synchronized.
         *   `new_events` / `updated_events` / `removed_events`: Full CRUD operations to keep timeline milestones updated.
         *   `emotional_state`: Shifts in user mood, intensity, and triggers.
-    *   The changes are transactionally written to the user's profile document inside `user_profiles` using atomic `$set` operations, applying **hard deletes** for removals.
-    *   The processed segment (older messages) is trimmed from `chat_buffers`.
-6.  **Memory Compression (Background Task)**: When compiling the memory profile, if its length exceeds `USER_MEMORY_BUDGET_CHARS` (default 4,000 characters), a non-blocking background task is spawned. The `UserTaskManager` ensures a shared sequential lock (`memory_lock`) is acquired per user; concurrent extraction/compression tasks are skipped. This task sends all memory components to the LLM to compress them to ≤ 80% of the budget. It is the only phase where the high-level `profile_summary` is rewritten, as synthesizing a summary requires a bird's-eye view of all memories, which is not available to the localized extraction steps. The compressed profile, facts, beliefs, and events then atomically replace the old records in the user profile document.
+    *   The changes are transactionally written to the user's profile document inside `user_profiles` using atomic `$set` operations, applying **hard deletes** for removals. Free-text matches are normalized (casefold + whitespace) and new items are de-duplicated so phrasing drift doesn't create duplicates.
+    *   The processed segment (older messages) is trimmed from `chat_buffers` **atomically** via `$pull` on a `created_at` cutoff — so messages the user sends *during* the (slow) extraction call are never clobbered. Buffer timestamps are strictly monotonic at millisecond resolution to keep this ordering exact.
+6.  **Memory Compression (Background Task)**: When compiling the memory profile, if its length exceeds `USER_MEMORY_BUDGET_CHARS` (default 4,000 characters), a non-blocking background task is spawned. The `UserTaskManager` ensures a shared sequential lock (`memory_lock`) is acquired per user; concurrent extraction/compression tasks are skipped. This task sends all memory components to the LLM to compress them to ≤ 80% of the budget. It is the only phase where the high-level `profile_summary` is rewritten, as synthesizing a summary requires a bird's-eye view of all memories, which is not available to the localized extraction steps. The compressed profile, facts, beliefs, and events then atomically replace the old records in the user profile document. Because models can't count characters reliably, a **deterministic post-pass** then drops lowest-priority items (oldest events → beliefs → facts) until the profile actually fits the budget, and a per-user **cooldown** (`COMPRESSION_COOLDOWN_SECS`) prevents a re-trigger loop on every subsequent message.
 7.  **Prompt Assembly**: The chat manager loads the personality from `persona.md` and reads the memory blocks from `user_profiles` to build a comprehensive system prompt.
-8.  **Input/Output Guards**:
-9.  **Generation & Send**: The main chatbot model (`LLM_MODEL`) generates a response, which is saved to the buffer, sent back to Telegram, and the `chat_lock` is released.
+8.  **Input/Output Guards**: Oversized inbound messages (`MAX_INPUT_CHARS`) are ignored before any LLM/database work; outbound length is bounded by `MAX_RESPONSE_CHARS` (via `max_tokens`); a sliding-window throttle (`RATE_LIMIT_*`) and a per-user queue cap (`MAX_QUEUED_MESSAGES`) protect against floods.
+9.  **Generation & Send**: The main chatbot model (`LLM_MODEL`) generates the reply **and** an optional emoji reaction in a **single** `json_object` call (`generate_reply_bundle`). The reply is saved to the buffer and sent to Telegram, the reaction (normalized to Telegram's accepted set) is applied, and the `chat_lock` is released.
 
 ---
 
@@ -153,3 +153,23 @@ To support hundreds of concurrent users without data leakage, the database schem
 *   Every collection (`user_profiles`, `chat_buffers`, `llm_audit_log`) uses the unique, system-level `user_id` provided by Telegram as the primary key (`_id`) or an indexed filter key.
 *   All queries executed by the backend are strictly parameterized and filtered by `user_id`.
 *   No global variables hold memory context, eliminating state bleeding between concurrent requests.
+
+---
+
+## ⚙️ Operational & Scaling Model
+
+ThinkMate runs as a **single long-polling instance** with per-user state (locks, batch
+timers, throttle counters) held in memory. This is deliberate and works well into the tens
+of thousands of users; the practical ceiling is LLM throughput, not the Python event loop.
+
+Hardening that keeps a single instance healthy at scale:
+
+* **Bounded memory.** Idle per-user state is evicted after `USER_STATE_TTL_SECS`; the
+  throttle map is pruned periodically; the chat buffer is hard-capped (`CHAT_BUFFER_HARD_CAP`).
+* **Fewer, more robust LLM calls.** One combined reply+reaction call per batch; transient
+  errors retried with backoff; the dead native-parse round-trip removed for non-OpenAI proxies.
+* **Audit hygiene.** Audit writes are off the hot path and expire via a TTL index.
+
+**Horizontal scaling is out of scope here.** Because state is in-process and polling is
+single-consumer, running multiple replicas would require switching to webhooks and
+externalizing state (e.g. Redis) — see `docs/development/hardening_plan.md`, Phase 12.

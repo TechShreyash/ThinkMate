@@ -1,48 +1,40 @@
+"""Manual live check against the configured LLM endpoint (reads .env via app.config).
+
+Not part of the automated suite — it makes real API calls. Run with:
+    set PYTHONIOENCODING=utf-8 && PYTHONPATH=. .venv/Scripts/python.exe tests/run_llm_live.py
+"""
 import asyncio
-import openai
-from app.services.llm_service import LLMService
-from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 from loguru import logger
+from app.services.llm_service import llm_service
+from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 
-async def test_live():
-    logger.info("Initializing LLMService...")
-    service = LLMService()
 
-    # 1. Test conversational generation
-    logger.info("Testing generate_response...")
-    chat_history = [{"role": "user", "content": "hello! I love coding in python, especially building chatbots."}]
-    try:
-        response = await service.generate_response("You are ThinkMate, a friendly companion.", chat_history)
-        logger.info(f"Conversational Reply:\n{response}\n")
-        assert len(response) > 0
-        
-        # 2. Test memory extraction
-        logger.info("Testing extract_memory...")
-        chat_log_to_extract = (
-            "User: yeah, I have a younger brother named Sid.\n"
-            "Assistant: oh cool, how's your relationship with Sid?\n"
-            "User: we are super close. also, I recently started working as a backend engineer at Google Seattle."
-        )
-        current_memories = "No memories recorded yet."
-        instruction_prompt = f"{SYSTEM_EXTRACTION_PROMPT}\n\n=== CURRENT MEMORIES ===\n{current_memories}\n"
-        
-        extraction = await service.extract_memory(instruction_prompt, chat_log_to_extract)
-        logger.info(f"Extracted Facts: {extraction.new_facts}")
-        logger.info(f"Extracted Events: {extraction.events}")
-        logger.info(f"Extracted Emotional State: {extraction.emotional_state}")
-        
-        logger.info(f"New facts list length: {len(extraction.new_facts)}")
-        assert len(extraction.new_facts) > 0 or extraction.emotional_state is not None
-        logger.info("Live LLM test completed successfully!")
-    except openai.AuthenticationError as e:
-        logger.warning("=" * 60)
-        logger.warning("LLM client connected successfully, but the API key was rejected.")
-        logger.warning(f"Error detail: {e}")
-        logger.warning("Please verify that your API key is active and correct.")
-        logger.warning("=" * 60)
-    except Exception as e:
-        logger.error(f"Live LLM test failed with unexpected error: {e}")
-        raise e
+async def main():
+    logger.info("1) generate_reply_bundle (reply + reaction in one call)")
+    reply, reaction = await llm_service.generate_reply_bundle(
+        user_id=999,
+        system_prompt="You are ThinkMate, a warm, witty companion. Reply in 1-2 casual sentences.",
+        chat_history=[{"role": "user", "content": "i just adopted a kitten named Miso!"}],
+    )
+    logger.info(f"   reply={reply!r}")
+    logger.info(f"   reaction={reaction!r}")
+    assert reply
+
+    logger.info("2) extract_memory (structured json_object path)")
+    chat_log = (
+        "User: yeah, I have a younger brother named Sid.\n"
+        "Assistant: oh nice, are you two close?\n"
+        "User: super close. also I just started as a backend engineer at Google Seattle."
+    )
+    instruction = f"{SYSTEM_EXTRACTION_PROMPT}\n\n=== CURRENT MEMORIES ===\nNo memories recorded yet.\n"
+    extraction = await llm_service.extract_memory(999, instruction, chat_log)
+    logger.info(f"   new_facts={extraction.new_facts}")
+    logger.info(f"   new_events={extraction.new_events}")
+    logger.info(f"   emotional_state={extraction.emotional_state}")
+    assert extraction.new_facts or extraction.new_events or extraction.emotional_state is not None
+
+    logger.info("Live LLM check passed.")
+
 
 if __name__ == "__main__":
-    asyncio.run(test_live())
+    asyncio.run(main())

@@ -13,6 +13,7 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 *   **Input/Output Guards**: Early-return input guards ignore overly long user messages (preventing essays/code abuse), and output guards cap LLM response lengths at API level.
 *   **Custom LLM Endpoint Compatibility**: Works with standard OpenAI models or any local/self-hosted LLM engines via OpenAI-compatible APIs (LM Studio, Ollama, vLLM, OpenRouter).
 *   **Editable Persona**: Change the bot's tone, rules, and traits dynamically by editing the [persona.md](persona.md) markdown file—no service restart required.
+*   **Dynamic Message Reactions**: The conversational reply and an optional Telegram emoji reaction are produced in a **single** LLM call (strict JSON `{reply, reaction}`), then the reaction is normalized to Telegram's accepted set and applied gracefully.
 *   **Data Isolation**: Built-in support for multi-user chat with strict per-user database isolation.
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `motor` (MongoDB async driver) for high performance and standard async workflow.
 
@@ -36,9 +37,10 @@ ThinkMate/
 │   │
 │   └── development/                # Implementation detail guides
 │       ├── telegram_bot.md         # aiogram handlers, routers & middleware
-│       ├── database.md             # SQLite schema & custom async CRUD operations
-│       ├── llm_integration.md      # OpenAI SDK, Prompt Engineering & JSON mode
-│       └── memory_engine.md        # Sliding window, extraction & consolidation
+│       ├── database.md             # MongoDB schema & async document CRUD
+│       ├── llm_integration.md      # LLM client, prompt engineering & JSON mode
+│       ├── memory_engine.md        # Sliding window, extraction & consolidation
+│       └── hardening_plan.md       # Production hardening & scaling plan (living doc)
 │
 ├── app/                            # Source code directory
 │   ├── __init__.py
@@ -51,17 +53,19 @@ ThinkMate/
 │   │
 │   ├── services/                   # Core business logic
 │   │   ├── __init__.py
-│   │   ├── llm_service.py          # OpenAI AsyncOpenAI connection wrapper
+│   │   ├── llm_service.py          # AsyncOpenAI wrapper: combined reply call, retries, audit
+│   │   ├── schemas.py              # Pydantic schemas (ReplyBundle, extraction, compression)
+│   │   ├── reactions.py            # Telegram reaction whitelist + normalization
 │   │   ├── chat_manager.py         # Response flow orchestrator
 │   │   ├── memory_extractor.py     # Memory extraction LLM interface
 │   │   ├── memory_loader.py        # System prompt memory compiler
-│   │   ├── memory_compressor.py    # LLM-powered memory compressor
+│   │   ├── memory_compressor.py    # LLM-powered memory compressor + budget enforcement
 │   │   └── user_task_manager.py    # Concurrency, batching, queues & typing indicators
 │   │
 │   ├── database/                   # Database interaction layers
 │   │   ├── __init__.py
-│   │   ├── connection.py           # Database initialisation & connection pools
-│   │   └── models.py               # SQL queries & DB CRUD models
+│   │   ├── connection.py           # Async client singleton, ping, indexes (incl. audit TTL)
+│   │   └── models.py               # MongoDB document CRUD (atomic buffer trim)
 │   │
 │   ├── prompts/                    # LLM Prompt Templates
 │   │   ├── __init__.py
@@ -73,8 +77,7 @@ ThinkMate/
 │       ├── __init__.py
 │       └── helpers.py              # Parsing, formatting, and time helpers
 │
-├── data/                           # Data storage folder (SQLite database files)
-└── tests/                          # Automated test suites
+└── tests/                          # Automated test suites (pytest + mongomock)
 ```
 
 ---
@@ -101,7 +104,7 @@ To implement or contribute to this project, please consult the specialized guide
 *   **Language**: Python 3.10+
 *   **Telegram Framework**: `aiogram` (v3.x) with DB dependency injection & auto-typing indicators
 *   **Database**: `MongoDB` (via `motor` async driver)
-*   **LLM Client**: `openai` (v1.x) with native structured output parsing and centralized DB logging
+*   **LLM Client**: `openai` SDK against any OpenAI-compatible endpoint, JSON-mode structured outputs (with native-parse opt-in), transient-error retries, and centralized audit logging
 *   **Data Validation**: `Pydantic` (v2.x) schemas for guaranteed JSON outputs
 *   **Environment Config**: `python-dotenv`
 *   **Logging**: `loguru`

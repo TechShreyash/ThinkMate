@@ -26,6 +26,9 @@ class AsyncMockCollection:
     async def update_one(self, *args, **kwargs):
         return self._collection.update_one(*args, **kwargs)
 
+    async def find_one_and_update(self, *args, **kwargs):
+        return self._collection.find_one_and_update(*args, **kwargs)
+
     async def insert_one(self, *args, **kwargs):
         return self._collection.insert_one(*args, **kwargs)
 
@@ -73,3 +76,12 @@ def mock_mongodb():
     with patch("app.database.connection.get_db_client", return_value=mock_client), \
          patch("app.database.connection.get_db", return_value=mock_db):
         yield mock_db
+
+@pytest.fixture(autouse=True)
+def disable_reactions_by_default():
+    from app.config import config
+    original = config.ENABLE_MESSAGE_REACTIONS
+    config.ENABLE_MESSAGE_REACTIONS = False
+    yield
+    config.ENABLE_MESSAGE_REACTIONS = original
+

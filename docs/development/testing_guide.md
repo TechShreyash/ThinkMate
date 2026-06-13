@@ -17,7 +17,10 @@ tests/
 ├── conftest.py                       # Session-wide test setup & MongoDB mocks
 ├── test_database.py                  # Validates MongoDB CRUD and model operations
 ├── test_guards_and_compression.py     # Tests input guards, prompt compiling, and memory compression
-└── test_batching_and_concurrency.py  # Tests messaging queues, batching, throttling, and concurrency locks
+├── test_batching_and_concurrency.py  # Tests messaging queues, batching, throttling, and concurrency locks
+├── test_reactions.py                 # Combined reply+reaction call & emoji normalization
+├── test_hardening.py                 # Atomic trim race, dedup, cooldown, reset, budget enforcement, eviction
+└── run_llm_live.py                   # Manual live check against the configured LLM (not part of the suite)
 ```
 
 ---
@@ -28,7 +31,7 @@ tests/
 Because `mongomock` is a synchronous in-memory MongoDB mock library, it does not natively support the async `motor` driver. The `conftest.py` file defines a custom async wrapper to bridge this gap:
 
 *   **`AsyncMockCursor`**: Simulates the behavior of motor's async cursors (supporting async iteration using `__aiter__` and `__anext__`).
-*   **`AsyncMockCollection`**: Intercepts queries (like `find_one`, `update_one`, `insert_one`, `delete_one`, `delete_many`, `create_index`, and `find`) and maps them to synchronous calls on the underlying `mongomock` collection wrapper.
+*   **`AsyncMockCollection`**: Intercepts queries (like `find_one`, `update_one`, `find_one_and_update`, `insert_one`, `delete_one`, `delete_many`, `create_index`, and `find`) and maps them to synchronous calls on the underlying `mongomock` collection wrapper.
 *   **`AsyncMockDatabase` / `AsyncMockClient`**: Wraps the database and client instances.
 *   **`mock_mongodb` Fixture**: An autouse fixture that dynamically patches `app.database.connection.get_db` and `app.database.connection.get_db_client` globally for all tests. This ensures that every test gets a clean, isolated, in-memory MongoDB environment automatically.
 

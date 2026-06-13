@@ -1,27 +1,33 @@
+"""Application entrypoint: verify MongoDB, init indexes, register middlewares/routers,
+and start long-polling the Telegram bot.
+"""
 import asyncio
 from aiogram import Bot, Dispatcher
 from loguru import logger
 from app.config import config
 from app.handlers import main_router
-from app.handlers.middlewares import DbSessionMiddleware, AutoTypingMiddleware, ThrottlingMiddleware
-from app.database.connection import init_db
+from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
+from app.database.connection import init_db, ping_db
+
 
 async def main():
-    logger.info("Initializing SQLite tables...")
+    logger.info("Verifying MongoDB connection...")
+    try:
+        await ping_db()
+    except Exception as e:
+        logger.error(f"Cannot reach MongoDB at startup: {e}")
+        raise
+
+    logger.info("Initializing MongoDB indexes...")
     await init_db()
 
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
 
-    # Register Global Middlewares
-    # ThrottlingMiddleware throttles spammers before any database connection is opened
+    # Throttle spammers before any DB session is opened, then inject the DB session.
     dp.update.outer_middleware(ThrottlingMiddleware())
-    # DbSessionMiddleware must be registered on the outer update layer
     dp.update.outer_middleware(DbSessionMiddleware())
-    # AutoTypingMiddleware is registered as an inner middleware on messages
-    dp.message.middleware(AutoTypingMiddleware())
 
-    # Register main router containing all sub-routers
     dp.include_router(main_router)
 
     logger.info("Polling Telegram Bot...")
@@ -29,6 +35,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+
 
 if __name__ == "__main__":
     try:

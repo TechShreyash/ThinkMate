@@ -36,8 +36,8 @@ async def test_message_batching_delay(temp_db):
         
         # Mock handle_message
         with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
-            mock_handle.return_value = "Mocked Response"
-            
+            mock_handle.return_value = ("Mocked Response", None)
+
             # Enqueue first message
             await user_task_manager.enqueue_message(mock_bot, user_id, "Hello", mock_message_1)
             await asyncio.sleep(0.05)
@@ -74,8 +74,8 @@ async def test_character_count_extraction_trigger(temp_db):
             
             # Insert short messages (should not trigger extraction)
             with patch("app.services.user_task_manager.user_task_manager.run_extractor", new_callable=AsyncMock) as mock_run_extractor:
-                with patch("app.services.llm_service.LLMService.generate_response", new_callable=AsyncMock) as mock_response:
-                    mock_response.return_value = "Fine, thanks."
+                with patch("app.services.llm_service.LLMService.generate_reply_bundle", new_callable=AsyncMock) as mock_response:
+                    mock_response.return_value = ("Fine, thanks.", None)
                     
                     # 1. Total chars ~ 20 (Hello + Fine, thanks)
                     await handle_message(db, user_id, "Hello")
@@ -176,8 +176,8 @@ async def test_max_batch_delay_prevents_infinite_postponement(temp_db):
         mock_message.answer = AsyncMock()
         
         with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
-            mock_handle.return_value = "Mocked Response"
-            
+            mock_handle.return_value = ("Mocked Response", None)
+
             # Message 1 at t=0
             await user_task_manager.enqueue_message(mock_bot, user_id, "Msg 1", mock_message)
             await asyncio.sleep(0.15)

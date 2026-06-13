@@ -10,60 +10,52 @@ The orchestration process in [chat_manager.py](../../app/services/chat_manager.p
 
 ```python
 # app/services/chat_manager.py
-import os
 import asyncio
-from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.database import models
-from app.services.llm_service import LLMService
+from app.services.llm_service import llm_service          # shared singleton
 from app.services.memory_loader import build_memory_block
+from app.prompts.system_prompt import build_system_prompt
 
-llm = LLMService()
+async def handle_message(
+    db: AsyncIOMotorDatabase, user_id: int, user_text: str
+) -> tuple[str, str | None]:
+    # 1. Append the user message; the returned array gives char count + active
+    #    history in a single round-trip (no separate buffer reads).
+    messages = await models.add_message_to_buffer(db, user_id, "user", user_text)
+    buffer_chars = sum(len(m["content"]) for m in messages)
+    active_history = [{"role": m["role"], "content": m["content"]} for m in messages]
 
-async def handle_message(db: AsyncIOMotorDatabase, user_id: int, user_text: str) -> str:
-    # 1. Append incoming user message to buffer
-    await models.add_message_to_buffer(db, user_id, "user", user_text)
-    
-    # 2. Check for buffer overflow
-    buffer_chars = await models.get_buffer_char_count(db, user_id)
+    # 2. Buffer overflow -> non-blocking background extraction.
     if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
         from app.services.user_task_manager import user_task_manager
-        logger.info(f"Buffer overflow triggered for user {user_id} ({buffer_chars} characters). Launching background extraction...")
         asyncio.create_task(user_task_manager.run_extractor(user_id))
 
-    # 3. Read editable persona file
-    persona_path = config.PERSONA_FILE
-    if os.path.exists(persona_path):
-        with open(persona_path, "r", encoding="utf-8") as f:
-            persona = f.read()
-    else:
-        persona = "You are ThinkMate, a warm AI companion."
-
-    # 4. Build memory context block using the active connection
+    # 3. Assemble the system prompt (persona is cached by mtime; see _load_persona).
     memory_block, needs_compression = await build_memory_block(db, user_id)
+    system_prompt = build_system_prompt(_load_persona(), memory_block)
 
-    # 5. Assemble complete system prompt
-    from app.prompts.system_prompt import build_system_prompt
-    system_prompt = build_system_prompt(persona, memory_block)
+    # 4. ONE LLM call -> reply + optional reaction.
+    reply_text, reaction = await llm_service.generate_reply_bundle(
+        user_id, system_prompt, active_history
+    )
 
-    # 6. Fetch active (remaining) history
-    active_history = await models.get_chat_buffer(db, user_id)
-
-    # 7. Query chatbot response (passing user_id for logging)
-    reply_text = await llm.generate_response(user_id, system_prompt, active_history)
-
-    # 8. Append bot response back to buffer
+    # 5. Persist the assistant reply.
     await models.add_message_to_buffer(db, user_id, "assistant", reply_text)
-    
-    # 9. Trigger non-blocking memory compression in the background if threshold exceeded
+
+    # 6. Memory over budget -> rate-limited background compression.
     if needs_compression:
         from app.services.user_task_manager import user_task_manager
-        logger.info(f"Memory size exceeded limit. Launching background compression task for user {user_id}...")
         asyncio.create_task(user_task_manager.run_compressor(user_id))
-        
-    return reply_text
+
+    return reply_text, reaction
 ```
+
+> The persona file is read through `_load_persona`, which re-reads only when the file's mtime
+> changes — preserving "edit persona without restart" while avoiding a blocking disk read on
+> every message. The reply and reaction are produced in a single call, so the batch processor
+> simply applies the returned reaction and sends the reply.
 
 ---
 

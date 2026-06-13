@@ -1,3 +1,8 @@
+"""Default text-message router: input guard, then enqueue for batched processing.
+
+Typing indicators are driven by ``UserTaskManager`` (which spans the batching delay and
+generation), so no aiogram typing middleware is involved here.
+"""
 from aiogram import Router, F
 from aiogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -6,18 +11,20 @@ from app.services.user_task_manager import user_task_manager
 
 router = Router(name="messages")
 
+
 @router.message(F.text)
 async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
-    user_id = message.from_user.id
-    user_text = message.text
+    # Ignore service/channel posts with no real sender.
+    if not message.from_user:
+        return
 
-    # --- INPUT LENGTH GUARD ---
+    user_text = message.text or ""
+
+    # Input length guard: ignore essays/code dumps entirely (not saved, not sent to LLM).
     if len(user_text) > config.MAX_INPUT_CHARS:
         await message.answer(
             "that's a lot of text 😅 keep it short — i'm better at conversations than essays"
         )
-        return  # Ignore completely, do not save to buffer or process with LLM
+        return
 
-    # Enqueue conversational message for batching/processing
-    await user_task_manager.enqueue_message(message.bot, user_id, user_text, message)
-
+    await user_task_manager.enqueue_message(message.bot, message.from_user.id, user_text, message)
