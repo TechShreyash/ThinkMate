@@ -8,6 +8,7 @@ audit logging to ``llm_audit_log`` (off the chat hot path, fire-and-forget).
 See docs/development/llm_integration.md and docs/development/hardening_plan.md.
 """
 import json
+import time
 import asyncio
 import traceback
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from app.services.schemas import (
     GroupMemoryExtraction,
 )
 from app.services.reactions import ALLOWED_REACTIONS, normalize_reaction
+from app.services.metrics import metrics
 from app.database import get_db
 
 T = TypeVar("T", bound=BaseModel)
@@ -191,6 +193,7 @@ class LLMService:
         inputs = {"system_prompt": system_prompt, "messages": messages}
 
         try:
+            start = time.perf_counter()
             response = await self._with_retries(
                 lambda: self.client.chat.completions.create(
                     model=config.LLM_MODEL,
@@ -212,10 +215,12 @@ class LLMService:
                 {"raw_text": raw, "parsed_json": parsed_json},
                 "success",
             )
+            metrics.record_llm("chat_reply", ok=True, latency=time.perf_counter() - start)
             if with_affinity:
                 return reply, reaction, affinity_delta
             return reply, reaction
         except Exception as e:
+            metrics.record_llm("chat_reply", ok=False, latency=time.perf_counter() - start)
             self._fire_log(user_id, "chat_reply", inputs, status="failed", error=traceback.format_exc())
             logger.error(f"Reply generation failed for user {user_id}: {e}")
             raise
@@ -258,6 +263,7 @@ class LLMService:
         otherwise/falling back to ``json_object`` with schema instructions appended.
         """
         inputs = {"system_prompt": messages[0]["content"], "messages": messages}
+        start = time.perf_counter()
 
         if config.LLM_STRUCTURED_MODE == "native_parse":
             try:
@@ -275,6 +281,7 @@ class LLMService:
                         {"raw_text": completion.choices[0].message.content, "parsed_json": parsed.model_dump()},
                         "success",
                     )
+                    metrics.record_llm(call_type, ok=True, latency=time.perf_counter() - start)
                     return parsed
                 logger.warning(f"{call_type}: native parse returned None; falling back to json_object.")
             except Exception as e:  # noqa: BLE001
@@ -307,8 +314,10 @@ class LLMService:
                 user_id, call_type, inputs,
                 {"raw_text": raw, "parsed_json": parsed.model_dump()}, "success",
             )
+            metrics.record_llm(call_type, ok=True, latency=time.perf_counter() - start)
             return parsed
         except Exception as e:  # noqa: BLE001
+            metrics.record_llm(call_type, ok=False, latency=time.perf_counter() - start)
             self._fire_log(user_id, call_type, inputs, status="failed", error=traceback.format_exc())
             logger.error(f"{call_type}: structured call failed for user {user_id}: {e}")
             return None

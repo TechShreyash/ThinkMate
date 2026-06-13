@@ -6,6 +6,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, Update
 from app.config import config
 from app.database.connection import db_session
+from app.services.metrics import metrics
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -59,6 +60,7 @@ class ThrottlingMiddleware(BaseMiddleware):
                     pass
             window.append(now)  # extend the window if they keep spamming
             self.users[user_id] = window
+            metrics.incr("throttle.drops")
             return
 
         window.append(now)

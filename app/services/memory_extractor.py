@@ -16,6 +16,7 @@ from app.database.connection import db_session
 from app.database import models
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block
+from app.services.metrics import metrics
 from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 
 # Maximum number of extraction LLM calls per run; each call re-snapshots the latest buffer.
@@ -160,6 +161,7 @@ async def _extract_and_trim_single(user_id: int):
     point (:func:`extract_and_trim`) was added around it.
     """
     logger.info(f"Memory extraction started for user {user_id}.")
+    metrics.incr("extraction.runs")
     keep_count = config.CHAT_BUFFER_TRIM
     try:
         for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
@@ -234,6 +236,7 @@ async def extract_and_trim_group(chat_id: int):
       bounded during an outage — the same all-fail-still-trim contract as the DM path.
     """
     logger.info(f"Group memory extraction started for chat {chat_id}.")
+    metrics.incr("extraction.runs")
     keep_count = config.CHAT_BUFFER_TRIM
     try:
         for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):

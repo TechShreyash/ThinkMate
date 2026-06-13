@@ -16,6 +16,7 @@ from aiogram.types import Message, ReactionTypeEmoji
 from app.config import config
 from app.database.connection import db_session
 from app.services.chat_manager import handle_message
+from app.services.metrics import metrics
 
 # Telegram chat.type values that map to the multi-party group path.
 _GROUP_CHAT_TYPES = ("group", "supergroup")
@@ -61,6 +62,7 @@ class UserTaskManager:
             if state is None:
                 state = UserState(chat_id)
                 self._states[chat_id] = state
+                metrics.set_gauge("conversations.active", len(self._states))
             return state
 
     def _ensure_sweeper(self):
@@ -89,6 +91,7 @@ class UserTaskManager:
             ]
             for cid in stale:
                 del self._states[cid]
+            metrics.set_gauge("conversations.active", len(self._states))
         if stale:
             logger.debug(f"Evicted {len(stale)} idle conversation states (now {len(self._states)} active).")
 
@@ -124,6 +127,7 @@ class UserTaskManager:
 
         if len(state.pending_messages) >= config.MAX_QUEUED_MESSAGES:
             logger.warning(f"Chat {chat_id} queue at limit ({config.MAX_QUEUED_MESSAGES}); dropping message.")
+            metrics.incr("queue.drops")
             return
 
         state.pending_messages.append({

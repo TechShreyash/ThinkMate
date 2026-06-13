@@ -33,6 +33,19 @@ def _env_bool(key: str, default: bool) -> bool:
     return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int_set(key: str, default: set[int] | None = None) -> set[int]:
+    raw = os.getenv(key, "")
+    result: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            try:
+                result.add(int(part))
+            except ValueError:
+                pass
+    return result or (default or set())
+
+
 class Config(BaseModel):
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = Field(default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", ""))
@@ -84,6 +97,10 @@ class Config(BaseModel):
     # --- Persona / features ---
     PERSONA_FILE: str = Field(default_factory=lambda: _env_str("PERSONA_FILE", "persona.md"))
     ENABLE_MESSAGE_REACTIONS: bool = Field(default_factory=lambda: _env_bool("ENABLE_MESSAGE_REACTIONS", True))
+
+    # --- Observability / ops ---
+    ADMIN_USER_IDS: set[int] = Field(default_factory=lambda: _env_int_set("ADMIN_USER_IDS"))
+    METRICS_LOG_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_LOG_INTERVAL_SECS", 0.0))
 
 
 config = Config()

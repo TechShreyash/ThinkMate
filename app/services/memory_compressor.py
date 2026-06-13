@@ -20,6 +20,7 @@ from app.database.connection import db_session
 from app.database import models
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block, compile_memory_text
+from app.services.metrics import metrics
 from app.prompts.compression_prompt import SYSTEM_COMPRESSION_PROMPT
 
 
@@ -70,6 +71,7 @@ async def _enforce_budget(db, user_id: int):
 async def compress_user_memory(user_id: int):
     """Compress the user's memory profile and enforce the character budget."""
     logger.info(f"Memory compression started for user {user_id}.")
+    metrics.incr("compression.runs")
     try:
         async with db_session() as db:
             memory_text, _ = await build_memory_block(db, user_id)
