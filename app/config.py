@@ -72,8 +72,14 @@ class Config(BaseModel):
     RATE_LIMIT_MAX_REQUESTS: int = Field(default_factory=lambda: _env_int("RATE_LIMIT_MAX_REQUESTS", 5))
     RATE_LIMIT_WINDOW_SECS: float = Field(default_factory=lambda: _env_float("RATE_LIMIT_WINDOW_SECS", 10.0))
     MAX_QUEUED_MESSAGES: int = Field(default_factory=lambda: _env_int("MAX_QUEUED_MESSAGES", 10))
-    MAX_INPUT_CHARS: int = Field(default_factory=lambda: _env_int("MAX_INPUT_CHARS", 1000))
-    MAX_RESPONSE_CHARS: int = Field(default_factory=lambda: _env_int("MAX_RESPONSE_CHARS", 1000))
+    MAX_INPUT_CHARS: int = Field(default_factory=lambda: _env_int("MAX_INPUT_CHARS", 2500))
+    MAX_RESPONSE_CHARS: int = Field(default_factory=lambda: _env_int("MAX_RESPONSE_CHARS", 2000))
+
+    # --- Group chat / ambient replies ---
+    GROUP_AMBIENT_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("GROUP_AMBIENT_COOLDOWN_SECS", 90.0))
+    GROUP_AMBIENT_BASE_RATE: float = Field(default_factory=lambda: _env_float("GROUP_AMBIENT_BASE_RATE", 0.25))
+    GROUP_CONTEXT_SCAN_EVERY: int = Field(default_factory=lambda: _env_int("GROUP_CONTEXT_SCAN_EVERY", 12))
+    AFFINITY_DEFAULT: float = Field(default_factory=lambda: _env_float("AFFINITY_DEFAULT", 0.5))
 
     # --- Persona / features ---
     PERSONA_FILE: str = Field(default_factory=lambda: _env_str("PERSONA_FILE", "persona.md"))
