@@ -146,19 +146,19 @@ graph TD
     - In `tests/test_health_and_command.py` (or a dedicated test), with a tiny `METRICS_LOG_INTERVAL_SECS` assert exactly one log line is emitted per interval (capture via loguru/caplog where practical) and no DB/LLM call occurs; assert that with interval ≤ 0 no task is started, and that an error raised inside one iteration is logged and the loop continues
     - _Requirements: 5.2, 5.3, 5.4_
 
-- [ ] 6. Runbook & documentation
+- [x] 6. Runbook & documentation
 
-  - [~] 6.1 Write the observability runbook
+  - [x] 6.1 Write the observability runbook
     - Create `docs/development/observability.md` documenting every metric name and meaning (with healthy vs. concerning values), how to read `llm_audit_log` via its compound `(user_id, 1),(timestamp, -1)` index and TTL, how to recognize the LLM-throughput ceiling using the saturation signals from `performance_and_scaling.md`, how to tune budgets/batching in response, and how to use the `/health` and `/metrics` commands (including the `ADMIN_USER_IDS` default and the optional periodic logger)
     - Include a navigation header / table of contents and cross-links per `.agents/rules/document_changes.md`
     - _Requirements: 6.1, 6.2, 6.3, 6.4_
 
-  - [~] 6.2 Cross-link docs and update config references
+  - [x] 6.2 Cross-link docs and update config references
     - Cross-link the new runbook from `README.md`, `docs/architecture.md`, and `docs/development/performance_and_scaling.md` (Step 5 — stateless audit & metrics), and mark Phase 10 progress in `docs/project_plan.md`
     - Document the new `ADMIN_USER_IDS` and `METRICS_LOG_INTERVAL_SECS` keys in `docs/development/configuration.md` and mirror them in `.env.example`
     - _Requirements: 6.5, 6.6_
 
-- [~] 7. Checkpoint - ensure the full suite passes
+- [x] 7. Checkpoint - ensure the full suite passes
   - Run the full test suite (`uv run pytest` or the project's configured command) and confirm every test passes with no warnings and no external services, including all pre-existing tests unmodified
   - Confirm the hot-path invariants still hold: one reply LLM call per batch, ≤3 Mongo round-trips, and that instrumentation adds only cheap in-memory operations (no DB/LLM round-trip) and never alters observable behavior
   - _Requirements: 2.7, 2.9, 7.6_

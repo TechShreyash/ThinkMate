@@ -2,6 +2,17 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 10 Observability: Implemented (metrics, health, runbook)
+
+### Added
+- **In-process metrics registry** (`app/services/metrics.py`): stdlib-only counters/gauges/timers with a `timer()` context manager, `record_llm()` helper, `snapshot()`, and `reset()`; every mutator is lock-guarded and never raises into a caller.
+- **Hot-path instrumentation** (additive, non-behavioral): LLM calls + latency by type (`llm_service`), throttle drops (`middlewares`), queue drops + `conversations.active` gauge (`user_task_manager`), and extraction/compression run counts (`memory_extractor`/`memory_compressor`).
+- **Health/readiness** (`app/services/health.py`): `liveness()` (no I/O, uptime + summary), async `readiness(db)` (single Mongo ping, never raises), and an optional periodic metrics logger wired into `main.py` (`METRICS_LOG_INTERVAL_SECS`, 0 = off).
+- **Admin commands** `/health` and `/metrics` (`commands.py`) gated by `ADMIN_USER_IDS` with a safe DM-only default; report status/uptime/metrics + readiness with no LLM call.
+- **Config**: optional `ADMIN_USER_IDS` and `METRICS_LOG_INTERVAL_SECS` (safe defaults; mirrored in `.env.example`/`configuration.md`).
+- **Runbook** `docs/development/observability.md` (metric meanings, reading `llm_audit_log`, recognizing the LLM-throughput ceiling, tuning) + cross-links from README/architecture/performance_and_scaling; `project_plan.md` Phase 10 checked.
+- **Tests** (33 new, full suite 158 passing): `test_metrics`, `test_metrics_instrumentation`, `test_health_and_command`, `test_metrics_logger`. All pre-existing tests pass unmodified.
+
 ## [2026-06-14] - Phase 10 Observability: Spec (Requirements + Design + Tasks)
 
 ### Added

@@ -177,6 +177,19 @@ externalizing state (e.g. Redis). The exact, mechanical migration path — and t
 rules that keep one instance healthy at scale — live in
 [performance_and_scaling.md](development/performance_and_scaling.md).
 
+### Observability (Phase 10)
+
+Operational visibility is built in-process, matching the single-instance model. A
+dependency-free in-memory metrics registry (`app/services/metrics.py`) records LLM
+volume/latency by call type, throttle and queue drops, the active-conversation gauge, and
+extraction/compression run counts using only cheap, lock-guarded increments on (or beside) the
+hot path — no added DB or LLM round-trip. Liveness/readiness helpers (`app/services/health.py`)
+back an admin `/health` (and optional `/metrics`) command that reports uptime, a Mongo ping, and
+a metrics summary, and an optional periodic logger emits that summary every
+`METRICS_LOG_INTERVAL_SECS`. This is intentionally **not** a Prometheus/OTel server — that
+remains the future Phase 12 sink. See [observability.md](development/observability.md) for the
+full metric catalog and runbook.
+
 ---
 
 ## 👥 Group Chat (Phase 9, implemented)

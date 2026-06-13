@@ -273,6 +273,13 @@ ambient-gate logic in `user_task_manager.py`/a new `group_gate.py`, `/quiet` `/c
 - Operators can answer "are we near the ceiling?" from metrics; audit queries use the compound
   index.
 
+**Status: implemented.** Delivered as a dependency-free, in-process layer — an in-memory metrics
+registry (`app/services/metrics.py`), additive hot-path instrumentation, liveness/readiness
+helpers (`app/services/health.py`), an admin `/health` (and `/metrics`) command gated by
+`ADMIN_USER_IDS` (DM-only default), and an optional periodic logger (`METRICS_LOG_INTERVAL_SECS`).
+Full metric catalog and runbook in [observability.md](development/observability.md). The
+Prometheus/OTel sink remains the future Phase 12 step.
+
 ---
 
 ## Phase 11 — Future: periodic consolidation ("dreaming")
@@ -305,11 +312,11 @@ steps in [performance_and_scaling.md](development/performance_and_scaling.md#hor
 - [ ] Phase 7 Hardening & efficiency
 - [ ] Phase 8 Tests
 - [x] Phase 9 Group chat
-- [ ] Phase 10 Observability & ops
+- [x] Phase 10 Observability & ops
 - [ ] Phase 11 Future: consolidation
 - [ ] Phase 12 Future: horizontal scale
 
-> Note: the current repository already implements Phases 0–9 (DM bot, hardened, plus group
-> chat). Phase 10 (observability/ops) is partially in place via structured logging and the
-> LLM audit log; Phases 11–12 are forward-looking. This plan is written so the project could
+> Note: the current repository already implements Phases 0–10 (DM bot, hardened, group chat,
+> plus the observability/ops layer — in-process metrics, `/health` & `/metrics` commands, and
+> the runbook). Phases 11–12 are forward-looking. This plan is written so the project could
 > also be rebuilt cleanly from scratch in this exact order.

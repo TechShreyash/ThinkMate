@@ -17,6 +17,7 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 *   **Data Isolation**: Built-in support for multi-user chat with strict per-user database isolation.
 *   **Group Chat & Affinity** *(supported; see [group_chat.md](docs/development/group_chat.md))*: In groups the bot always replies when addressed (mention, name, or reply-to-bot) and otherwise chimes in selectively through a no-LLM ambient gate (cooldown → keyword/scan-tick → affinity-weighted probability), keeping it engaging without spam or API abuse. Per-(chat, user) affinity and `/quiet` `/chatty` modes tune its chattiness, and group memory is extracted multi-party while staying attributed per user. DMs are unchanged.
 *   **Built for load**: Single long-polling instance hardened for 50k+ users — one LLM call per reply, ~3 DB round-trips on the hot path, bounded in-memory state, and a documented scale-out path (see [performance_and_scaling.md](docs/development/performance_and_scaling.md)).
+*   **Observability & ops** *(Phase 10)*: A dependency-free, in-process metrics registry tracks LLM volume/latency, throttle and queue drops, active conversations, and background-job runs. An admin `/health` command reports liveness, readiness, and a metrics summary, with an optional periodic metrics logger — all explained in the [Observability & Ops Runbook](docs/development/observability.md).
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `motor` (MongoDB async driver) for high performance and standard async workflow.
 
 ---
@@ -46,6 +47,7 @@ ThinkMate/
 │       ├── configuration.md        # Environment variables & tuning reference
 │       ├── testing_guide.md        # Test suite structure & mongomock mocking
 │       ├── performance_and_scaling.md  # Efficiency, ceiling & scale-out path
+│       ├── observability.md        # Metrics, health checks & ops runbook (Phase 10)
 │       └── hardening_plan.md       # Production hardening & scaling plan (living doc)
 │
 ├── app/                            # Source code directory
@@ -102,6 +104,7 @@ To implement or contribute to this project, please consult the specialized guide
     *   [Sliding Window & Memory Engine Mechanics](docs/development/memory_engine.md)
     *   [Group Chat, Ambient Replies & Affinity](docs/development/group_chat.md)
     *   [Performance, Efficiency & Scaling](docs/development/performance_and_scaling.md)
+    *   [Observability & Ops Runbook](docs/development/observability.md)
     *   [Testing Infrastructure & Mocking Suite](docs/development/testing_guide.md)
     *   [Configuration & Tuning Parameters Reference](docs/development/configuration.md)
 

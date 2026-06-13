@@ -89,6 +89,20 @@ These tune ThinkMate's behavior in groups/supergroups. They have no effect in DM
 
 ---
 
+## 📊 Observability / ops
+
+These tune the Phase 10 observability layer (in-process metrics, the `/health` and `/metrics`
+admin commands, and the optional periodic metrics logger). Both keys have safe defaults so the
+bot runs unchanged when they are unset. See [observability.md](observability.md) for the full
+metric catalog and runbook.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`ADMIN_USER_IDS`** | String (CSV) | *(blank → DM-only)* | **Purpose**: Comma-separated list of Telegram user ids allowed to use the `/health` and `/metrics` admin commands. Blanks are ignored and each id is coerced to `int`.<br>**How to Tune**: Leave empty to apply the safe default — the commands answer **only in private chats (DMs)** so a status report is never broadcast to a group. Set to specific ids (e.g. `123456789,987654321`) to restrict the commands to those operators in any chat. |
+| **`METRICS_LOG_INTERVAL_SECS`** | Float | `0.0` | **Purpose**: Interval, in seconds, for the optional background task that logs the metrics-snapshot summary (no DB/LLM call).<br>**How to Tune**: Keep `0` (or any value ≤ 0) to disable the periodic logger entirely. Set a positive value (e.g. `60`) to emit one summary log line per interval for a lightweight time series in the logs. |
+
+---
+
 ## 🔌 Connection Pool (advanced)
 
 The `motor` client uses a connection pool (driver default `maxPoolSize=100`). The *concurrently

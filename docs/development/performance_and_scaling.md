@@ -198,6 +198,11 @@ The first is almost always the real limit — and it is solved by a faster/paral
 endpoint, not by more bot replicas. Only scale horizontally when the event loop or DB is the
 proven bottleneck.
 
+These saturation signals are exactly what the in-process metrics surface (LLM
+volume/latency, throttle/queue drops, active conversations) — see
+[observability.md](observability.md) for the metrics that surface these signals and how to read
+them via `/health`.
+
 ---
 
 ## Horizontal-scale migration path (future)
@@ -222,7 +227,9 @@ lock contention) — but correctness must not depend on stickiness once locks ar
 set is saturated; the schema is already shard-friendly (every query is keyed by id).
 
 **Step 5 — Stateless audit & metrics.** Audit writes are already independent; add a metrics
-sink (Prometheus/OTel) so replicas are observable.
+sink (Prometheus/OTel) so replicas are observable. The in-process metrics registry and `/health`
+command shipped in Phase 10 (see [observability.md](observability.md)) are the single-instance
+precursor to this sink.
 
 **What does NOT change:** the data model, the prompts, the memory algorithms, the single
 reply+reaction call, and the public service functions. Only the *state layer* and the
