@@ -22,7 +22,12 @@ from openai import (
 from pydantic import BaseModel
 from loguru import logger
 from app.config import config
-from app.services.schemas import MemoryExtraction, MemoryCompression, ReplyBundle
+from app.services.schemas import (
+    MemoryExtraction,
+    MemoryCompression,
+    ReplyBundle,
+    GroupMemoryExtraction,
+)
 from app.services.reactions import ALLOWED_REACTIONS, normalize_reaction
 from app.database import get_db
 
@@ -327,6 +332,34 @@ class LLMService:
         return await self._structured_call(
             user_id=user_id, call_type="memory_extraction", model=model, messages=messages,
             schema=MemoryExtraction, temperature=config.EXTRACTION_TEMPERATURE, timeout=45.0,
+        )
+
+    async def extract_group_memory(
+        self, user_id_or_chat_id: int, system_prompt: str, user_history_text: str
+    ) -> GroupMemoryExtraction | None:
+        """Multi-party memory extraction over a rendered group segment (one LLM call).
+
+        Mirrors :meth:`extract_memory` exactly — same model selection, retry/json_object/
+        native_parse handling via ``_structured_call``, same ``EXTRACTION_TEMPERATURE`` and
+        45s timeout, and the same ``None``-on-failure contract — but validates against
+        :class:`GroupMemoryExtraction` so the result carries per-participant, name-tagged
+        updates. ``user_history_text`` is the multi-party segment rendered as
+        ``"SenderName: content"`` lines. The first argument is used only for audit logging
+        (a group chat_id here, a user_id in the DM path); it does not affect attribution,
+        which the caller resolves from the segment's own name->id map.
+
+        Returns ``None`` when the call fails (transient errors exhausted, or unparseable
+        output) so the caller can retry; a valid — possibly *empty* — result means success.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_history_text},
+        ]
+        model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
+        return await self._structured_call(
+            user_id=user_id_or_chat_id, call_type="group_memory_extraction", model=model,
+            messages=messages, schema=GroupMemoryExtraction,
+            temperature=config.EXTRACTION_TEMPERATURE, timeout=45.0,
         )
 
     async def compress_memory(

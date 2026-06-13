@@ -11,12 +11,19 @@ from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.database import models
+from app.services.affinity import affinity_cache
+from app.services.group_gate import scan_negative_signal
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block
 from app.prompts.system_prompt import build_system_prompt
 
 _DEFAULT_PERSONA = "You are ThinkMate, a warm, witty AI companion."
 _persona_cache: dict = {"path": None, "mtime": None, "content": _DEFAULT_PERSONA}
+
+# Affinity-down step applied to the speaker when a cheap "back off" keyword
+# (stop / quiet / spam / annoying / shut up) is detected in their message
+# (Requirement 4.5). AffinityCache.bump clamps the result to [0, 1].
+_NEGATIVE_AFFINITY_STEP = -0.1
 
 
 def _load_persona() -> str:
@@ -106,14 +113,32 @@ async def handle_message(
         reply_text, reaction, affinity_delta = await llm_service.generate_reply_bundle(
             chat_id, system_prompt, active_history, with_affinity=True
         )
-        # TODO(task 5.2): fold ``affinity_delta`` into the speaker's affinity via
-        # AffinityCache (write-through to chat_members, clamped to [0, 1]). The actual
-        # affinity application is intentionally deferred to task 5.2; here we only obtain
-        # it from the group reply call and log it, without wiring AffinityCache.
-        if affinity_delta is not None:
+        # Affinity signals (no extra LLM call; all clamping lives in AffinityCache.bump).
+        #
+        # Note: the mention/reply-to-bot affinity-up signal and the engagement-after-chime
+        # signal are routing-level and applied in task 3.2 (handlers/messages.py); here we
+        # handle only the two signals that are naturally available within handle_message:
+        # the reply bundle's ``affinity_delta`` fold and the negative-keyword down-bump.
+
+        # (a) Fold the reply bundle's optional ``affinity_delta`` into the speaker's
+        #     affinity (Requirement 4.6). Skip no-op deltas (None / 0).
+        if affinity_delta is not None and affinity_delta != 0:
+            new_affinity = await affinity_cache.bump(db, chat_id, sender_id, affinity_delta)
             logger.debug(
-                f"Group reply affinity_delta={affinity_delta} for chat {chat_id} sender {sender_id} "
-                f"(reason={reason}); application deferred to task 5.2."
+                f"affinity signal=reply_delta chat={chat_id} sender={sender_id} "
+                f"delta={affinity_delta:+.3f} -> {new_affinity:.3f} (reason={reason})"
+            )
+
+        # (b) Negative "back off" keyword -> small affinity-down for the speaker
+        #     (Requirement 4.5). This branch only runs when a reply is produced
+        #     (addressed/ambient), which is acceptable for now per task 5.2.
+        if scan_negative_signal(user_text):
+            new_affinity = await affinity_cache.bump(
+                db, chat_id, sender_id, _NEGATIVE_AFFINITY_STEP
+            )
+            logger.debug(
+                f"affinity signal=negative_keyword chat={chat_id} sender={sender_id} "
+                f"delta={_NEGATIVE_AFFINITY_STEP:+.3f} -> {new_affinity:.3f}"
             )
     else:
         reply_text, reaction = await llm_service.generate_reply_bundle(chat_id, system_prompt, active_history)

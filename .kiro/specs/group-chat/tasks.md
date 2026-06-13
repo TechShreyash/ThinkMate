@@ -109,7 +109,7 @@ graph TD
     - Assert `chat_members` upsert/read round-trips, applies `AFFINITY_DEFAULT` and `mode="auto"` on first read, clamps affinity to [0,1], and rejects/normalizes invalid modes
     - _Requirements: 1.2, 1.7, 2.1, 4.1, 4.3, 4.7_
 
-- [ ] 2. Chat-context plumbing through orchestrator & task manager
+- [x] 2. Chat-context plumbing through orchestrator & task manager
 
   - [x] 2.1 Add chat context to `handle_message` + multi-party rendering
     - In `app/services/chat_manager.py`, extend `handle_message(db, chat_id, user_text, *, chat_type="private", sender_id=None, sender_name="", reason="reply", participants=None)` with DM-safe defaults (`sender_id` defaults to `chat_id`)
@@ -117,13 +117,13 @@ graph TD
     - Parse the optional `affinity_delta` from the reply bundle without changing DM `(reply, reaction)` behavior or the JSON fallback path
     - _Requirements: 1.1, 1.2, 1.5, 2.7, 4.6_
 
-  - [~] 2.2 Add chat context + reason to `enqueue_message`
+  - [x] 2.2 Add chat context + reason to `enqueue_message`
     - In `app/services/user_task_manager.py`, extend `enqueue_message(self, bot, chat_id, text, message, *, user_id=None, chat_type="private", sender_name="", reason="reply")`; key batching/coalescing state on `chat_id` (DM `chat_id == user_id` keeps current per-user batching)
     - Thread `chat_type`, `sender_id`/`sender_name`, and `reason` into `_process_batch` → `handle_message`; `reason="ambient"` selects the chime-in path
     - Preserve typing loop, queue cap, batch delay, and hard deadline behavior unchanged
     - _Requirements: 1.1, 1.5, 2.1_
 
-  - [~] 2.3 Tests: plumbing + DM backward-compat
+  - [x] 2.3 Tests: plumbing + DM backward-compat
     - Using mongomock + pytest-asyncio, assert a DM call `handle_message(db, user_id, text)` behaves exactly as before (one reply call, same buffer `_id`, single-party history) by patching `generate_reply_bundle` with `AsyncMock`
     - Assert `enqueue_message` batches by `chat_id` and that the existing batching/deadline/queue tests still pass with the new defaulted signature
     - _Requirements: 1.1, 1.2, 1.5, 1.6, 1.7, 2.7_
@@ -135,7 +135,7 @@ graph TD
     - Keep these functions free of aiogram/DB imports (accept plain values) so they are directly unit-testable
     - _Requirements: 2.2, 2.3, 2.4, 3.2, 4.5_
 
-  - [~] 3.2 Chat-type routing + addressed wiring in `messages.py`
+  - [x] 3.2 Chat-type routing + addressed wiring in `messages.py`
     - In `app/handlers/messages.py`, branch first on chat type: `private` → existing DM enqueue path unchanged; `channel` → ignore entirely (no buffer write); `group`/`supergroup` → group path
     - In the group path, always buffer the message (with `sender_id`/`sender_name`), then use `is_addressed(...)` to decide: addressed → `enqueue_message(reason="reply")`; otherwise hand off to the ambient gate (wired in 4.2)
     - Ensure registered commands (incl. `/quiet` `/chatty`) are still routed to handlers and never treated as conversation or ambient triggers
@@ -169,12 +169,12 @@ graph TD
     - Bound the cache with the same idle-eviction philosophy as `UserState`; never consult/create records for private chats
     - _Requirements: 4.2, 4.3, 4.8_
 
-  - [~] 5.2 Affinity signals + `affinity_delta` fold
+  - [x] 5.2 Affinity signals + `affinity_delta` fold
     - Apply affinity-up on mention/reply-to-bot and on engagement right after a chime-in; affinity-down on `scan_negative_signal` hits; fold the reply bundle's optional `affinity_delta` into the speaker's affinity
     - Clamp every update to [0,1] via `AffinityCache.bump`; log signal type + resulting affinity at debug level; no extra LLM call for any signal
     - _Requirements: 4.4, 4.5, 4.6, 4.7, 7.5_
 
-  - [~] 5.3 Add `/quiet` and `/chatty` commands
+  - [x] 5.3 Add `/quiet` and `/chatty` commands
     - In `app/handlers/commands.py`, add `/quiet` (set member `mode="quiet"`, suppress ambient) and `/chatty` (set `mode="chatty"`, boost) via `AffinityCache.set_mode`, with an acknowledgement reply; register them in the commands router / `main.py` command list
     - In a private chat, respond gracefully (explanatory message) without creating any group affinity state
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
@@ -184,14 +184,14 @@ graph TD
     - Assert `/quiet` sets `quiet` and suppresses ambient (gate returns False), `/chatty` sets `chatty` and boosts probability, and both respond gracefully in a DM
     - _Requirements: 4.2, 4.4, 4.5, 4.6, 4.7, 4.8, 6.1, 6.2, 6.3_
 
-- [ ] 6. Multi-party group memory extraction
+- [x] 6. Multi-party group memory extraction
 
-  - [~] 6.1 Implement multi-party extraction + name→id mapping
+  - [x] 6.1 Implement multi-party extraction + name→id mapping
     - Add a group extraction path (in `app/services/memory_extractor.py` and a `group`-aware `llm_service` call returning `GroupMemoryExtraction`) that makes a single LLM call over the multi-party segment, builds a name→id map from the segment's `sender_id`/`sender_name`, and saves each participant's updates to their per-`user_id` profile via `save_extracted_memories`
     - Skip updates whose tagged participant name cannot be resolved (no misattribution); trim the processed segment with the existing atomic `$pull`-on-cutoff behavior; keep the DM single-party extraction path unchanged
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6_
 
-  - [~] 6.2 Tests: multi-party attribution
+  - [x] 6.2 Tests: multi-party attribution
     - Using mongomock + pytest-asyncio with the extraction LLM patched (`AsyncMock` returning a `GroupMemoryExtraction`), assert a two-speaker segment yields one extraction call and saves Alice's/Bob's updates to the correct `user_id` profiles
     - Assert an unresolved participant name is skipped (no crash, no misattribution) and the processed segment is trimmed without clobbering concurrently appended messages
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6_

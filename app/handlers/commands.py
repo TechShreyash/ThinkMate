@@ -4,6 +4,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.database import models
+from app.services.affinity import affinity_cache
 from app.services.memory_loader import build_memory_block
 
 router = Router(name="commands")
@@ -72,3 +73,31 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
         return
     await models.reset_user(db, message.from_user.id)
     await message.answer("Done — I've cleared everything. We're starting fresh. 🌱")
+
+
+@router.message(Command("quiet"))
+async def cmd_quiet(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    if message.chat.type == "private":
+        await message.answer(
+            "/quiet and /chatty control how much I chime in within a group. "
+            "In our DM I always reply to you, so there's nothing to quiet here. 🙂"
+        )
+        return
+    await affinity_cache.set_mode(db, message.chat.id, message.from_user.id, "quiet")
+    await message.answer("Okay, I'll stay quiet around you here. Mention me if you need me. 🤫")
+
+
+@router.message(Command("chatty"))
+async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    if message.chat.type == "private":
+        await message.answer(
+            "/quiet and /chatty control how much I chime in within a group. "
+            "In our DM I always reply to you, so there's nothing to boost here. 🙂"
+        )
+        return
+    await affinity_cache.set_mode(db, message.chat.id, message.from_user.id, "chatty")
+    await message.answer("You got it — I'll chime in more with you here! 😄")
