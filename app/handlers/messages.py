@@ -20,6 +20,22 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
 
     user_text = message.text or ""
 
+    # Skip bot commands: registered commands are handled by commands.py, and any
+    # unregistered slash command falls through to this catch-all. Commands are not
+    # conversation, so ignore them entirely (no reply, no enqueue). Treat the message
+    # as a command when EITHER its text starts with "/" OR Telegram reports a
+    # bot_command entity at offset 0 (covering "/foo" and "/foo@BotName"). The leading
+    # "/" check alone is sufficient and reliable; the entity check is an extra safety
+    # net. This does not misclassify text like "2/3" since it does not start with "/".
+    # Use getattr-safe access so a missing/non-iterable entities value cannot raise.
+    entities = message.entities or []
+    is_command = user_text.startswith("/") or any(
+        getattr(e, "type", None) == "bot_command" and getattr(e, "offset", None) == 0
+        for e in entities
+    )
+    if is_command:
+        return
+
     # Input length guard: ignore essays/code dumps entirely (not saved, not sent to LLM).
     if len(user_text) > config.MAX_INPUT_CHARS:
         await message.answer(

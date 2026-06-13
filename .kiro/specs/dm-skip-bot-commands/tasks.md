@@ -67,9 +67,9 @@ graph TD
   - Mark task complete when tests are written, run, and passing on unfixed code
   - _Requirements: 3.1, 3.3, 3.4_
 
-- [ ] 3. Fix: exclude bot commands from the DM catch-all handler
+- [x] 3. Fix: exclude bot commands from the DM catch-all handler
 
-  - [~] 3.1 Implement the command guard in `handle_user_message`
+  - [x] 3.1 Implement the command guard in `handle_user_message`
     - In `app/handlers/messages.py`, after the existing empty-sender guard and before the length guard / enqueue, add an early-return when the message text is a bot command
     - Use the most robust aiogram-idiomatic detection: treat the message as a command when its first entity is of type `bot_command` at `offset == 0`, falling back to `message.text.startswith("/")` when entities are absent (handles `/foo` and `/foo@BotName`, does not misclassify `2/3`)
     - Return early (no reply, no enqueue) when the command guard matches
@@ -79,14 +79,14 @@ graph TD
     - _Preservation: Preservation Requirements — conversational reply+enqueue, length guard, empty-sender (from design)_
     - _Requirements: 2.1, 2.2, 2.3_
 
-  - [~] 3.2 Verify bug condition exploration test now passes
+  - [x] 3.2 Verify bug condition exploration test now passes
     - **Property 1: Expected Behavior** - Bot commands are not treated as conversation
     - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
     - Run the bug condition exploration test from task 1
     - **EXPECTED OUTCOME**: Test PASSES (confirms commands are now ignored)
     - _Requirements: 2.1, 2.2, 2.3_
 
-  - [~] 3.3 Verify preservation tests still pass
+  - [x] 3.3 Verify preservation tests still pass
     - **Property 2: Preservation** - Non-command handling unchanged
     - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
     - Run the preservation property tests from task 2
