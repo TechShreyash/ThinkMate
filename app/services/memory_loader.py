@@ -2,17 +2,14 @@ import json
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 
-async def build_memory_block(db: AsyncIOMotorDatabase, user_id: int) -> tuple[str, bool]:
-    """
-    Loads all components of the user's memory from MongoDB and compiles them into a structured text block.
-    Returns:
-        (compiled_memory_text, needs_compression_flag)
-    """
-    # Fetch unified user profile
-    doc = await db["user_profiles"].find_one({"_id": user_id})
-    if not doc:
-        doc = {}
 
+def compile_memory_text(doc: dict) -> str:
+    """Compile a user-profile document into the structured memory text block.
+
+    Pure (no I/O) so callers that already hold the profile in memory — e.g. the
+    deterministic budget enforcer — can recompute the block length after dropping
+    items without issuing a fresh read per iteration.
+    """
     profile_summary = doc.get("profile_summary") or ""
     comm_style = doc.get("communication_style") or ""
     facts = doc.get("facts") or []
@@ -71,10 +68,24 @@ async def build_memory_block(db: AsyncIOMotorDatabase, user_id: int) -> tuple[st
         lines.append(mood_str)
     else:
         lines.append("Mood: calm")
-    
-    compiled_text = "\n".join(lines)
-    
+
+    return "\n".join(lines)
+
+
+async def build_memory_block(db: AsyncIOMotorDatabase, user_id: int) -> tuple[str, bool]:
+    """
+    Loads all components of the user's memory from MongoDB and compiles them into a structured text block.
+    Returns:
+        (compiled_memory_text, needs_compression_flag)
+    """
+    # Fetch unified user profile
+    doc = await db["user_profiles"].find_one({"_id": user_id})
+    if not doc:
+        doc = {}
+
+    compiled_text = compile_memory_text(doc)
+
     # Check if compiled text length exceeds the user memory budget
     needs_compression = len(compiled_text) > config.USER_MEMORY_BUDGET_CHARS
-    
+
     return compiled_text, needs_compression

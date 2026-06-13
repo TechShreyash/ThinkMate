@@ -131,3 +131,90 @@ async def test_idle_state_eviction():
         assert 91001 not in mgr._states
     finally:
         config.USER_STATE_TTL_SECS = original
+
+
+@pytest.mark.asyncio
+async def test_extraction_retries_and_folds_in_new_messages():
+    """A failed extraction is retried, and messages that arrive between attempts are processed.
+
+    Attempt 1 fails (returns None) but appends 3 new messages; attempt 2 must re-snapshot the
+    (now larger) buffer so the older messages it newly covers are folded into the segment.
+    """
+    original_trim = config.CHAT_BUFFER_TRIM
+    config.CHAT_BUFFER_TRIM = 2
+    try:
+        user_id = 70010
+        async with connection.db_session() as db:
+            for i in range(5):
+                await models.add_message_to_buffer(db, user_id, "user", f"old{i}")
+
+        captured: dict = {}
+        calls = {"n": 0}
+
+        async def fake_extract(*, user_id, system_prompt, user_history_text):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # New messages arrive while the first (failing) call is in flight.
+                async with connection.db_session() as db:
+                    for j in range(3):
+                        await models.add_message_to_buffer(db, user_id, "user", f"new{j}")
+                return None  # signal failure -> triggers a retry
+            captured["text"] = user_history_text
+            return MemoryExtraction()
+
+        with patch(
+            "app.services.llm_service.LLMService.extract_memory",
+            new=AsyncMock(side_effect=fake_extract),
+        ):
+            from app.services.memory_extractor import extract_and_trim
+            await extract_and_trim(user_id)
+
+        assert calls["n"] == 2  # retried exactly once after the failure
+        # The second attempt's segment now covers messages it didn't on attempt 1.
+        assert "old0" in captured["text"]
+        assert "old4" in captured["text"]
+        assert "new0" in captured["text"]
+
+        # Buffer trimmed down to the newest CHAT_BUFFER_TRIM messages.
+        async with connection.db_session() as db:
+            remaining = [m["content"] for m in await models.get_chat_buffer(db, user_id)]
+        assert remaining == ["new1", "new2"]
+    finally:
+        config.CHAT_BUFFER_TRIM = original_trim
+
+
+@pytest.mark.asyncio
+async def test_extraction_all_attempts_fail_still_trims():
+    """If every extraction attempt fails, the oldest messages are trimmed anyway.
+
+    This bounds the buffer during an LLM outage (a deliberate trade: un-extracted memory is
+    dropped rather than letting the buffer grow without limit). Memory must not be written.
+    """
+    original_trim = config.CHAT_BUFFER_TRIM
+    config.CHAT_BUFFER_TRIM = 2
+    try:
+        user_id = 70011
+        async with connection.db_session() as db:
+            await models.ensure_user(db, user_id, "u", "U")
+            for i in range(5):
+                await models.add_message_to_buffer(db, user_id, "user", f"old{i}")
+
+        with patch(
+            "app.services.llm_service.LLMService.extract_memory",
+            new_callable=AsyncMock,
+        ) as mock_extract, patch(
+            "app.database.models.save_extracted_memories", new_callable=AsyncMock
+        ) as mock_save:
+            mock_extract.return_value = None  # always fail
+            from app.services.memory_extractor import extract_and_trim, MAX_EXTRACTION_ATTEMPTS
+            await extract_and_trim(user_id)
+
+            assert mock_extract.await_count == MAX_EXTRACTION_ATTEMPTS  # 3 calls max
+            mock_save.assert_not_awaited()  # never write memory on failure
+
+        async with connection.db_session() as db:
+            remaining = [m["content"] for m in await models.get_chat_buffer(db, user_id)]
+        # Trimmed to the newest CHAT_BUFFER_TRIM messages despite total failure.
+        assert remaining == ["old3", "old4"]
+    finally:
+        config.CHAT_BUFFER_TRIM = original_trim

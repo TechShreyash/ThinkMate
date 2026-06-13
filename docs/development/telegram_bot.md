@@ -175,6 +175,24 @@ await last_message.answer(reply_text)
 
 ---
 
+## 👥 Group Chat Routing *(Phase 9)*
+
+In groups/supergroups the message router does **chat-type + identity routing** before enqueuing:
+
+- **Addressed** (bot @mentioned, bot's name used, or a reply to the bot's message) → always
+  reply, exactly like a DM.
+- **Not addressed** → run the **ambient gate** (per-chat cooldown → cheap keyword scan →
+  affinity-weighted probability) and only enqueue a chime-in for the few messages that survive.
+  Every group message is still buffered cheaply for context and learning.
+- **Channels** → ignored.
+
+Two extra commands manage chattiness per group: `/quiet` (mode → quiet, suppress ambient) and
+`/chatty` (mode → chatty, boost). Affinity and mode live in `chat_members` (see
+[database.md](database.md)). DMs are unchanged (`chat_id == user_id`). Full design and the
+no-LLM ambient funnel are in [group_chat.md](group_chat.md).
+
+---
+
 ## 💡 Key Architectural Guidelines
 
 1.  **No business logic in handlers** — handlers validate, then call services/models with the injected `db`.

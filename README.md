@@ -15,6 +15,8 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 *   **Editable Persona**: Change the bot's tone, rules, and traits dynamically by editing the [persona.md](persona.md) markdown file—no service restart required.
 *   **Dynamic Message Reactions**: The conversational reply and an optional Telegram emoji reaction are produced in a **single** LLM call (strict JSON `{reply, reaction}`), then the reaction is normalized to Telegram's accepted set and applied gracefully.
 *   **Data Isolation**: Built-in support for multi-user chat with strict per-user database isolation.
+*   **Group Chat & Affinity** *(designed; see [group_chat.md](docs/development/group_chat.md))*: In groups the bot always replies when addressed and otherwise chimes in selectively through a no-LLM ambient gate (cooldown → keyword scan → affinity-weighted probability), keeping it engaging without spam or API abuse.
+*   **Built for load**: Single long-polling instance hardened for 50k+ users — one LLM call per reply, ~3 DB round-trips on the hot path, bounded in-memory state, and a documented scale-out path (see [performance_and_scaling.md](docs/development/performance_and_scaling.md)).
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `motor` (MongoDB async driver) for high performance and standard async workflow.
 
 ---
@@ -40,6 +42,10 @@ ThinkMate/
 │       ├── database.md             # MongoDB schema & async document CRUD
 │       ├── llm_integration.md      # LLM client, prompt engineering & JSON mode
 │       ├── memory_engine.md        # Sliding window, extraction & consolidation
+│       ├── group_chat.md           # Group behavior, ambient replies & affinity
+│       ├── configuration.md        # Environment variables & tuning reference
+│       ├── testing_guide.md        # Test suite structure & mongomock mocking
+│       ├── performance_and_scaling.md  # Efficiency, ceiling & scale-out path
 │       └── hardening_plan.md       # Production hardening & scaling plan (living doc)
 │
 ├── app/                            # Source code directory
@@ -73,9 +79,7 @@ ThinkMate/
 │   │   ├── extraction_prompt.py    # Structured JSON extraction template
 │   │   └── compression_prompt.py   # Memory compression instructions
 │   │
-│   └── utils/                      # Helper modules
-│       ├── __init__.py
-│       └── helpers.py              # Parsing, formatting, and time helpers
+│   └── __init__.py                 # Package init + loguru logging setup
 │
 └── tests/                          # Automated test suites (pytest + mongomock)
 ```
@@ -94,6 +98,8 @@ To implement or contribute to this project, please consult the specialized guide
     *   [Async MongoDB Schema Design](docs/development/database.md)
     *   [LLM Client & Prompt Engineering](docs/development/llm_integration.md)
     *   [Sliding Window & Memory Engine Mechanics](docs/development/memory_engine.md)
+    *   [Group Chat, Ambient Replies & Affinity](docs/development/group_chat.md)
+    *   [Performance, Efficiency & Scaling](docs/development/performance_and_scaling.md)
     *   [Testing Infrastructure & Mocking Suite](docs/development/testing_guide.md)
     *   [Configuration & Tuning Parameters Reference](docs/development/configuration.md)
 
@@ -101,8 +107,8 @@ To implement or contribute to this project, please consult the specialized guide
 
 ## 🛠️ Tech Stack Overview
 
-*   **Language**: Python 3.10+
-*   **Telegram Framework**: `aiogram` (v3.x) with DB dependency injection & auto-typing indicators
+*   **Language**: Python 3.12+
+*   **Telegram Framework**: `aiogram` (v3.x) with DB dependency injection & task-manager-driven typing indicators
 *   **Database**: `MongoDB` (via `motor` async driver)
 *   **LLM Client**: `openai` SDK against any OpenAI-compatible endpoint, JSON-mode structured outputs (with native-parse opt-in), transient-error retries, and centralized audit logging
 *   **Data Validation**: `Pydantic` (v2.x) schemas for guaranteed JSON outputs

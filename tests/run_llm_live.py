@@ -28,6 +28,7 @@ async def main():
     )
     instruction = f"{SYSTEM_EXTRACTION_PROMPT}\n\n=== CURRENT MEMORIES ===\nNo memories recorded yet.\n"
     extraction = await llm_service.extract_memory(999, instruction, chat_log)
+    assert extraction is not None, "extract_memory returned None (the call failed)"
     logger.info(f"   new_facts={extraction.new_facts}")
     logger.info(f"   new_events={extraction.new_events}")
     logger.info(f"   emotional_state={extraction.emotional_state}")

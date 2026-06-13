@@ -61,7 +61,9 @@ async def handle_message(
 
 ## 🔍 Memory Extraction Logic (`memory_extractor.py`)
 
-The memory extraction pipeline in [memory_extractor.py](../../app/services/memory_extractor.py) extracts key details from conversation histories and saves them to the database.
+The memory extraction pipeline in [memory_extractor.py](../../app/services/memory_extractor.py) extracts key details from conversation histories and saves them to the database. All LLM access goes through the shared `llm_service` singleton (one client/connection pool per process).
+
+The extraction call is **retried up to `MAX_EXTRACTION_ATTEMPTS` (3) times**, and the buffer is **re-read on every attempt** so messages that arrive while a slow call is in flight are folded into the next attempt rather than missed. Success vs. failure is distinguished by `extract_memory` returning a value vs. `None` — an *empty* `MemoryExtraction` still counts as success (nothing was worth saving). If every attempt fails (e.g. an LLM outage), the oldest messages are trimmed anyway so the buffer stays bounded; memory is never written on a failed run.
 
 ```python
 # app/services/memory_extractor.py
@@ -69,103 +71,100 @@ from loguru import logger
 from app.config import config
 from app.database.connection import db_session
 from app.database import models
-from app.services.llm_service import LLMService
+from app.services.llm_service import llm_service          # shared singleton
 from app.services.memory_loader import build_memory_block
 from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 
-llm = LLMService()
+MAX_EXTRACTION_ATTEMPTS = 3  # max extraction LLM calls per run; each re-snapshots the buffer
 
 async def extract_and_trim(user_id: int):
-    logger.info(f"Memory extraction triggered in background for user {user_id}...")
+    logger.info(f"Memory extraction started for user {user_id}.")
+    keep_count = config.CHAT_BUFFER_TRIM
     try:
+        for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
+            async with db_session() as db:
+                buffer_messages = await models.get_chat_buffer(db, user_id)
+                if len(buffer_messages) <= keep_count:
+                    return  # nothing left (a concurrent run may have trimmed it)
+
+                trim_size = len(buffer_messages) - keep_count
+                segment = buffer_messages[:trim_size]            # oldest messages
+                current_memory_text, _ = await build_memory_block(db, user_id)
+                instruction_prompt = (
+                    f"{SYSTEM_EXTRACTION_PROMPT}\n\n"
+                    f"=== CURRENT MEMORIES ===\n{current_memory_text}\n"
+                )
+
+                extraction = await llm_service.extract_memory(
+                    user_id=user_id,
+                    system_prompt=instruction_prompt,
+                    user_history_text=_format_segment(segment),
+                )
+                if extraction is not None:                       # success (may be empty)
+                    await models.save_extracted_memories(db, user_id, extraction)
+                    await models.delete_oldest_buffer_messages(db, user_id, trim_size)
+                    return
+            logger.warning(f"Extraction attempt {attempt}/{MAX_EXTRACTION_ATTEMPTS} failed.")
+
+        # Every attempt failed -> trim anyway so an outage can't grow the buffer unbounded.
         async with db_session() as db:
             buffer_messages = await models.get_chat_buffer(db, user_id)
-            keep_count = config.CHAT_BUFFER_TRIM
-            
-            if len(buffer_messages) <= keep_count:
-                return
-                
-            trim_size = len(buffer_messages) - keep_count
-            extraction_segment = buffer_messages[:trim_size]
-            
-            # Format segment as a readable conversation text block
-            formatted_chat_log = ""
-            for msg in extraction_segment:
-                role_label = "User" if msg["role"] == "user" else "Assistant"
-                formatted_chat_log += f"{role_label}: {msg['content']}\n"
-
-            # 2. Get current memory profile
-            current_memory_text, _ = await build_memory_block(db, user_id)
-
-            # 3. Compile extraction instructions
-            instruction_prompt = (
-                f"{SYSTEM_EXTRACTION_PROMPT}\n\n"
-                f"=== CURRENT MEMORIES ===\n"
-                f"{current_memory_text}\n"
-            )
-
-            # 4. Query LLM to parse updates (passing user_id for logging)
-            extraction = await llm.extract_memory(
-                user_id=user_id,
-                system_prompt=instruction_prompt,
-                user_history_text=formatted_chat_log
-            )
-            
-            # 5. Apply extracted facts, beliefs, and events to the database
-            await models.save_extracted_memories(db, user_id, extraction)
-            
-            # 6. Delete the processed segment from buffer
-            await models.delete_oldest_buffer_messages(db, user_id, trim_size)
-            logger.info(f"Memory extraction completed. Trimmed oldest {trim_size} messages from user {user_id}'s buffer.")
-            
+            if len(buffer_messages) > keep_count:
+                await models.delete_oldest_buffer_messages(db, user_id, len(buffer_messages) - keep_count)
     except Exception as e:
-        logger.error(f"Failed to execute extraction pipeline for user {user_id}: {e}")
+        logger.error(f"Extraction pipeline failed for user {user_id}: {e}")
 ```
 
 ---
 
 ## 🧹 Memory Compression (`memory_compressor.py`)
 
-To prevent database bloating and respect context limits, `memory_compressor.py` runs optimization routines when the total memory block exceeds `USER_MEMORY_BUDGET_CHARS` (default `4000` characters). This compression runs as a background task without blocking the user response loop:
+To prevent profile bloat and respect context limits, `memory_compressor.py` runs when the
+compiled memory block exceeds `USER_MEMORY_BUDGET_CHARS` (default `4000`). It runs as a
+background task (off the hot path) and uses the shared `llm_service` singleton.
+
+Two correctness/efficiency properties matter here:
+
+1. **Never wipe memory on failure.** `compress_memory` returns `None` when the LLM call fails;
+   in that case the replace step is **skipped**, so existing memory is preserved.
+2. **Single-pass budget enforcement.** Models can't count characters reliably, so after the LLM
+   pass a deterministic enforcement drops the lowest-priority items (oldest events → beliefs →
+   facts) until the block fits — computed **in memory from a single read** and persisted in
+   **one write**, not a per-item read/write loop. A per-user cooldown
+   (`COMPRESSION_COOLDOWN_SECS`) prevents a re-trigger loop.
 
 ```python
 # app/services/memory_compressor.py
-import asyncio
 from loguru import logger
 from app.config import config
 from app.database.connection import db_session
 from app.database import models
-from app.services.llm_service import LLMService
+from app.services.llm_service import llm_service          # shared singleton
 from app.services.memory_loader import build_memory_block
 from app.prompts.compression_prompt import SYSTEM_COMPRESSION_PROMPT
 
 async def compress_user_memory(user_id: int):
-    logger.info(f"Memory compression triggered in background for user {user_id}...")
     try:
         async with db_session() as db:
-            # 1. Compile the current memories block
             memory_text, _ = await build_memory_block(db, user_id)
-            
-            # Calculate target character size (80% of budget)
-            target_chars = int(config.USER_MEMORY_BUDGET_CHARS * 0.8)
-            
-            # 2. Setup system prompt
+            target = int(config.USER_MEMORY_BUDGET_CHARS * 0.8)
             system_prompt = (
                 f"{SYSTEM_COMPRESSION_PROMPT}\n\n"
-                f"TARGET CHARACTER BUDGET: {target_chars} characters.\n"
-                f"Your compressed memory profile MUST fit within {target_chars} characters."
+                f"TARGET CHARACTER BUDGET: {target} characters.\n"
+                f"Your compressed memory profile MUST fit within {target} characters."
             )
-            
-            # 3. Call LLM compression service
-            llm = LLMService()
-            compression_res = await llm.compress_memory(user_id, system_prompt, memory_text)
-            
-            # 4. Save/replace in DB atomically (performing hard deletes)
-            await models.replace_user_memory(db, user_id, compression_res)
-            logger.info(f"Memory compression successfully completed in background for user {user_id}.")
+            compression = await llm_service.compress_memory(user_id, system_prompt, memory_text)
+            if compression is None:
+                logger.warning(f"Compression failed for user {user_id}; keeping existing memory.")
+                return                                     # never wipe on failure
+            await models.replace_user_memory(db, user_id, compression)
+            await _enforce_budget(db, user_id)             # single read + single write
     except Exception as e:
-        logger.error(f"Failed to compress memory in background for user {user_id}: {e}")
+        logger.error(f"Compression failed for user {user_id}: {e}")
 ```
+
+> The caller (`UserTaskManager.run_compressor`) enforces the per-user cooldown and acquires the
+> shared `memory_lock` so compression never races the extractor.
 
 ---
 
@@ -173,3 +172,15 @@ async def compress_user_memory(user_id: int):
 Because extraction and compression are executed asynchronously, concurrency issues can arise where the extractor and compressor write or modify user memory simultaneously. 
 
 To prevent data corruption, a unified `memory_lock = asyncio.Lock()` is initialized inside `UserState` inside the `UserTaskManager`. The manager acquires this lock before initiating both the `run_extractor` and `run_compressor` background tasks, guaranteeing sequential executions per user.
+
+---
+
+## 👥 Multi-Party Extraction in Groups *(Phase 9)*
+
+In group chats the buffer is shared (`chat_id`-keyed) and each message carries `sender_id` +
+`sender_name`, but **memory stays per `user_id`**. Extraction over a group segment is a single
+LLM call that returns updates tagged by participant name; those are mapped back to each
+`sender_id` using the segment's own name→id map and saved into each participant's profile via
+the same normalized, deduped CRUD described above. This keeps group extraction to one LLM call
+while still attributing facts/beliefs/events to the correct person. DMs are unchanged (a single
+participant). See [group_chat.md](group_chat.md).

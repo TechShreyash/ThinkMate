@@ -19,9 +19,13 @@ tests/
 ├── test_guards_and_compression.py     # Tests input guards, prompt compiling, and memory compression
 ├── test_batching_and_concurrency.py  # Tests messaging queues, batching, throttling, and concurrency locks
 ├── test_reactions.py                 # Combined reply+reaction call & emoji normalization
-├── test_hardening.py                 # Atomic trim race, dedup, cooldown, reset, budget enforcement, eviction
+├── test_hardening.py                 # Atomic trim race, dedup, cooldown, reset, budget enforcement, eviction, extraction retry/bounded-trim
 └── run_llm_live.py                   # Manual live check against the configured LLM (not part of the suite)
 ```
+
+> **Phase 9 (group chat)** adds `tests/test_group_chat.py`: chat-type routing, the ambient-gate
+> funnel (cooldown → keyword scan → affinity probability), affinity updates, and multi-party
+> per-user extraction. See [group_chat.md](group_chat.md).
 
 ---
 
@@ -65,6 +69,23 @@ Validates the message batching queue, rate limiting, and execution locks inside 
 *   **`test_max_batch_delay_prevents_infinite_postponement`**: Assures that the batch deadline is enforced, forcing response generation even under a continuous flood of messages.
 *   **`test_throttling_middleware`**: Verifies that the throttling middleware successfully intercepts flooding users and rate limits messages before database resource allocation.
 *   **`test_user_task_manager_queue_limit_guard`**: Checks that the queue drops messages once the maximum queue threshold is exceeded to avoid memory overload.
+
+---
+
+### 5. `tests/test_hardening.py` (Hardening & Resilience Regressions)
+Locks in the Phase 7–8 fixes so they can't regress:
+
+*   **`test_atomic_trim_preserves_concurrent_appends`**: the atomic `$pull` trim keeps messages appended during a trim (the old read-slice-overwrite would have lost them).
+*   **`test_buffer_hard_cap`**: the messages array never exceeds `CHAT_BUFFER_HARD_CAP`.
+*   **`test_normalized_dedup_on_extraction`**: facts differing only by case/whitespace are not duplicated.
+*   **Budget enforcement & eviction**: deterministic post-compression trimming fits the budget; idle `UserState` is evicted.
+*   **`test_extraction_retries_and_folds_in_new_messages`**: a failed extraction is retried, and messages that arrive mid-call are folded into the next attempt's segment.
+*   **`test_extraction_all_attempts_fail_still_trims`**: when every attempt fails, the oldest messages are trimmed anyway (buffer stays bounded) and memory is never written.
+
+### 6. `tests/test_reactions.py` (Combined Reply + Reaction)
+Validates that `generate_reply_bundle` parses the `{reply, reaction}` JSON, degrades to plain
+text on bad JSON, and that `normalize_reaction` maps free-form emojis onto Telegram's accepted
+set (tolerant of variation selectors).
 
 ---
 

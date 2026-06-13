@@ -49,6 +49,10 @@ variation selectors like `❤️` → `❤`) and dropped if invalid or if `ENABL
 If the model returns non-JSON, the raw text is used as the reply and no reaction is sent — the
 user always gets an answer.
 
+> **Group chats (Phase 9):** the same call may also return an optional `affinity_delta` field
+> (a small signed number) so the bot's read on the relationship rides inside the reply JSON at
+> no extra LLM cost. It is ignored in DMs. See [group_chat.md](group_chat.md).
+
 ---
 
 ## 📐 Schema Definitions (`app/services/schemas.py`)
@@ -157,8 +161,10 @@ def _fire_log(self, *args, **kwargs):
 
 * **Success**: `status = "success"`, raw completion text, parsed JSON, `error = None`.
 * **Failure**: captures the traceback, logs `status = "failed"`. Chat replies re-raise (the
-  batch processor sends a friendly fallback message); extraction/compression return an empty
-  model so a bad response never crashes a background task.
+  batch processor sends a friendly fallback message); **`extract_memory` and `compress_memory`
+  return `None`** so the caller can tell a failed call from a legitimately empty one. The
+  extractor retries on `None` (see [memory_engine.md](memory_engine.md)); the compressor
+  **skips the replace** on `None`, so a failed compression never wipes a user's memory.
 
 > The emoji reaction is part of the `chat_reply` call — there is no separate reaction LLM call.
 

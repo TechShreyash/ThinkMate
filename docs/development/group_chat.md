@@ -1,5 +1,9 @@
 # Group Chat, Ambient Replies & Affinity
 
+> **Status: designed, not yet implemented (Phase 9 in [project_plan.md](../project_plan.md)).**
+> The configuration knobs already exist (see [configuration.md](configuration.md#-group-chat--ambient-replies));
+> the behavior below is the build target. DMs are unaffected.
+
 How ThinkMate behaves in group chats vs. DMs, how it decides when to chime in without being
 spammy or abusing the LLM API, and how per-user affinity tunes its chattiness.
 
@@ -7,7 +11,7 @@ spammy or abusing the LLM API, and how per-user affinity tunes its chattiness.
 
 | Chat type | Behavior |
 |---|---|
-| **Private (DM)** | Reply to every message (unchanged). |
+| **Private (DM)** | Reply to every message (must not reply to bot commands). |
 | **Group / supergroup** | **Always** reply when *addressed* (bot @mentioned, bot's name used, or a reply to the bot's message). Otherwise run the **ambient gate** — sometimes chime in on the wider conversation (birthdays, jokes, questions…), modulated by affinity. |
 | **Channel** | Ignored. |
 

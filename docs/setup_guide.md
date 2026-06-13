@@ -7,7 +7,7 @@ This guide provides step-by-step instructions to configure, run, and host the Th
 ## 📋 Prerequisites
 
 Before starting, ensure your system meets the following requirements:
-*   **Python**: Version `3.10` or higher installed.
+*   **Python**: Version `3.12` or higher installed (matches `pyproject.toml`'s `requires-python`).
 *   **Git**: Installed (for cloning the repository and managing version control).
 *   **MongoDB**: An active MongoDB server or connection string (Atlas or local instance).
 *   **LLM Provider**: Either an active API key (OpenAI, OpenRouter, Groq) or a running local inference server (LM Studio, Ollama).
@@ -141,8 +141,8 @@ Open your `.env` file and review the following configurations:
 | `CHARS_PER_TOKEN` | Integer | `4` | Character-to-token ratio for deriving token limits. |
 | `MESSAGE_BATCH_DELAY_SECS` | Float | `1.5` | Delay in seconds the bot waits after receiving a message to batch rapid messages. |
 | `MAX_BATCH_DELAY_SECS` | Float | `5.0` | Max seconds from first message in a batch before processing is forced. |
-| `MAX_INPUT_CHARS` | Integer | `1000` | Max message length in characters. Messages exceeding this are ignored. |
-| `MAX_RESPONSE_CHARS` | Integer | `1000` | Max response length in characters. Used to cap model generations. |
+| `MAX_INPUT_CHARS` | Integer | `2500` | Inbound messages longer than this are ignored (anti-abuse — blocks pasted logs/essays), not a normal chat cap. |
+| `MAX_RESPONSE_CHARS` | Integer | `2000` | Generous ceiling for reply length (drives `max_tokens`); actual length is matched to the user's message. |
 | `PERSONA_FILE` | Path | `persona.md` | Location of the Markdown configuration defining the bot's tone. |
 
 ---

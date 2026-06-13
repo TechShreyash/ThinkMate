@@ -90,6 +90,7 @@ graph TD
         *   `emotional_state`: Shifts in user mood, intensity, and triggers.
     *   The changes are transactionally written to the user's profile document inside `user_profiles` using atomic `$set` operations, applying **hard deletes** for removals. Free-text matches are normalized (casefold + whitespace) and new items are de-duplicated so phrasing drift doesn't create duplicates.
     *   The processed segment (older messages) is trimmed from `chat_buffers` **atomically** via `$pull` on a `created_at` cutoff — so messages the user sends *during* the (slow) extraction call are never clobbered. Buffer timestamps are strictly monotonic at millisecond resolution to keep this ordering exact.
+    *   **Resilience to extraction failure**: the extraction call is retried up to `MAX_EXTRACTION_ATTEMPTS` (3) times, **re-reading the buffer each attempt** so messages that arrive while a slow call is in flight are folded into the next attempt instead of being missed. A run is only treated as successful when the call returns a valid result (`extract_memory` returns `None` on failure, distinct from a legitimately *empty* extraction). If **every** attempt fails (e.g. an LLM outage), the oldest messages are trimmed anyway so the buffer can't grow without bound — a deliberate trade of a bounded amount of un-extracted memory for a healthy buffer. Memory is never written on a failed run.
 6.  **Memory Compression (Background Task)**: When compiling the memory profile, if its length exceeds `USER_MEMORY_BUDGET_CHARS` (default 4,000 characters), a non-blocking background task is spawned. The `UserTaskManager` ensures a shared sequential lock (`memory_lock`) is acquired per user; concurrent extraction/compression tasks are skipped. This task sends all memory components to the LLM to compress them to ≤ 80% of the budget. It is the only phase where the high-level `profile_summary` is rewritten, as synthesizing a summary requires a bird's-eye view of all memories, which is not available to the localized extraction steps. The compressed profile, facts, beliefs, and events then atomically replace the old records in the user profile document. Because models can't count characters reliably, a **deterministic post-pass** then drops lowest-priority items (oldest events → beliefs → facts) until the profile actually fits the budget, and a per-user **cooldown** (`COMPRESSION_COOLDOWN_SECS`) prevents a re-trigger loop on every subsequent message.
 7.  **Prompt Assembly**: The chat manager loads the personality from `persona.md` and reads the memory blocks from `user_profiles` to build a comprehensive system prompt.
 8.  **Input/Output Guards**: Oversized inbound messages (`MAX_INPUT_CHARS`) are ignored before any LLM/database work; outbound length is bounded by `MAX_RESPONSE_CHARS` (via `max_tokens`); a sliding-window throttle (`RATE_LIMIT_*`) and a per-user queue cap (`MAX_QUEUED_MESSAGES`) protect against floods.
@@ -172,4 +173,19 @@ Hardening that keeps a single instance healthy at scale:
 
 **Horizontal scaling is out of scope here.** Because state is in-process and polling is
 single-consumer, running multiple replicas would require switching to webhooks and
-externalizing state (e.g. Redis) — see `docs/development/hardening_plan.md`, Phase 12.
+externalizing state (e.g. Redis). The exact, mechanical migration path — and the efficiency
+rules that keep one instance healthy at scale — live in
+[performance_and_scaling.md](development/performance_and_scaling.md).
+
+---
+
+## 👥 Group Chat (Phase 9)
+
+In groups, the buffer is keyed by `chat_id` (a DM is just `chat_id == user_id`) and each
+message carries `sender_id`/`sender_name` for multi-party context. The bot **always** replies
+when addressed (mention, name, or reply-to-bot) and otherwise runs a **no-LLM ambient gate**
+(per-chat cooldown → cheap keyword scan → affinity-weighted dice roll) so it chimes in
+selectively without spamming or abusing the API — at most ~1 ambient LLM call per active group
+per cooldown window. Memory stays per `user_id`; group extraction is multi-party in a single
+call, attributed back to each participant. Per-(chat, user) affinity/mode lives in
+`chat_members`. Full design: [group_chat.md](development/group_chat.md).

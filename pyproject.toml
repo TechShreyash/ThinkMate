@@ -1,9 +1,27 @@
 [project]
 name = "thinkmate"
 version = "0.1.0"
-description = "Add your description here"
+description = "ThinkMate — a self-learning, long-term-memory Telegram AI companion (aiogram + MongoDB + OpenAI-compatible LLMs)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "requests>=2.34.2",
+    "aiogram>=3.15.0",
+    "python-dotenv>=1.0.1",
+    "motor>=3.6.0",
+    "openai>=1.55.0",
+    "pydantic>=2.0.0",
+    "loguru>=0.7.2",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "mongomock>=4.3.0",
+]
+
+[tool.pytest.ini_options]
+# Make `app` importable without installation and run async tests automatically.
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -264,33 +264,43 @@ class LLMService:
 
     async def extract_memory(
         self, user_id: int, system_prompt: str, user_history_text: str
-    ) -> MemoryExtraction:
-        """Extract structured memory updates from a conversation segment."""
+    ) -> MemoryExtraction | None:
+        """Extract structured memory updates from a conversation segment.
+
+        Returns ``None`` when the call fails (transient errors exhausted, or unparseable
+        output) so the caller can retry. A valid — possibly *empty* — ``MemoryExtraction``
+        means the call succeeded (an empty result simply means nothing was worth saving).
+        Keeping these two cases distinct is what lets the extractor avoid trimming the buffer
+        after a genuine failure.
+        """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_history_text},
         ]
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
-        parsed = await self._structured_call(
+        return await self._structured_call(
             user_id=user_id, call_type="memory_extraction", model=model, messages=messages,
             schema=MemoryExtraction, temperature=config.EXTRACTION_TEMPERATURE, timeout=45.0,
         )
-        return parsed or MemoryExtraction()
 
     async def compress_memory(
         self, user_id: int, system_prompt: str, raw_memory_text: str
-    ) -> MemoryCompression:
-        """Compress a user's full memory profile to fit the character budget."""
+    ) -> MemoryCompression | None:
+        """Compress a user's full memory profile to fit the character budget.
+
+        Returns ``None`` when the underlying LLM call fails or its output can't be parsed,
+        so the caller can distinguish a genuine failure from a valid result and skip the
+        memory-replacing write — a failed compression must never wipe existing memory.
+        """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": raw_memory_text},
         ]
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
-        parsed = await self._structured_call(
+        return await self._structured_call(
             user_id=user_id, call_type="memory_compression", model=model, messages=messages,
             schema=MemoryCompression, temperature=config.EXTRACTION_TEMPERATURE, timeout=60.0,
         )
-        return parsed or MemoryCompression()
 
 
 # Shared singleton — one client (and connection pool) for the whole process.

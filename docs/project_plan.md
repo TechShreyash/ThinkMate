@@ -1,132 +1,314 @@
-# Project Implementation Plan & Checklist
+# Project Implementation Plan & Build Path
 
-Use this step-by-step guide to implement, verify, and complete the ThinkMate project. It serves as a living roadmap and development tracker.
+The single, authoritative, step-by-step path to build ThinkMate from an empty directory to the
+full feature set — optimized for large load on a single instance. Each phase lists its **goal**,
+the **files** it produces, the **key design points** (with links to the deep-dive doc), and the
+**acceptance criteria** that prove it's done. Build phases in order; later phases assume earlier
+ones exist.
+
+> Companion docs: [architecture.md](architecture.md) ·
+> [performance_and_scaling.md](development/performance_and_scaling.md) ·
+> [database.md](development/database.md) · [llm_integration.md](development/llm_integration.md) ·
+> [memory_engine.md](development/memory_engine.md) · [telegram_bot.md](development/telegram_bot.md) ·
+> [group_chat.md](development/group_chat.md) · [configuration.md](development/configuration.md) ·
+> [testing_guide.md](development/testing_guide.md) · [hardening_plan.md](development/hardening_plan.md)
 
 ---
 
-## 🗺️ Phase Roadmap Summary
+## 🗺️ Roadmap
 
 ```
-┌───────────────────────────┐      ┌───────────────────────────┐      ┌───────────────────────────┐
-│ Phase 1: Base Setup       │ ───> │ Phase 2: Async MongoDB DB │ ───> │ Phase 3: LLM & Pydantic   │
-│ Init structure & Pydantic.│      │ Document arrays & schemas │      │ SDK wrappers & fallbacks. │
-└───────────────────────────┘      └───────────────────────────┘      └───────────────────────────┘
-                                                                                    │
-                                                                                    ▼
-┌───────────────────────────┐      ┌───────────────────────────┐      ┌───────────────────────────┐
-│ Phase 6: Memory Budget    │ <─── │ Phase 5: Telegram Bot     │ <─── │ Phase 4: Memory Engine    │
-│ Compressions & Guards.    │      │ Middlewares & handlers.   │      │ Sliding window & loaders. │
-└───────────────────────────┘      └───────────────────────────┘      └───────────────────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│ Phase 7: Tests & Audit    │
-│ pytest, mock, log audits  │
-└───────────────────────────┘
+Phase 0  Foundations ............. project skeleton, config, logging, deps
+Phase 1  Data layer .............. MongoDB connection, schema, indexes, atomic CRUD
+Phase 2  LLM service ............. one client, json_object outputs, retries, audit
+Phase 3  Memory engine .......... loader, extractor (retry), compressor (budget), prompts
+Phase 4  Orchestrator ........... chat_manager: buffer -> memory -> one reply call
+Phase 5  Telegram (DM) .......... entrypoint, middlewares, commands, message router, reactions
+Phase 6  Guards & concurrency ... throttle, batching, queues, locks, input/output guards
+Phase 7  Hardening & efficiency . bounded memory, atomic ops, single-pass budget, audit TTL
+Phase 8  Tests .................. mongomock suite; hot-path, race, retry, guard regressions
+Phase 9  Group chat ............. chat_id buffers, ambient gate, affinity, multi-party memory
+Phase 10 Observability & ops .... metrics, health checks, runbook
+Phase 11 Future: consolidation .. periodic "dreaming" pass
+Phase 12 Future: horizontal scale state interface, Redis, webhooks (see perf doc)
 ```
 
----
-
-## 📋 Phase-by-Phase Checklist
-
-### Phase 1: Environment & Project Initialization
-Set up the base directories, configuration loaders, typing schemas, and logging subsystems.
-
--   [x] **1.1 Directory Initialization**: Create the basic project folder structure.
--   [x] **1.2 Dependencies Setup**: Configure the `requirements.txt` file, listing `aiogram`, `python-dotenv`, `motor`, `mongomock`, `openai`, `pydantic`, and `loguru`.
--   [x] **1.3 Environment Variables Configuration**: Author the `.env.example` configuration template with MongoDB connection URI/DB variables, Telegram tokens, and default memory budgets.
--   [x] **1.4 Typed Configuration System**: Write `config.py` to load environment variables, execute type parsing, and validate configurations.
--   [x] **1.5 Configuration Reference Documentation**: Document environment variables and tuning parameters in [configuration.md](development/configuration.md).
--   [x] **1.6 Pydantic Model Schemas**: Implement the structural validation models in `app/services/schemas.py`:
-    *   `MemoryExtraction` (combines profile updates, new facts, updated facts, subjective beliefs, events, and emotional states)
-    *   `MemoryCompression` (combines compressed facts, beliefs, events, summaries, and communication styles)
--   [x] **1.7 Logging Subsystem**: Initialise `loguru` in `app/__init__.py` to log outputs to standard output and rotating log files.
+Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phases 10–12 are operational
+and forward-looking. The exact efficiency invariants every phase must respect live in
+[performance_and_scaling.md](development/performance_and_scaling.md).
 
 ---
 
-### Phase 2: Async Database Layer (MongoDB)
-Implement the connection managers, indexing tasks, and atomic document-per-user CRUD mutations.
+## Phase 0 — Foundations
 
--   [x] **2.1 Connection Singleton**: Write `connection.py` using `motor` to handle asynchronous MongoDB database client setup and database sessions.
--   [x] **2.2 Schema & Indexing Implementation**: Define index constraints in `connection.py` for collections:
-    *   `user_profiles` (consolidates summaries, communication styles, emotional states, facts, beliefs, and events arrays)
-    *   `chat_buffers` (holds active messages arrays for sliding windows)
-    *   `llm_audit_log` (logs prompts, replies, and error metrics, indexed on `("user_id", 1), ("timestamp", -1)`)
--   [x] **2.3 CRUD Models**: Write NoSQL accessors in `models.py` accepting `db: AsyncIOMotorDatabase` as their first parameter. Ensure transactional methods like `save_extracted_memories` take Pydantic models directly as inputs and implement hard deletes.
+**Goal:** a runnable, typed, logged skeleton with dependencies pinned.
 
----
+**Files:** `pyproject.toml`, `requirements.txt`, `.env.example`, `.gitignore`, `app/__init__.py`,
+`app/config.py`, `persona.md`, the `app/` package tree.
 
-### Phase 3: LLM Integration Service & Audit Trails
-Wrap the OpenAI client, configure structured outputs, parse responses, and establish database audit logs.
+**Key design points**
+- `pyproject.toml` declares real metadata and `requires-python` matching the runtime; runtime
+  deps are listed there and/or in `requirements.txt` (aiogram, motor, openai, pydantic,
+  python-dotenv, loguru, mongomock, pytest, pytest-asyncio). The two must not contradict.
+- `config.py` is a single typed `Config` (Pydantic) loaded from env with per-field parsers and
+  sane defaults; expose one importable `config` instance. Document every key in
+  [configuration.md](development/configuration.md) and mirror it in `.env.example`.
+- `app/__init__.py` configures `loguru` (stdout + rotating file under `logs/`, which is git-ignored).
 
--   [x] **3.1 LLM Service Class**: Implement the core `LLMService` in `llm_service.py` wrapping `openai.AsyncOpenAI`.
--   [x] **3.2 Structured Output Handler & Fallback**: Write `extract_memory` and `compress_memory` calls. Ensure they route through `client.beta.chat.completions.parse` for OpenAI connections and fallback to JSON mode + manual Pydantic validation for custom local engines.
--   [x] **3.3 Centralized Audit Logging**: Wrap LLM operations to insert calling parameters, system prompts, raw outputs, parsed JSON structures, success flags, and traceback strings into `llm_audit_log`.
--   [x] **3.4 Base Prompts Definition**: Write basic prompts under `app/prompts/` (system, extraction, and compression prompts).
-
----
-
-### Phase 4: Core Memory Engine
-Develop the sliding window controllers and context loaders.
-
--   [x] **4.1 Memory Loader**: Implement `memory_loader.py` to compile facts, subjective beliefs, timeline events, and current moods from the unified user profile document into a clean structured text context block.
--   [x] **4.2 Memory Extractor**: Implement `memory_extractor.py` to select the oldest buffer messages, feed them to the extraction prompt, write updates to the user profile document using hard deletes, and trim the active chat buffer.
--   [x] **4.3 Chat Manager Orchestrator**: Write `chat_manager.py` to coordinate incoming message buffer storage, threshold checks, prompt composition, response query, and non-blocking background extractions.
+**Acceptance**
+- `uv run python -c "from app.config import config; print(config.MODEL_DUMP())"` style import works.
+- `.env.example` and `configuration.md` list the *same* keys/defaults as `config.py`.
 
 ---
 
-### Phase 5: Telegram Bot Layer (aiogram)
-Hook up the Telegram network adapters, register command routers, and database injection middlewares.
+## Phase 1 — Data layer (MongoDB)
 
--   [x] **5.1 Entrypoint Script**: Initialise the bot, async dispatcher, and database connection loop in `main.py`.
--   [x] **5.2 Session Injection Middleware**: Write `DbSessionMiddleware` in `app/handlers/middlewares.py` to auto-allocate database sessions and inject `db` references into handler contexts.
--   [x] **5.3 Auto-Typing Middleware**: Implement `AutoTypingMiddleware` detecting `long_operation` handler flags to automate typing visuals.
--   [x] **5.4 Command Handlers**: Implement slash commands in `commands.py`:
-    *   `/start`: Welcomes users and initializes their profile.
-    *   `/profile`: Compiles and displays their current memory card.
--   [x] **5.5 Text Routing Handler**: Write message interception in `messages.py` marked with `flags={"long_operation": True}`.
--   [x] **5.6 Dynamic Message Reactions**: Query LLM concurrently for emoji reactions during message batch processing and send them gracefully to Telegram.
+**Goal:** async connection singleton, indexes, and atomic per-user CRUD.
 
----
+**Files:** `app/database/connection.py`, `app/database/models.py`, `app/database/__init__.py`.
 
-### Phase 6: Memory Compression & Input/Output Guards
-Implement character-budget memory limits and early-return validation guards.
+**Key design points** (see [database.md](development/database.md))
+- One lazy `AsyncIOMotorClient` singleton with `serverSelectionTimeoutMS`; `get_db()`,
+  `db_session()` context manager, `ping_db()` (fail fast at startup), `init_db()` (indexes).
+- Collections: `user_profiles` (`_id=user_id`), `chat_buffers` (`_id=chat_id`),
+  `chat_members` (`_id="{chat_id}:{user_id}"`, Phase 9), `llm_audit_log` (compound + TTL index).
+- `add_message_to_buffer` uses `find_one_and_update` with `$push`+`$slice` (hard cap) and
+  returns the post-update array (char count + history in one round-trip). Timestamps via a
+  strictly-monotonic ms clock.
+- `delete_oldest_buffer_messages` trims **atomically** via `$pull` on a `created_at` cutoff
+  (never read-slice-overwrite).
+- `save_extracted_memories` / `replace_user_memory`: load arrays once, mutate in memory
+  (normalized casefold/whitespace matching + dedup, hard deletes), write once with `$set`.
 
--   [x] **6.1 Memory Compression Service**: Create `memory_compressor.py` to run LLM-powered memory compression in the background when the 4,000-character budget is exceeded.
--   [x] **6.2 Input & Output Guards**: Implement `MAX_INPUT_CHARS` checks in handler and `MAX_RESPONSE_CHARS` limits in LLM completions.
--   [x] **6.3 Prompt and Persona Hardening**: Author `compression_prompt.py` and enforce conversational limits/anti-abuse boundaries in `persona.md`.
--   [x] **6.4 Throttling, Queue, and Concurrency Guards**: Implement `ThrottlingMiddleware` for early rate limiting, `MAX_QUEUED_MESSAGES` to prevent queue bloat, and a shared sequential `memory_lock` inside `UserState` to serialize background extractor & compressor tasks.
-
----
-
-### Phase 7: Verification & Testing
-Write automated unit tests and run end-to-end user checks.
-
--   [x] **7.1 Unit Testing Framework**: Set up `pytest` configuration, mock libraries, and test fixtures.
--   [x] **7.2 MongoDB Test Cases**: Create `test_database.py` and `test_guards_and_compression.py` to test MongoDB CRUD transactions, hard-deletion, direct mood writing, and budget triggers using `mongomock` in-memory clients.
--   [x] **7.3 Memory Engine Test Cases**: Write mock LLM test suites in `test_batching_and_concurrency.py` verifying message batching, throttling, queue overflows, and sequential background locks.
--   [x] **7.4 Testing Documentation**: Document the testing suite structure and database mocks in [testing_guide.md](development/testing_guide.md).
+**Acceptance**
+- CRUD unit tests pass on mongomock; trim preserves concurrently-appended messages; buffer
+  never exceeds the hard cap.
 
 ---
 
-### Phase 8: Production Hardening & Scaling (2026-06)
-Single-instance hardening for 50k+ users. Full detail and rationale in
-[hardening_plan.md](development/hardening_plan.md).
+## Phase 2 — LLM service & audit
 
--   [x] **8.1 One combined LLM call**: reply + reaction returned as strict JSON in a single `generate_reply_bundle` call (was two calls). Verified live on the Gemini proxy.
--   [x] **8.2 Structured-output strategy**: default to `json_object` (the only mode the Gemini proxy accepts) and drop the always-failing native-parse round-trip; `native_parse` kept as an opt-in for OpenAI. Retries with backoff on transient errors.
--   [x] **8.3 Atomic buffer trim**: `$pull`-on-cutoff with monotonic millisecond timestamps — fixes the silent message-loss race; buffer hard-capped.
--   [x] **8.4 Memory robustness**: normalized/deduped fact-belief-event CRUD; deterministic post-compression budget enforcement + per-user cooldown (fixes the compression re-trigger loop).
--   [x] **8.5 Bounded memory & responsiveness**: idle per-user state eviction, throttle-map pruning, persona cached by mtime, hot-path Mongo round-trips reduced.
--   [x] **8.6 Audit lifecycle**: timestamps stored as `datetime`, off-hot-path writes, field truncation, TTL retention index. Startup Mongo ping.
--   [x] **8.7 Commands & cleanup**: `/help` and `/reset` added; dead `AutoTypingMiddleware` removed; null guards; stale SQLite strings fixed; `logs/` git-ignored.
--   [x] **8.8 Tests**: regression tests for the trim race, cooldown, dedup, reset, budget enforcement, state eviction, and the combined call. Zero deprecation warnings.
+**Goal:** one shared client, robust structured outputs, minimal calls, safe audit.
+
+**Files:** `app/services/llm_service.py`, `app/services/schemas.py`, `app/services/reactions.py`.
+
+**Key design points** (see [llm_integration.md](development/llm_integration.md))
+- A single shared `LLMService` instance (`llm_service`) — one client/pool for the process.
+- `LLM_STRUCTURED_MODE`: `json_object` default (schema appended to prompt + Pydantic validate),
+  `native_parse` opt-in for true OpenAI. Never use the dead native-parse round-trip on proxies.
+- `_with_retries`: bounded exponential backoff on transient errors only (timeout, connection,
+  429, 5xx); 4xx not retried.
+- `generate_reply_bundle` → `(reply, reaction)` in **one** `json_object` call; graceful
+  fallback to plain reply on bad JSON. In groups it also returns an optional `affinity_delta`.
+- `extract_memory` returns `MemoryExtraction | None` (`None` = failed, so the caller can retry;
+  empty = success/nothing to save). `compress_memory` returns `MemoryCompression | None` (`None`
+  = failed → caller skips the replace, so memory is never wiped).
+- Audit via `_fire_log` (fire-and-forget), `datetime` timestamps (TTL-able), field truncation.
+
+**Acceptance**
+- Reply bundle parses reply+reaction; bad JSON degrades to plain reply. Failed structured calls
+  return `None` and never raise into the caller. Audit writes don't block.
 
 ---
 
-## 🔮 Future Roadmap (Honcho Inspiration)
+## Phase 3 — Memory engine
 
--   [ ] **Periodic Consolidation & Dreaming Pass**:
-    *   *Concept*: Implement a periodic background task (executed daily or weekly) that performs a "dreaming" consolidation phase.
-    *   *Purpose*: Analyze standing facts, timeline events, and subjective beliefs across days/weeks of interactions to extract long-term behavioral trends, conversational habits, and complex user relationship insights.
-    *   *Refinement*: Synthesize recurring moods or triggers into a behavioral profile and identify deep-seated beliefs that the user has implicitly expressed.
+**Goal:** compile memory for prompts; extract on overflow; compress to budget.
+
+**Files:** `app/services/memory_loader.py`, `app/services/memory_extractor.py`,
+`app/services/memory_compressor.py`, `app/prompts/{system,extraction,compression}_prompt.py`.
+
+**Key design points** (see [memory_engine.md](development/memory_engine.md))
+- `build_memory_block` compiles profile/facts/beliefs/events/mood into one text block **and**
+  returns a `needs_compression` flag — built once, used for both prompt and budget check.
+- `extract_and_trim`: retry up to 3 times, **re-reading the buffer each attempt** (mid-call
+  arrivals are folded in); save+trim on success; on total failure trim anyway to bound the
+  buffer. Uses the shared `llm_service` singleton.
+- `compress_user_memory`: LLM condenses to ~80% of budget; on failure (`None`) skip the
+  replace. Budget enforcement is a **single-read, in-memory** drop of lowest-priority items
+  (oldest events → beliefs → facts) then **one** write — not a per-item DB loop. Per-user
+  cooldown prevents re-trigger loops.
+
+**Acceptance**
+- Extraction retries and includes mid-call messages; all-fail still trims; compression failure
+  preserves existing memory; profile ends ≤ budget after enforcement in one write.
+
+---
+
+## Phase 4 — Orchestrator (`chat_manager`)
+
+**Goal:** the hot path — one reply call, ≤3 round-trips, no inline heavy work.
+
+**Files:** `app/services/chat_manager.py`.
+
+**Key design points** (see [architecture.md](architecture.md) and the hot-path invariants in
+[performance_and_scaling.md](development/performance_and_scaling.md))
+- `handle_message(db, chat_id/user_id, text) -> (reply, reaction)`: append user msg (returns
+  array) → if overflow, trigger background extraction → build memory block (persona from mtime
+  cache) → `generate_reply_bundle` → append assistant reply → if over budget, trigger
+  background compression.
+
+**Acceptance**
+- Exactly one chat LLM call and ≤3 Mongo round-trips per message; persona not re-read unless
+  its mtime changed; extraction/compression only *triggered*, never awaited inline.
+
+---
+
+## Phase 5 — Telegram layer (DM)
+
+**Goal:** wire aiogram with DI middleware, commands, message routing, reactions.
+
+**Files:** `main.py`, `app/handlers/{__init__,middlewares,commands,messages}.py`.
+
+**Key design points** (see [telegram_bot.md](development/telegram_bot.md))
+- `main.py`: ping Mongo (fail fast), init indexes, register **outer** middlewares (throttle
+  then DB session), include routers, start long-polling.
+- `DbSessionMiddleware` injects the shared `db`. Typing is owned by `UserTaskManager`, not a
+  middleware.
+- Commands: `/start`, `/help`, `/profile`, `/reset` (confirm-gated). Group commands `/quiet`,
+  `/chatty` arrive in Phase 9.
+- `messages.py`: ignore senderless posts, enforce `MAX_INPUT_CHARS`, enqueue for batching.
+- Reaction (already normalized) is applied to the user's message; failures never block delivery.
+
+**Acceptance**
+- Bot starts, `/start` upserts a profile, a chat returns a reply (and optional reaction),
+  oversized inputs are deflected.
+
+---
+
+## Phase 6 — Guards & concurrency
+
+**Goal:** protect the instance and serialize per-user work.
+
+**Files:** `app/services/user_task_manager.py`, `app/handlers/middlewares.py` (throttle).
+
+**Key design points** (see [telegram_bot.md](development/telegram_bot.md), perf doc)
+- `UserTaskManager`: per-user `UserState` (chat_lock, memory_lock, queue, batch/typing tasks),
+  message coalescing with `MESSAGE_BATCH_DELAY_SECS` and a hard `MAX_BATCH_DELAY_SECS` deadline,
+  `MAX_QUEUED_MESSAGES` cap, and a typing loop spanning batch+generation.
+- `ThrottlingMiddleware`: per-user sliding-window limiter applied **before** any DB session;
+  in-memory map self-prunes.
+
+**Acceptance**
+- Rapid messages coalesce into one reply; deadline forces processing under a flood; queue caps;
+  throttle drops excess before DB/LLM work; background tasks serialize via `memory_lock`.
+
+---
+
+## Phase 7 — Hardening & efficiency
+
+**Goal:** make every structure bounded and every routine single-pass. (See
+[hardening_plan.md](development/hardening_plan.md) for the itemized checklist and rationale.)
+
+**Key design points**
+- Bounded memory: idle `UserState` eviction (`USER_STATE_TTL_SECS`), throttle-map pruning,
+  persona mtime cache, buffer `$slice` cap, audit TTL.
+- Fewer/robust LLM calls: merged reply+reaction, retries with backoff, no dead native-parse.
+- Atomic buffer trim; normalized dedup; single-pass deterministic budget enforcement;
+  compression-failure safety; extraction retry + bounded-trim.
+- Audit off the hot path with `datetime` timestamps + TTL; startup Mongo ping.
+
+**Acceptance**
+- Memory stays flat under a synthetic 50k-user soak (only the active working set resident);
+  zero deprecation warnings; all hot-path invariants from the perf doc hold.
+
+---
+
+## Phase 8 — Tests
+
+**Goal:** fast, hermetic coverage with mongomock (never the production cluster).
+
+**Files:** `tests/conftest.py`, `tests/test_*.py`, `tests/run_llm_live.py` (manual only).
+
+**Key design points** (see [testing_guide.md](development/testing_guide.md))
+- Async mongomock wrappers in `conftest.py`; autouse fixtures patch the DB and disable reactions.
+- Cover: CRUD + hard deletes, atomic trim race, buffer cap, normalized dedup, build-memory +
+  compression flag, single-pass budget enforcement, compression-failure no-wipe, extraction
+  retry + mid-call fold-in + all-fail trim, batching/coalescing, deadline, queue cap, throttle,
+  memory-lock serialization, reply+reaction parsing/normalization.
+
+**Acceptance**
+- `uv run python -m pytest` green; no warnings; no external services required.
+
+---
+
+## Phase 9 — Group chat, ambient replies & affinity
+
+**Goal:** behave well in groups without spamming or abusing the LLM. (Full design in
+[group_chat.md](development/group_chat.md).)
+
+**Files:** group routing + identity helpers in handlers, `chat_members` CRUD in `models.py`,
+ambient-gate logic in `user_task_manager.py`/a new `group_gate.py`, `/quiet` `/chatty` commands.
+
+**Key design points**
+- Buffers keyed by `chat_id` (DM: `chat_id==user_id`, unchanged); each buffered message carries
+  `sender_id`+`sender_name` for multi-party context.
+- Reply when addressed (mention / name / reply-to-bot); otherwise run the **ambient gate**:
+  per-chat cooldown → cheap keyword scan (no LLM) → affinity-weighted dice roll → ≤1 LLM call.
+- Memory stays per `user_id`; group extraction is multi-party (one call, updates tagged by
+  participant, mapped back via the segment's name→id map).
+- Affinity in `chat_members` (read-through cache); signals: mentions/engagement up, "stop/quiet"
+  keywords down, plus `affinity_delta` piggybacked on the reply JSON. `/quiet` and `/chatty`
+  set mode.
+
+**Acceptance**
+- DMs unchanged; groups reply when addressed; ambient chime-ins respect cooldown/affinity and
+  cost ≤ ~1 LLM call per active group per window; multi-party extraction attributes memory
+  correctly; `quiet` suppresses ambient.
+
+---
+
+## Phase 10 — Observability & ops
+
+**Goal:** make the running instance measurable and operable.
+
+**Key design points**
+- Metrics: LLM call counts/latency, hot-path round-trips, queue depth, active `UserState`
+  count, throttle drops, extraction/compression runs, audit write lag. Expose via logs and/or a
+  metrics endpoint (Prometheus/OTel).
+- Health: startup ping already fails fast; add a lightweight liveness signal.
+- Runbook: how to read `llm_audit_log`, tune budgets/batching, and recognize the LLM ceiling.
+
+**Acceptance**
+- Operators can answer "are we near the ceiling?" from metrics; audit queries use the compound
+  index.
+
+---
+
+## Phase 11 — Future: periodic consolidation ("dreaming")
+
+A scheduled background pass (daily/weekly) that reviews facts/beliefs/events across longer
+windows to synthesize behavioral trends and durable profile insights — beyond what localized
+per-overflow extraction can see. Runs under `memory_lock`, rate-limited, fully off the hot path.
+
+---
+
+## Phase 12 — Future: horizontal scale
+
+Only when the LLM endpoint is *not* the bottleneck and a single event loop/DB is proven
+saturated. Mechanical, not a rewrite — externalize state behind a `StateStore` interface
+(in-memory → Redis), distributed locks, webhooks behind a load balancer, shard MongoDB on
+`user_id`. The data model, prompts, memory algorithms, and service APIs are unchanged. Full
+steps in [performance_and_scaling.md](development/performance_and_scaling.md#horizontal-scale-migration-path-future).
+
+---
+
+## Build order checklist
+
+- [ ] Phase 0 Foundations
+- [ ] Phase 1 Data layer
+- [ ] Phase 2 LLM service & audit
+- [ ] Phase 3 Memory engine
+- [ ] Phase 4 Orchestrator
+- [ ] Phase 5 Telegram (DM)
+- [ ] Phase 6 Guards & concurrency
+- [ ] Phase 7 Hardening & efficiency
+- [ ] Phase 8 Tests
+- [ ] Phase 9 Group chat
+- [ ] Phase 10 Observability & ops
+- [ ] Phase 11 Future: consolidation
+- [ ] Phase 12 Future: horizontal scale
+
+> Note: the current repository already implements Phases 0–8 (DM bot, hardened). Phase 9 is
+> designed but not yet implemented; Phases 10–12 are forward-looking. This plan is written so
+> the project could also be rebuilt cleanly from scratch in this exact order.

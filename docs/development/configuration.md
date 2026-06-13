@@ -22,7 +22,7 @@ This guide provides a detailed description of all environment variables configur
 | **`LLM_BASE_URL`** | URL | `http://localhost:1234/v1` | **Purpose**: The root endpoint of the OpenAI-compatible HTTP inference server.<br>**How to Tune**: Point to local hosts (`http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio) or cloud providers (`https://api.openai.com/v1`, `https://openrouter.ai/api/v1`). |
 | **`LLM_API_KEY`** | String | `none` | **Purpose**: The authorization bearer token passed in API headers.<br>**How to Tune**: Set to your provider API key. For local servers that do not require auth, set to mock values like `none` or `lm-studio`. |
 | **`LLM_MODEL`** | String | `gpt-4o` | **Purpose**: Identifies the primary LLM model for conversational chat responses.<br>**How to Tune**: Set to a highly conversational, creative model (e.g. `gpt-4o`, `gemma-4-31b-it`). |
-| **`LLM_EXTRACTION_MODEL`** | String | `gpt-4o-mini` | **Purpose**: Identifies the model for memory extraction and compression tasks.<br>**How to Tune**: Leave blank to reuse `LLM_MODEL`. Recommending a smaller, cheaper, and faster model (like `gpt-4o-mini`) keeps token execution costs minimal. |
+| **`LLM_EXTRACTION_MODEL`** | String | *(blank → uses `LLM_MODEL`)* | **Purpose**: Identifies the model for memory extraction and compression tasks.<br>**How to Tune**: Leave blank to reuse `LLM_MODEL`. A smaller, cheaper, faster model (e.g. `gpt-4o-mini`) keeps token costs minimal; `.env.example` ships `gpt-4o-mini` as a suggested value. |
 | **`LLM_STRUCTURED_MODE`** | String | `json_object` | **Purpose**: Strategy for structured (JSON) outputs.<br>**How to Tune**: Keep `json_object` for Gemini proxies, Ollama, LM Studio, OpenRouter, and most non-OpenAI backends (they reject the `additionalProperties` field that native parsing emits). Use `native_parse` only on a true OpenAI endpoint to get strict schema validation via `beta.chat.completions.parse`. |
 | **`LLM_MAX_RETRIES`** | Integer | `2` | **Purpose**: Retries for transient LLM errors (timeout, connection, 429, 5xx).<br>**How to Tune**: Raise for flaky endpoints; keep low to protect chat responsiveness. |
 | **`LLM_RETRY_BASE_DELAY_SECS`** | Float | `0.5` | **Purpose**: Base delay for exponential backoff between retries (`delay = base * 2^attempt`). |
@@ -71,3 +71,28 @@ This guide provides a detailed description of all environment variables configur
 | Parameter | Type | Default | Description & How to Adjust |
 | :--- | :--- | :--- | :--- |
 | **`PERSONA_FILE`** | Path | `persona.md` | **Purpose**: Path to the Markdown file defining the bot's tone and traits.<br>**How to Tune**: Default is `persona.md`. Tune if you are hosting multiple bot instances with distinct personalities. |
+| **`ENABLE_MESSAGE_REACTIONS`** | Bool | `True` | **Purpose**: Master switch for Telegram emoji reactions on user messages. When `False`, the reaction field of the combined reply call is ignored.<br>**How to Tune**: Disable if a deployment's chats forbid reactions or to save nothing extra (reactions ride the existing reply call, so there is no LLM-cost saving — this is purely behavioral). |
+
+---
+
+## 👥 Group Chat & Ambient Replies
+
+These tune ThinkMate's behavior in groups/supergroups. They have no effect in DMs. See
+[group_chat.md](group_chat.md) for the full design.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`GROUP_AMBIENT_COOLDOWN_SECS`** | Float | `90` | **Purpose**: Minimum seconds between *ambient* (un-addressed) chime-ins per group. Caps how often the bot speaks up unprompted.<br>**How to Tune**: Raise to make the bot quieter in busy groups; lower for chattier behavior. The bot still always replies when directly addressed. |
+| **`GROUP_AMBIENT_BASE_RATE`** | Float | `0.25` | **Purpose**: Base probability the bot chimes in when a cheap trigger fires, before affinity weighting. Final chance = `base × affinity × mode_factor`.<br>**How to Tune**: Lower for restraint; keep ≤ ~0.4 to avoid feeling spammy. |
+| **`GROUP_CONTEXT_SCAN_EVERY`** | Integer | `12` | **Purpose**: Once per cooldown window, after this many group messages, a single affinity-gated context-scan call may run to catch subtler moments keywords miss.<br>**How to Tune**: Raise to reduce ambient LLM calls; lower to make the bot more contextually aware. |
+| **`AFFINITY_DEFAULT`** | Float | `0.5` | **Purpose**: Starting affinity (0–1) for a new `{chat_id}:{user_id}` member, scaling how readily the bot engages that person.<br>**How to Tune**: Raise for a friendlier default; lower for a more reserved default. |
+
+---
+
+## 🔌 Connection Pool (advanced)
+
+The `motor` client uses a connection pool (driver default `maxPoolSize=100`). The *concurrently
+active* user working set is far smaller than total users, so the default is typically sufficient
+even at 50k+ users. If you observe connection saturation under extreme concurrency, raise
+`maxPoolSize` in `connection.py` and document the change here. See
+[performance_and_scaling.md](performance_and_scaling.md#database-access-patterns--indexes).

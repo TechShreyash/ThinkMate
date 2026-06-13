@@ -61,9 +61,14 @@ Tracks biographical profiles, communication preferences, direct emotional states
 ---
 
 ### 2. `chat_buffers` Collection
-Manages the sliding window context of active conversation history per user. Kept separate from profiles to optimize high-frequency chat reads and writes.
+Manages the sliding window of active conversation history. Kept separate from profiles to
+optimize high-frequency chat reads and writes.
 
-* **Primary Key (`_id`)**: Telegram User ID (`int`)
+* **Primary Key (`_id`)**: Telegram **chat ID** (`int`). In a DM, `chat_id == user_id`, so DMs
+  are unchanged; in groups, the buffer is shared by the whole conversation.
+* Each message carries `sender_id` and `sender_name` so group history is multi-party
+  ("Alice: …", "Bob: …") and extracted memory can be attributed to the right person. In DMs
+  these simply equal the single user.
 
 #### Example Document Schema:
 ```json
@@ -72,6 +77,8 @@ Manages the sliding window context of active conversation history per user. Kept
   "messages": [
     {
       "role": "user",
+      "sender_id": 12345678,
+      "sender_name": "Alice",
       "content": "Hello bot!",
       "created_at": "2026-06-12T10:44:00Z"
     },
@@ -115,13 +122,35 @@ A centralized audit log collection to trace all inputs, prompts, API parameters,
 
 ---
 
-## ⚙️ Connection Management (`connection.py`)
+### 4. `chat_members` Collection *(group chat — Phase 9)*
+Stores per-(chat, user) affinity and ambient-reply mode so the bot can tune how readily it
+engages each person in a group. Cached in memory and written through on change, so it adds no
+hot-path read. Has no effect in DMs.
+
+* **Primary Key (`_id`)**: composite string `"{chat_id}:{user_id}"`.
+
+#### Example Document Schema:
+```json
+{
+  "_id": "-1001234567890:12345678",
+  "chat_id": -1001234567890,
+  "user_id": 12345678,
+  "affinity": 0.62,                  // 0..1, default AFFINITY_DEFAULT
+  "mode": "auto",                    // "auto" | "quiet" | "chatty"
+  "updated_at": "2026-06-12T10:44:00Z"
+}
+```
+
+> See [group_chat.md](group_chat.md) for how affinity is updated (mentions/engagement, "stop/
+> quiet" keywords, and the `affinity_delta` that piggybacks on the reply call) and how `mode` is
+> set via `/quiet` and `/chatty`.
+
+---
 
 Database connections are managed asynchronously via `motor.motor_asyncio.AsyncIOMotorClient`. A single database client singleton is instantiated and reused.
 
 ```python
 # app/database/connection.py
-import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from contextlib import asynccontextmanager
 from loguru import logger
@@ -133,27 +162,42 @@ def get_db_client() -> AsyncIOMotorClient:
     global _client
     if _client is None:
         logger.info("Initializing AsyncIOMotorClient...")
-        _client = AsyncIOMotorClient(config.MONGODB_URI)
+        _client = AsyncIOMotorClient(config.MONGODB_URI, serverSelectionTimeoutMS=10000)
     return _client
 
 def get_db() -> AsyncIOMotorDatabase:
-    client = get_db_client()
-    return client[config.MONGODB_DB]
+    return get_db_client()[config.MONGODB_DB]
 
 @asynccontextmanager
 async def db_session():
     """Context manager yielding the active MongoDB database instance."""
-    db = get_db()
-    yield db
+    yield get_db()
+
+async def ping_db():
+    """Verify connectivity at startup (fail fast if Mongo is unreachable)."""
+    await get_db_client().admin.command("ping")
 
 async def init_db():
-    """Initializes MongoDB indexes for optimized query performance."""
+    """Create indexes for query performance and audit-log retention."""
     db = get_db()
-    logger.info("Initializing MongoDB indexes...")
-    # Compound index for user LLM log auditing
+    # Compound index: audit queries filtered by user_id, sorted by timestamp.
     await db["llm_audit_log"].create_index([("user_id", 1), ("timestamp", -1)])
-    logger.info("MongoDB indexes initialized successfully.")
+    # TTL index: auto-expire audit entries after the retention window. Wrapped defensively
+    # so an unsupported backend (e.g. mongomock) can't block startup.
+    try:
+        await db["llm_audit_log"].create_index(
+            [("timestamp", 1)],
+            expireAfterSeconds=config.AUDIT_LOG_RETENTION_DAYS * 86400,
+            name="audit_ttl",
+        )
+    except Exception as e:  # noqa: BLE001 - retention is best-effort, never fatal
+        logger.warning(f"Could not create audit-log TTL index: {e}")
 ```
+
+> **Index summary.** `user_profiles` and `chat_buffers` are matched by `_id` (no secondary
+> indexes needed). `chat_members` is matched by its composite `_id` string. `llm_audit_log`
+> carries a compound `(user_id, 1),(timestamp, -1)` index plus a `(timestamp, 1)` TTL index.
+> See [performance_and_scaling.md](performance_and_scaling.md#database-access-patterns--indexes).
 
 ---
 
@@ -162,88 +206,90 @@ async def init_db():
 CRUD methods are designed to perform atomic document modifications, avoiding raw SQL statements or SQLite table constraints.
 
 ### 1. Active Chat History Operations
-Chat history is appended to the message array via the `$push` operator. Slicing trims the oldest messages dynamically:
+Chat history is appended via `find_one_and_update` so the post-update array is returned in a
+single round-trip (the caller derives both the char count and the active history from it). A
+`$slice` hard cap bounds the array, and timestamps use a strictly-monotonic millisecond clock
+so the atomic trim below is exact:
 
 ```python
-async def add_message_to_buffer(db: AsyncIOMotorDatabase, user_id: int, role: str, content: str):
-    """Appends a chat message to the messages array in the user's chat_buffers document."""
-    now = datetime.utcnow()
-    await db["chat_buffers"].update_one(
-        {"_id": user_id},
+async def add_message_to_buffer(
+    db: AsyncIOMotorDatabase, chat_id: int, role: str, content: str
+) -> list[dict]:
+    """Append a message and return the resulting messages array (char count + history in one RT)."""
+    now = _monotonic_utcnow()  # strictly increasing at ms resolution within the process
+    doc = await db["chat_buffers"].find_one_and_update(
+        {"_id": chat_id},
         {
             "$push": {
                 "messages": {
-                    "role": role,
-                    "content": content,
-                    "created_at": now
+                    "$each": [{"role": role, "content": content, "created_at": now}],
+                    "$slice": -config.CHAT_BUFFER_HARD_CAP,   # safety net against unbounded growth
                 }
             },
-            "$set": {"updated_at": now}
+            "$set": {"updated_at": now},
         },
-        upsert=True
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
+    return doc.get("messages", []) if doc else []
+```
+
+Trimming the processed segment is **atomic** — a `$pull` on a `created_at` cutoff, never a
+read-slice-overwrite — so messages appended by a concurrent chat batch while a (slow) extractor
+runs are never clobbered:
+
+```python
+async def delete_oldest_buffer_messages(db, chat_id: int, count: int):
+    """Atomically remove the `count` oldest messages via $pull on a created_at cutoff."""
+    # read once, compute the cutoff = messages[count].created_at, then $pull < cutoff
+    ...
 ```
 
 ---
 
 ### 2. Surgical Memory Updates (`save_extracted_memories`)
-When the background Extractor processes the user's message history, updates are transactionally applied directly inside the user's profile document. We support full **hard deletion** of refuted facts, outdated beliefs, and old events.
+When the background Extractor processes message history, updates are applied inside the user's
+profile document in a **single read-modify-write** (load the arrays once, mutate in memory, then
+one `$set`). This is the efficient pattern — never a query per fact/belief/event. It supports
+full **hard deletion** of refuted facts, outdated beliefs, and old events, applies the same CRUD
+to all three arrays, and is robust to LLM phrasing drift:
+
+- **Normalized matching**: removals/updates match stored items by a normalized key
+  (`casefold` + whitespace-collapse), so "Lives in Seattle" and "lives in  seattle" resolve to
+  the same item.
+- **Dedup on write**: new/updated items are skipped if their normalized key already exists, so
+  re-extraction can't create duplicates.
+- **Events carry metadata**: updates preserve the original `event_date`/`significance`/
+  `emotional_context`/`created_at` unless explicitly changed.
 
 ```python
-async def save_extracted_memories(db: AsyncIOMotorDatabase, user_id: int, extraction: MemoryExtraction):
-    """Surgically applies extracted profile style, facts, beliefs, events, and emotional states to the user record."""
-    profile = await db["user_profiles"].find_one({"_id": user_id})
-    if not profile:
-        await ensure_user(db, user_id, "", "")
-        profile = await db["user_profiles"].find_one({"_id": user_id})
-        
-    facts = profile.get("facts", [])
-    beliefs = profile.get("beliefs", [])
-    events = profile.get("events", [])
-    now = datetime.utcnow()
-    
-    set_fields = {}
-    if extraction.profile_updates and extraction.profile_updates.communication_style:
-        set_fields["communication_style"] = extraction.profile_updates.communication_style
-        
-    if extraction.emotional_state:
-        set_fields["emotional_state"] = {
-            "mood": extraction.emotional_state.mood,
-            "intensity": extraction.emotional_state.intensity,
-            "trigger": extraction.emotional_state.trigger or "",
-            "detected_at": now
-        }
-        
-    # Apply Facts modifications (Hard Deletes)
-    removed_contents = {f.content for f in extraction.removed_facts}
-    updated_old_contents = {f.old_content for f in extraction.updated_facts}
-    exclude_facts = removed_contents.union(updated_old_contents)
-    facts = [f for f in facts if f["content"] not in exclude_facts]
-    
-    for f in extraction.new_facts:
-        facts.append({"category": f.category, "content": f.content, "confidence": 1.0, "created_at": now, "updated_at": now})
-    for f in extraction.updated_facts:
-        facts.append({"category": f.category, "content": f.new_content, "confidence": 1.0, "created_at": now, "updated_at": now})
-        
-    # Apply Beliefs modifications (Hard Deletes)
-    removed_beliefs = {b.content for b in extraction.removed_beliefs}
-    updated_old_beliefs = {b.old_content for b in extraction.updated_beliefs}
-    exclude_beliefs = removed_beliefs.union(updated_old_beliefs)
-    beliefs = [b for b in beliefs if b["content"] not in exclude_beliefs]
-    
-    for b in extraction.new_beliefs:
-        beliefs.append({"content": b.content, "created_at": now, "updated_at": now})
-    for b in extraction.updated_beliefs:
-        beliefs.append({"content": b.new_content, "created_at": now, "updated_at": now})
-        
-    # Save back to MongoDB
-    set_fields["facts"] = facts
-    set_fields["beliefs"] = beliefs
-    set_fields["events"] = events
-    set_fields["updated_at"] = now
-    
-    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+async def save_extracted_memories(db, user_id: int, extraction: MemoryExtraction):
+    profile = await db["user_profiles"].find_one({"_id": user_id}) or await _ensure(db, user_id)
+    facts, beliefs, events = profile.get("facts", []), profile.get("beliefs", []), profile.get("events", [])
+    now = _utcnow()
+
+    def norm(s): return " ".join((s or "").split()).casefold()
+
+    # FACTS — drop removed/updated-old (normalized), then append new/updated, deduped.
+    exclude = {norm(f.content) for f in extraction.removed_facts} | {norm(f.old_content) for f in extraction.updated_facts}
+    facts = [f for f in facts if norm(f["content"]) not in exclude]
+    seen = {norm(f["content"]) for f in facts}
+    for f in [*extraction.new_facts, *( _as_new(u) for u in extraction.updated_facts)]:
+        if norm(f.content) in seen: continue
+        seen.add(norm(f.content)); facts.append({"category": f.category, "content": f.content,
+                                                  "confidence": 1.0, "created_at": now, "updated_at": now})
+    # BELIEFS and EVENTS follow the same remove -> dedup-append pattern (events keep prior metadata).
+    ...
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$set": {"facts": facts, "beliefs": beliefs, "events": events,
+                  "communication_style": ..., "emotional_state": ..., "updated_at": now}},
+    )
 ```
+
+> `replace_user_memory` (used by the compressor) follows the same single-write shape, replacing
+> the arrays with the compressed layout. **It is skipped when compression fails** (the LLM
+> returns `None`), so a failed compression never wipes a user's memory.
 
 ---
 
