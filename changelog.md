@@ -2,6 +2,11 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 10 Observability: Spec (Requirements + Design + Tasks)
+
+### Added
+- **Observability & ops spec** under `.kiro/specs/observability/`: `requirements.md` (EARS — in-memory metrics registry, hot-path instrumentation, health/readiness, admin `/health` command, optional periodic logger, runbook, tests), `design.md` (the fixed metric set, `metrics.py`/`health.py` interfaces, additive non-behavioral instrumentation, 9 correctness properties), and `tasks.md` (DAG plan, 7 waves). In-process, dependency-free, single-instance — not a Prometheus/OTel server.
+
 ## [2026-06-14] - Phase 9 Group Chat: Implemented (ambient gate, affinity, multi-party memory)
 
 ### Added
