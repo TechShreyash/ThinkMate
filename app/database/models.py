@@ -10,6 +10,7 @@ clobbered by a background extractor (see docs/development/hardening_plan.md, B1)
 """
 import threading
 from datetime import datetime, timezone, timedelta
+from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 from app.config import config
@@ -78,21 +79,41 @@ async def reset_user(db: AsyncIOMotorDatabase, user_id: int):
 
 
 async def add_message_to_buffer(
-    db: AsyncIOMotorDatabase, user_id: int, role: str, content: str
+    db: AsyncIOMotorDatabase,
+    chat_id: int,
+    role: str,
+    content: str,
+    *,
+    sender_id: int | None = None,
+    sender_name: str = "",
 ) -> list[dict]:
-    """Append a message to the buffer and return the resulting messages array.
+    """Append a message to the ``chat_id``-keyed buffer and return the messages array.
+
+    The buffer is keyed by ``chat_id``; in a DM ``chat_id == user_id`` so the on-disk
+    document (``_id``) is unchanged from current behavior. Each pushed message now also
+    carries ``sender_id``/``sender_name`` for multi-party group context. When
+    ``sender_id`` is omitted it defaults to ``chat_id``, preserving DM semantics (a DM's
+    only speaker is the user, whose id equals the chat id).
 
     Returning the post-update array lets the caller derive the char count and active
     history without extra round-trips. A ``$slice`` hard cap bounds the array so a
     stalled extractor can never let it grow without limit.
     """
+    if sender_id is None:
+        sender_id = chat_id
     now = _monotonic_utcnow()
     doc = await db["chat_buffers"].find_one_and_update(
-        {"_id": user_id},
+        {"_id": chat_id},
         {
             "$push": {
                 "messages": {
-                    "$each": [{"role": role, "content": content, "created_at": now}],
+                    "$each": [{
+                        "role": role,
+                        "sender_id": sender_id,
+                        "sender_name": sender_name,
+                        "content": content,
+                        "created_at": now,
+                    }],
                     "$slice": -config.CHAT_BUFFER_HARD_CAP,
                 }
             },
@@ -325,3 +346,69 @@ async def get_active_facts(db: AsyncIOMotorDatabase, user_id: int) -> list[dict]
             for idx, f in enumerate(doc["facts"])
         ]
     return []
+
+
+# --- chat_members (per-(chat, user) affinity & mode) ---
+
+_VALID_MODES = {"auto", "quiet", "chatty"}
+
+
+def _chat_member_id(chat_id: int, user_id: int) -> str:
+    """Composite key for a chat_members document: ``"{chat_id}:{user_id}"``."""
+    return f"{chat_id}:{user_id}"
+
+
+async def get_chat_member(
+    db: AsyncIOMotorDatabase, chat_id: int, user_id: int
+) -> dict | None:
+    """Return the ``chat_members`` document for (chat_id, user_id), or None if absent."""
+    return await db["chat_members"].find_one({"_id": _chat_member_id(chat_id, user_id)})
+
+
+async def upsert_chat_member(
+    db: AsyncIOMotorDatabase,
+    chat_id: int,
+    user_id: int,
+    *,
+    affinity: float | None = None,
+    mode: str | None = None,
+) -> dict:
+    """Upsert a ``chat_members`` record keyed ``"{chat_id}:{user_id}"`` and return it.
+
+    Affinity values are clamped to the inclusive range [0.0, 1.0] before writing. An
+    invalid ``mode`` is coerced to ``"auto"`` (with a warning) rather than raising, so a
+    bad signal can never block the hot path. Defaults (``AFFINITY_DEFAULT``, ``"auto"``,
+    ``created_at``) are applied only on insert via ``$setOnInsert``, mirroring
+    ``ensure_user``'s single read-modify-write style.
+    """
+    now = _utcnow()
+    set_fields: dict = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "updated_at": now,
+    }
+
+    if affinity is not None:
+        set_fields["affinity"] = max(0.0, min(1.0, affinity))
+
+    if mode is not None:
+        if mode not in _VALID_MODES:
+            logger.warning(
+                "upsert_chat_member: invalid mode {!r} for {}:{}, coercing to 'auto'",
+                mode, chat_id, user_id,
+            )
+            mode = "auto"
+        set_fields["mode"] = mode
+
+    set_on_insert: dict = {"created_at": now}
+    if "affinity" not in set_fields:
+        set_on_insert["affinity"] = config.AFFINITY_DEFAULT
+    if "mode" not in set_fields:
+        set_on_insert["mode"] = "auto"
+
+    return await db["chat_members"].find_one_and_update(
+        {"_id": _chat_member_id(chat_id, user_id)},
+        {"$set": set_fields, "$setOnInsert": set_on_insert},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )

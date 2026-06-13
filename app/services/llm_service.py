@@ -128,27 +128,58 @@ class LLMService:
     # Conversational reply (+ optional reaction) — one call
     # ------------------------------------------------------------------ #
     async def generate_reply_bundle(
-        self, user_id: int, system_prompt: str, chat_history: list[dict]
-    ) -> tuple[str, str | None]:
+        self, user_id: int, system_prompt: str, chat_history: list[dict],
+        *, with_affinity: bool = False,
+    ) -> tuple[str, str | None] | tuple[str, str | None, float | None]:
         """Generate the conversational reply and an optional emoji reaction in a single call.
 
         Uses ``json_object`` mode (verified to preserve reply quality on the configured
         Gemini proxy). Falls back to treating the raw output as the reply if JSON parsing
         fails, so the user always gets an answer.
+
+        ``with_affinity`` controls the return contract:
+
+        - ``False`` (default, DM/addressed path): the prompt and the returned value are
+          byte-for-byte unchanged from the original behavior — returns ``(reply, reaction)``.
+        - ``True`` (group path): the format clause additionally asks for an optional
+          ``affinity_delta`` number in ``[-0.2, 0.2]``, and the method returns
+          ``(reply, reaction, affinity_delta)`` where ``affinity_delta`` is a ``float`` or
+          ``None`` when the model omits it.
         """
-        format_clause = (
-            "\n\n---\n## RESPONSE FORMAT (STRICT)\n"
-            'Respond with ONLY a JSON object: {"reply": "<message>", "reaction": "<emoji or empty>"}.\n'
-            '- "reply": your natural conversational message, obeying every style rule above. '
-            "Plain text only — no markdown or code fences. Emojis within the reply are fine if "
-            "they fit your persona.\n"
-            '- "reaction": INDEPENDENTLY of the reply, optionally pick a SINGLE emoji to react to '
-            "the user's latest message with (this is applied as a Telegram reaction on THEIR "
-            "message, separate from your reply). Choose ONLY from this list, or an empty string "
-            "when no reaction fits (most messages need none):\n"
-            f"{' '.join(sorted(ALLOWED_REACTIONS))}\n"
-            "Output the raw JSON object only — no preamble, no code fences around it."
-        )
+        if with_affinity:
+            # Group variant: same reply/reaction contract, plus an optional affinity_delta.
+            format_clause = (
+                "\n\n---\n## RESPONSE FORMAT (STRICT)\n"
+                'Respond with ONLY a JSON object: {"reply": "<message>", "reaction": "<emoji or empty>", '
+                '"affinity_delta": <number or omit>}.\n'
+                '- "reply": your natural conversational message, obeying every style rule above. '
+                "Plain text only — no markdown or code fences. Emojis within the reply are fine if "
+                "they fit your persona.\n"
+                '- "reaction": INDEPENDENTLY of the reply, optionally pick a SINGLE emoji to react to '
+                "the user's latest message with (this is applied as a Telegram reaction on THEIR "
+                "message, separate from your reply). Choose ONLY from this list, or an empty string "
+                "when no reaction fits (most messages need none):\n"
+                f"{' '.join(sorted(ALLOWED_REACTIONS))}\n"
+                '- "affinity_delta": OPTIONAL signed number in [-0.2, 0.2] expressing how much the '
+                "latest speaker's warmth toward you should shift based on their message (positive when "
+                "they engage warmly or invite you in, negative when they are dismissive or want less). "
+                "Omit it or use 0 when neutral.\n"
+                "Output the raw JSON object only — no preamble, no code fences around it."
+            )
+        else:
+            format_clause = (
+                "\n\n---\n## RESPONSE FORMAT (STRICT)\n"
+                'Respond with ONLY a JSON object: {"reply": "<message>", "reaction": "<emoji or empty>"}.\n'
+                '- "reply": your natural conversational message, obeying every style rule above. '
+                "Plain text only — no markdown or code fences. Emojis within the reply are fine if "
+                "they fit your persona.\n"
+                '- "reaction": INDEPENDENTLY of the reply, optionally pick a SINGLE emoji to react to '
+                "the user's latest message with (this is applied as a Telegram reaction on THEIR "
+                "message, separate from your reply). Choose ONLY from this list, or an empty string "
+                "when no reaction fits (most messages need none):\n"
+                f"{' '.join(sorted(ALLOWED_REACTIONS))}\n"
+                "Output the raw JSON object only — no preamble, no code fences around it."
+            )
         messages = [{"role": "system", "content": system_prompt + format_clause}] + chat_history
         # Budget tokens for the reply text plus the small JSON envelope.
         max_tokens = (config.MAX_RESPONSE_CHARS // config.CHARS_PER_TOKEN) + 80
@@ -167,32 +198,47 @@ class LLMService:
                 what=f"reply_bundle u{user_id}",
             )
             raw = (response.choices[0].message.content or "").strip()
-            reply, reaction = self._parse_reply_bundle(raw)
+            reply, reaction, affinity_delta = self._parse_reply_bundle(raw)
+            parsed_json = {"reply": reply, "reaction": reaction}
+            if with_affinity:
+                parsed_json["affinity_delta"] = affinity_delta
             self._fire_log(
                 user_id, "chat_reply", inputs,
-                {"raw_text": raw, "parsed_json": {"reply": reply, "reaction": reaction}},
+                {"raw_text": raw, "parsed_json": parsed_json},
                 "success",
             )
+            if with_affinity:
+                return reply, reaction, affinity_delta
             return reply, reaction
         except Exception as e:
             self._fire_log(user_id, "chat_reply", inputs, status="failed", error=traceback.format_exc())
             logger.error(f"Reply generation failed for user {user_id}: {e}")
             raise
 
-    def _parse_reply_bundle(self, raw: str) -> tuple[str, str | None]:
-        """Parse the {reply, reaction} JSON; degrade gracefully to plain text on failure."""
+    def _parse_reply_bundle(self, raw: str) -> tuple[str, str | None, float | None]:
+        """Parse the {reply, reaction, affinity_delta} JSON; degrade gracefully on failure.
+
+        Returns a 3-tuple ``(reply, reaction, affinity_delta)`` internally. ``affinity_delta``
+        is parsed only when present as a number and defaults to ``None`` (so the DM-facing
+        path, which ignores the 3rd value, is unaffected). The graceful JSON fallback to
+        plain text is preserved.
+        """
         cleaned = self._strip_fences(raw)
         try:
             data = json.loads(cleaned)
             if isinstance(data, dict) and isinstance(data.get("reply"), str) and data["reply"].strip():
                 reaction = normalize_reaction(data.get("reaction")) if config.ENABLE_MESSAGE_REACTIONS else None
-                return data["reply"].strip(), reaction
+                affinity_delta = None
+                ad = data.get("affinity_delta")
+                if isinstance(ad, (int, float)) and not isinstance(ad, bool):
+                    affinity_delta = float(ad)
+                return data["reply"].strip(), reaction, affinity_delta
         except (json.JSONDecodeError, ValueError):
             pass
         logger.warning("Reply bundle was not valid JSON; using raw text as the reply.")
-        # Fall back to whatever text we got (minus any fences), no reaction.
+        # Fall back to whatever text we got (minus any fences), no reaction, no delta.
         fallback = cleaned if cleaned and cleaned != "{}" else raw
-        return fallback.strip(), None
+        return fallback.strip(), None, None
 
     # ------------------------------------------------------------------ #
     # Structured memory calls (extraction / compression)

@@ -9,6 +9,10 @@ class ReplyBundle(BaseModel):
         None,
         description="A single Telegram emoji reaction for the user's message, or null if none fits.",
     )
+    affinity_delta: Optional[float] = Field(
+        None,
+        description="Groups only: a small signed adjustment to the speaker's affinity (e.g. +0.05/-0.05). Ignored/None in DMs.",
+    )
 
 # --- FACT SCHEMAS ---
 class FactExtract(BaseModel):
@@ -75,6 +79,14 @@ class MemoryExtraction(BaseModel):
     updated_events: list[EventUpdate] = Field(default_factory=list)
     removed_events: list[EventRemoval] = Field(default_factory=list)
     emotional_state: Optional[EmotionLog] = None
+
+# --- MULTI-PARTY (GROUP) EXTRACTION SCHEMAS ---
+class GroupMemoryUpdate(BaseModel):
+    participant: str = Field(description="The participant's sender_name exactly as it appears in the group segment.")
+    extraction: MemoryExtraction = Field(description="The memory extraction attributed to this participant.")
+
+class GroupMemoryExtraction(BaseModel):
+    updates: list[GroupMemoryUpdate] = Field(default_factory=list)
 
 # --- COMPRESSION SCHEMAS ---
 class CompressedFact(BaseModel):

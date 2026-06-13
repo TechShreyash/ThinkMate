@@ -7,6 +7,14 @@ All notable changes to the ThinkMate project will be documented in this file.
 ### Added
 - **Group-chat feature spec** under `.kiro/specs/group-chat/`: `requirements.md` (EARS criteria across DM preservation, group routing/identity, ambient gate, affinity, multi-party extraction, commands, config/observability), `design.md` (additive-plumbing architecture, `chat_members` data model, augmented buffer messages, the no-LLM ambient-gate funnel, 8 correctness properties, testing strategy), and `tasks.md` (DAG plan, 8 waves). Grounded in `docs/development/group_chat.md` and the actual current code. Top constraint: DMs remain byte-for-byte identical (`chat_id == user_id`).
 
+### Changed (Phase 9 implementation — waves 1-2, DM behavior preserved)
+- **Schemas** (`app/services/schemas.py`): `ReplyBundle` gains optional `affinity_delta`; new `GroupMemoryUpdate`/`GroupMemoryExtraction` for name-tagged multi-party extraction.
+- **Buffer + chat_members** (`app/database/models.py`): `add_message_to_buffer` is now keyed by `chat_id` and stores `sender_id`/`sender_name` per message (defaults to `chat_id` in DMs, so DM docs stay compatible); new `get_chat_member`/`upsert_chat_member` CRUD over a `chat_members` collection (`_id="{chat_id}:{user_id}"`, affinity clamped to [0,1], mode validated).
+- **Group gate** (`app/services/group_gate.py`, new): pure no-LLM helpers `is_addressed`, `scan_cheap_triggers`, `scan_negative_signal`, plus the `AmbientGate` funnel (cooldown → scan-tick → affinity dice → prune).
+- **Affinity cache** (`app/services/affinity.py`, new): read-through/write-through in-memory cache over `chat_members` with idle pruning.
+- **Orchestrator** (`app/services/chat_manager.py`): `handle_message` gains keyword-only chat context (`chat_type`, `sender_id`, `sender_name`, `reason`, `participants`) with DM-safe defaults; groups render multi-party history and obtain `affinity_delta`. `generate_reply_bundle` gains `with_affinity` (DM contract unchanged).
+- **Tests**: `tests/test_group_models.py` (11) for buffer attribution + chat_members. Existing DM suite unchanged and green.
+
 ## [2026-06-14] - DM Skip Bot Commands Bugfix: Spec + Exploratory/Preservation Tests
 
 ### Added
