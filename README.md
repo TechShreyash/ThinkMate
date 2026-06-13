@@ -15,7 +15,7 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 *   **Editable Persona**: Change the bot's tone, rules, and traits dynamically by editing the [persona.md](persona.md) markdown file—no service restart required.
 *   **Dynamic Message Reactions**: The conversational reply and an optional Telegram emoji reaction are produced in a **single** LLM call (strict JSON `{reply, reaction}`), then the reaction is normalized to Telegram's accepted set and applied gracefully.
 *   **Data Isolation**: Built-in support for multi-user chat with strict per-user database isolation.
-*   **Group Chat & Affinity** *(designed; see [group_chat.md](docs/development/group_chat.md))*: In groups the bot always replies when addressed and otherwise chimes in selectively through a no-LLM ambient gate (cooldown → keyword scan → affinity-weighted probability), keeping it engaging without spam or API abuse.
+*   **Group Chat & Affinity** *(supported; see [group_chat.md](docs/development/group_chat.md))*: In groups the bot always replies when addressed (mention, name, or reply-to-bot) and otherwise chimes in selectively through a no-LLM ambient gate (cooldown → keyword/scan-tick → affinity-weighted probability), keeping it engaging without spam or API abuse. Per-(chat, user) affinity and `/quiet` `/chatty` modes tune its chattiness, and group memory is extracted multi-party while staying attributed per user. DMs are unchanged.
 *   **Built for load**: Single long-polling instance hardened for 50k+ users — one LLM call per reply, ~3 DB round-trips on the hot path, bounded in-memory state, and a documented scale-out path (see [performance_and_scaling.md](docs/development/performance_and_scaling.md)).
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `motor` (MongoDB async driver) for high performance and standard async workflow.
 
@@ -54,8 +54,8 @@ ThinkMate/
 │   │
 │   ├── handlers/                   # Telegram event handlers (aiogram)
 │   │   ├── __init__.py
-│   │   ├── commands.py             # Slash commands (/start, /profile, /reset)
-│   │   └── messages.py             # Default message router & main handler
+│   │   ├── commands.py             # Slash commands (/start, /help, /profile, /reset, /quiet, /chatty)
+│   │   └── messages.py             # Default message router, chat-type routing & ambient gate handoff
 │   │
 │   ├── services/                   # Core business logic
 │   │   ├── __init__.py
@@ -63,7 +63,9 @@ ThinkMate/
 │   │   ├── schemas.py              # Pydantic schemas (ReplyBundle, extraction, compression)
 │   │   ├── reactions.py            # Telegram reaction whitelist + normalization
 │   │   ├── chat_manager.py         # Response flow orchestrator
-│   │   ├── memory_extractor.py     # Memory extraction LLM interface
+│   │   ├── group_gate.py           # No-LLM group helpers + ambient gate (Phase 9)
+│   │   ├── affinity.py             # Per-(chat, user) affinity/mode cache (Phase 9)
+│   │   ├── memory_extractor.py     # Memory extraction LLM interface (DM + multi-party group)
 │   │   ├── memory_loader.py        # System prompt memory compiler
 │   │   ├── memory_compressor.py    # LLM-powered memory compressor + budget enforcement
 │   │   └── user_task_manager.py    # Concurrency, batching, queues & typing indicators

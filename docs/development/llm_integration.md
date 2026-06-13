@@ -49,9 +49,12 @@ variation selectors like `❤️` → `❤`) and dropped if invalid or if `ENABL
 If the model returns non-JSON, the raw text is used as the reply and no reaction is sent — the
 user always gets an answer.
 
-> **Group chats (Phase 9):** the same call may also return an optional `affinity_delta` field
-> (a small signed number) so the bot's read on the relationship rides inside the reply JSON at
-> no extra LLM cost. It is ignored in DMs. See [group_chat.md](group_chat.md).
+> **Group chats (Phase 9, implemented):** calling `generate_reply_bundle(..., with_affinity=True)`
+> (the group path) switches the return contract to `(reply, reaction, affinity_delta)` and asks the
+> model for an optional `affinity_delta` number in `[-0.2, 0.2]` inside the same reply JSON — so the
+> bot's read on the relationship rides along at no extra LLM cost. With `with_affinity=False`
+> (default, DM/addressed path) the prompt and the `(reply, reaction)` return value are byte-for-byte
+> unchanged. `affinity_delta` is `None`/ignored in DMs. See [group_chat.md](group_chat.md).
 
 ---
 
@@ -133,6 +136,23 @@ class MemoryCompression(BaseModel):
     compressed_events: list[CompressedEvent] = Field(default_factory=list)
     emotional_state: Optional[EmotionLog] = None
 ```
+
+### Group-chat schemas *(Phase 9, implemented)*
+
+Three additions support group chat without disturbing the DM contract:
+
+* **`ReplyBundle.affinity_delta`** — an optional signed `float` on the combined reply schema,
+  populated only on the group path (`with_affinity=True`) and ignored in DMs.
+* **`GroupMemoryUpdate`** — pairs a `participant` name (exactly as rendered in the group segment)
+  with a standard `MemoryExtraction` attributed to that person.
+* **`GroupMemoryExtraction`** — `{ updates: list[GroupMemoryUpdate] }`, the result of the
+  multi-party extraction call.
+
+`extract_group_memory(chat_id_or_user_id, system_prompt, user_history_text)` mirrors
+`extract_memory` exactly — same model selection, retry / `json_object` / `native_parse` handling,
+temperature, timeout, and `None`-on-failure contract — but validates against
+`GroupMemoryExtraction`. Its first argument is used only for audit logging; attribution is resolved
+by the caller from the segment's own name→id map (see [memory_engine.md](memory_engine.md)).
 
 ---
 

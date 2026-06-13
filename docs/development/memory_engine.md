@@ -175,12 +175,30 @@ To prevent data corruption, a unified `memory_lock = asyncio.Lock()` is initiali
 
 ---
 
-## 👥 Multi-Party Extraction in Groups *(Phase 9)*
+## 👥 Multi-Party Extraction in Groups *(Phase 9, implemented)*
 
 In group chats the buffer is shared (`chat_id`-keyed) and each message carries `sender_id` +
-`sender_name`, but **memory stays per `user_id`**. Extraction over a group segment is a single
-LLM call that returns updates tagged by participant name; those are mapped back to each
-`sender_id` using the segment's own name→id map and saved into each participant's profile via
-the same normalized, deduped CRUD described above. This keeps group extraction to one LLM call
-while still attributing facts/beliefs/events to the correct person. DMs are unchanged (a single
-participant). See [group_chat.md](group_chat.md).
+`sender_name`, but **memory stays per `user_id`**. The single entry point
+`extract_and_trim(chat_id)` dispatches DM vs. group with a distinct-human-sender heuristic
+(`_is_group_buffer`: more than one distinct human `sender_id` among the buffered user turns ⇒
+group), so no caller has to change — a DM has exactly one human sender and takes the original
+single-party path unchanged.
+
+The group path, `extract_and_trim_group(chat_id)`:
+
+1. Reads the raw buffer (with sender attribution) and takes the segment to extract — everything
+   except the most recent `CHAT_BUFFER_TRIM` messages — re-read on each of
+   `MAX_EXTRACTION_ATTEMPTS` attempts so messages arriving mid-call fold into the next attempt.
+2. Makes **one** `llm_service.extract_group_memory` call over the whole segment (rendered as
+   `"SenderName: content"` lines), not one call per participant. It returns a
+   `GroupMemoryExtraction` whose `updates` are tagged by participant **name**.
+3. Maps each tagged name back to a `sender_id` using the segment's **own** normalized name→id
+   map (`_build_name_id_map`). On duplicate display names, **first id wins**; names that can't be
+   resolved are **skipped** rather than misattributed.
+4. Saves each resolved update into that participant's profile via the same normalized, deduped
+   `save_extracted_memories` CRUD, then **atomically trims** the processed segment.
+5. If every attempt fails, the oldest messages are trimmed anyway (all-fail-still-trim), matching
+   the DM contract, so an outage can't grow the buffer unbounded.
+
+DMs are unchanged (a single participant). See [group_chat.md](group_chat.md) and the
+`GroupMemoryExtraction` schema in [llm_integration.md](llm_integration.md).

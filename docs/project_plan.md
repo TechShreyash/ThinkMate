@@ -304,11 +304,12 @@ steps in [performance_and_scaling.md](development/performance_and_scaling.md#hor
 - [ ] Phase 6 Guards & concurrency
 - [ ] Phase 7 Hardening & efficiency
 - [ ] Phase 8 Tests
-- [ ] Phase 9 Group chat
+- [x] Phase 9 Group chat
 - [ ] Phase 10 Observability & ops
 - [ ] Phase 11 Future: consolidation
 - [ ] Phase 12 Future: horizontal scale
 
-> Note: the current repository already implements Phases 0–8 (DM bot, hardened). Phase 9 is
-> designed but not yet implemented; Phases 10–12 are forward-looking. This plan is written so
-> the project could also be rebuilt cleanly from scratch in this exact order.
+> Note: the current repository already implements Phases 0–9 (DM bot, hardened, plus group
+> chat). Phase 10 (observability/ops) is partially in place via structured logging and the
+> LLM audit log; Phases 11–12 are forward-looking. This plan is written so the project could
+> also be rebuilt cleanly from scratch in this exact order.

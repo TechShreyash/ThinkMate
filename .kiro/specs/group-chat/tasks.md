@@ -128,7 +128,7 @@ graph TD
     - Assert `enqueue_message` batches by `chat_id` and that the existing batching/deadline/queue tests still pass with the new defaulted signature
     - _Requirements: 1.1, 1.2, 1.5, 1.6, 1.7, 2.7_
 
-- [ ] 3. Group routing & bot identity
+- [x] 3. Group routing & bot identity
 
   - [x] 3.1 Implement `group_gate` identity + cheap-scan helpers
     - Create `app/services/group_gate.py` with pure helpers: `is_addressed(*, text, entities, reply_to_bot, bot_username, bot_name)` (mention / name-token / reply-to-bot), `scan_cheap_triggers(text)` (regex/keywords: birthdays, congrats, laughter, questions, greetings, strong sentiment — no LLM), and `scan_negative_signal(text)` ("stop/quiet/spam/annoying/shut up")
@@ -141,28 +141,28 @@ graph TD
     - Ensure registered commands (incl. `/quiet` `/chatty`) are still routed to handlers and never treated as conversation or ambient triggers
     - _Requirements: 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.8_
 
-  - [~] 3.3 Tests: routing & identity
+  - [x] 3.3 Tests: routing & identity
     - Using pytest-asyncio + mocked aiogram `Message` (per `tests/test_command_skip.py` style), assert mention, name-token, and reply-to-bot messages classify as addressed and enqueue a reply
     - Assert a non-addressed group message is buffered but not directly replied to; assert channel updates are ignored (no buffer write); assert multi-party history renders `"Name: content"`
     - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6, 2.7_
 
-- [ ] 4. Ambient gate (no-LLM funnel)
+- [x] 4. Ambient gate (no-LLM funnel)
 
   - [x] 4.1 Implement `AmbientGate` (cooldown → scan tick → affinity dice → prune)
     - In `app/services/group_gate.py`, add `AmbientGate` with per-chat in-memory cooldown + scan-tick counters; `should_chime(chat_id, *, affinity, mode, triggered, now)` returns True only when the cooldown elapsed, a trigger/scan-tick passed, and a single dice roll beats `GROUP_AMBIENT_BASE_RATE × affinity × mode_factor` (`quiet`→0, `auto`→1, `chatty`→>1)
     - Add `mark_chimed(chat_id, now)` (reset cooldown) and `prune(now)` (drop stale entries so the map is bounded); read all knobs from `config`
     - _Requirements: 3.1, 3.3, 3.4, 3.5, 3.7, 3.8, 3.9, 3.10, 7.1_
 
-  - [~] 4.2 Wire the ambient gate into the group path
+  - [x] 4.2 Wire the ambient gate into the group path
     - In the group non-addressed branch, fetch the speaker's affinity/mode (via `models.get_chat_member`, defaulting to `AFFINITY_DEFAULT`/`auto`), run `AmbientGate.should_chime(...)`, and on pass `enqueue_message(reason="ambient")`; on any drop, stop with no LLM call
     - After an ambient chime-in is dispatched, call `mark_chimed` so the cooldown holds; ensure an empty model reply sends nothing
     - _Requirements: 2.5, 3.2, 3.6, 7.4_
 
-  - [~] 4.3 Tests: funnel, budget, bounded state
+  - [x] 4.3 Tests: funnel, budget, bounded state
     - Using pytest-asyncio with the LLM patched via `AsyncMock` and the RNG patched deterministically, assert: cooldown blocks a second chime-in within the window (no LLM call); an inert message with no scan tick stops; `quiet` mode forces no call; a burst of N messages in one window yields ≤1 ambient LLM call; `prune` drops stale cooldown entries
     - _Requirements: 3.1, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.10_
 
-- [ ] 5. Affinity store, signals & commands
+- [x] 5. Affinity store, signals & commands
 
   - [x] 5.1 Implement `AffinityCache` (read-through / write-through)
     - In `app/services/group_gate.py` (or a small `affinity.py`), add `AffinityCache` over `chat_members`: `get(db, chat_id, user_id)` serves from an in-memory cache, falling back to one DB read + default creation on miss; `bump(db, chat_id, user_id, delta)` and `set_mode(db, chat_id, user_id, mode)` write through and update the cache
@@ -179,7 +179,7 @@ graph TD
     - In a private chat, respond gracefully (explanatory message) without creating any group affinity state
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-  - [~] 5.4 Tests: affinity cache, signals, commands
+  - [x] 5.4 Tests: affinity cache, signals, commands
     - Using mongomock + pytest-asyncio, assert the cache serves a second read without a DB hit (spy the model fn), defaults apply on miss, and all signals clamp to [0,1] and write through; assert DMs never create `chat_members`
     - Assert `/quiet` sets `quiet` and suppresses ambient (gate returns False), `/chatty` sets `chatty` and boosts probability, and both respond gracefully in a DM
     - _Requirements: 4.2, 4.4, 4.5, 4.6, 4.7, 4.8, 6.1, 6.2, 6.3_
@@ -196,18 +196,18 @@ graph TD
     - Assert an unresolved participant name is skipped (no crash, no misattribution) and the processed segment is trimmed without clobbering concurrently appended messages
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6_
 
-- [ ] 7. Configuration & observability
+- [x] 7. Configuration & observability
 
-  - [~] 7.1 Funnel logging + ambient audit + config knobs
+  - [x] 7.1 Funnel logging + ambient audit + config knobs
     - Emit a log record at each funnel drop stage (cooldown, trigger scan, dice roll, empty reply) identifying the stage; route the ambient chime-in LLM call through the existing `llm_audit_log` fire-and-forget path
     - Ensure all group behavior reads `GROUP_AMBIENT_COOLDOWN_SECS`, `GROUP_AMBIENT_BASE_RATE`, `GROUP_CONTEXT_SCAN_EVERY`, `AFFINITY_DEFAULT` from `config` (no hardcoded literals)
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
 
-  - [~] 7.2 Tests: config overrides + observability
+  - [x] 7.2 Tests: config overrides + observability
     - Using pytest-asyncio, override config knobs (as existing tests do) and assert behavior changes (e.g. a larger cooldown blocks more, a higher base rate admits more under a fixed RNG); assert drop-stage log records are emitted (capture via caplog/loguru where practical)
     - _Requirements: 7.1, 7.2, 7.4_
 
-- [~] 8. Checkpoint - ensure the full suite passes
+- [x] 8. Checkpoint - ensure the full suite passes
   - Run the full test suite (`uv run pytest` or the project's configured command) and confirm every test passes with no warnings and no external services, including all pre-existing DM tests unmodified
   - Confirm the hot-path invariants hold: one reply LLM call per batch, ≤ ~1 ambient LLM call per active group per cooldown window, cheap scans before any LLM call, and bounded in-memory state
   - _Requirements: 1.6_

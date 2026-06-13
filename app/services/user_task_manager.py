@@ -221,13 +221,21 @@ class UserTaskManager:
                         reason=last_reason,
                     )
 
-                if reaction:
-                    try:
-                        await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
-                    except Exception as react_err:  # noqa: BLE001
-                        logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
+                # Ambient empty-reply suppression (Req 3.6): an ambient chime-in may
+                # yield an empty/declined reply. In that case send nothing at all — skip
+                # BOTH the reaction and the answer. The cooldown was already reset at
+                # dispatch time, so a decline still holds the window. Non-ambient
+                # (reply/DM) paths keep the existing behavior of always answering.
+                if last_reason == "ambient" and (not reply_text or not reply_text.strip()):
+                    logger.debug(f"Ambient reply empty for chat {chat_id}; sending nothing.")
+                else:
+                    if reaction:
+                        try:
+                            await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
+                        except Exception as react_err:  # noqa: BLE001
+                            logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
 
-                await last_message.answer(reply_text)
+                    await last_message.answer(reply_text)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Error processing batch for chat {chat_id}: {e}")
                 await last_message.answer("Sorry, I ran into a problem just now — mind trying again?")

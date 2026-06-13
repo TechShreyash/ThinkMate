@@ -122,7 +122,7 @@ A centralized audit log collection to trace all inputs, prompts, API parameters,
 
 ---
 
-### 4. `chat_members` Collection *(group chat — Phase 9)*
+### 4. `chat_members` Collection *(group chat — Phase 9, implemented)*
 Stores per-(chat, user) affinity and ambient-reply mode so the bot can tune how readily it
 engages each person in a group. Cached in memory and written through on change, so it adds no
 hot-path read. Has no effect in DMs.
@@ -144,6 +144,14 @@ hot-path read. Has no effect in DMs.
 > See [group_chat.md](group_chat.md) for how affinity is updated (mentions/engagement, "stop/
 > quiet" keywords, and the `affinity_delta` that piggybacks on the reply call) and how `mode` is
 > set via `/quiet` and `/chatty`.
+
+The collection is read and written through `models.get_chat_member(db, chat_id, user_id)` and
+`models.upsert_chat_member(db, chat_id, user_id, *, affinity=None, mode=None)`. `upsert_chat_member`
+clamps `affinity` to `[0.0, 1.0]`, coerces an invalid `mode` to `"auto"` (rather than raising), and
+applies defaults (`AFFINITY_DEFAULT`, `"auto"`, `created_at`) only on insert via `$setOnInsert`.
+The in-memory read-through / write-through `AffinityCache`
+([`affinity.py`](../../app/services/affinity.py)) sits in front of these so warm members never hit
+the DB on the hot path.
 
 ---
 
@@ -213,16 +221,34 @@ so the atomic trim below is exact:
 
 ```python
 async def add_message_to_buffer(
-    db: AsyncIOMotorDatabase, chat_id: int, role: str, content: str
+    db: AsyncIOMotorDatabase,
+    chat_id: int,
+    role: str,
+    content: str,
+    *,
+    sender_id: int | None = None,
+    sender_name: str = "",
 ) -> list[dict]:
-    """Append a message and return the resulting messages array (char count + history in one RT)."""
+    """Append a message and return the resulting messages array (char count + history in one RT).
+
+    Keyed by chat_id; each pushed message also carries sender_id/sender_name for multi-party
+    group context. sender_id defaults to chat_id when omitted, preserving DM semantics.
+    """
+    if sender_id is None:
+        sender_id = chat_id            # DM: the lone speaker's id equals the chat id
     now = _monotonic_utcnow()  # strictly increasing at ms resolution within the process
     doc = await db["chat_buffers"].find_one_and_update(
         {"_id": chat_id},
         {
             "$push": {
                 "messages": {
-                    "$each": [{"role": role, "content": content, "created_at": now}],
+                    "$each": [{
+                        "role": role,
+                        "sender_id": sender_id,
+                        "sender_name": sender_name,
+                        "content": content,
+                        "created_at": now,
+                    }],
                     "$slice": -config.CHAT_BUFFER_HARD_CAP,   # safety net against unbounded growth
                 }
             },

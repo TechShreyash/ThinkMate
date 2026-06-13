@@ -327,6 +327,96 @@ class AmbientGate:
         self._last_seen: dict[int, float] = {}
         self._last_prune: float = 0.0
 
+    def decide(
+        self,
+        chat_id: int,
+        *,
+        affinity: float,
+        mode: str,
+        triggered: bool,
+        now: float,
+        rng=None,
+    ) -> tuple[bool, str]:
+        """Run the ambient funnel and return ``(should_chime, stage)``.
+
+        ``stage`` names the funnel step that produced the outcome, so the caller
+        can emit per-stage drop logging (Requirement 7.2) without re-deriving the
+        decision. It is one of:
+
+        - ``"cooldown"`` — dropped because the per-chat cooldown has not elapsed;
+        - ``"no_trigger"`` — dropped because neither a cheap trigger nor the
+          periodic context-scan tick matched;
+        - ``"dice"`` — dropped at the affinity-weighted dice roll (this also
+          covers ``quiet`` mode, whose probability is hard-zeroed);
+        - ``"pass"`` — survived all three checks and is eligible for a single
+          chime-in LLM call.
+
+        The funnel, in order (each step is no-LLM):
+
+        1. **Cooldown.** If the chat has chimed before and ``now`` is still
+           within ``GROUP_AMBIENT_COOLDOWN_SECS`` of the last chime, stop at
+           ``"cooldown"``. A chat with no recorded chime (first ever message) is
+           treated as cooldown-elapsed.
+        2. **Trigger / scan tick.** Advance the per-chat message counter and
+           compute ``scan_tick = counter % GROUP_CONTEXT_SCAN_EVERY == 0``. The
+           candidate passes this step if the caller-supplied ``triggered`` (a
+           cheap-trigger hit) is True OR ``scan_tick`` is True; otherwise stop at
+           ``"no_trigger"``.
+        3. **Affinity-weighted dice roll.** Compute
+           ``p = GROUP_AMBIENT_BASE_RATE * affinity * mode_factor`` (mode_factor:
+           ``quiet`` → 0, ``auto`` → 1, ``chatty`` → 1.5), clamped to [0, 1]. If
+           ``p <= 0`` (covers ``quiet``), stop at ``"dice"``. Otherwise draw a
+           single ``r`` from ``rng.random()`` (defaulting to the module's
+           :func:`random.random`); return ``(True, "pass")`` when ``r < p`` and
+           ``(False, "dice")`` otherwise.
+
+        This method never resets the cooldown — see the class docstring and call
+        :meth:`mark_chimed` after dispatch.
+
+        The decision logic and ordering are identical to the historical
+        :meth:`should_chime`; ``decide`` only additionally surfaces the stage.
+
+        Args:
+            chat_id: The group chat id.
+            affinity: The speaker's affinity in [0, 1].
+            mode: The speaker's mode (``auto`` / ``quiet`` / ``chatty``).
+            triggered: Whether a cheap trigger already matched (from the caller).
+            now: The current time (seconds); injectable for deterministic tests.
+            rng: Optional object exposing ``.random() -> float`` in [0, 1);
+                defaults to the module's :func:`random.random`.
+
+        Returns:
+            A ``(should_chime, stage)`` tuple.
+        """
+        # Record activity for prune() bookkeeping (even when we ultimately stop).
+        self._last_seen[chat_id] = now
+
+        # 1. Cooldown — cheapest check, runs first. Absence = never chimed = elapsed.
+        last = self._last_chime_time.get(chat_id)
+        if last is not None and (now - last) < config.GROUP_AMBIENT_COOLDOWN_SECS:
+            return False, "cooldown"
+
+        # 2. Trigger / periodic context-scan tick.
+        counter = self._msg_counter.get(chat_id, 0) + 1
+        self._msg_counter[chat_id] = counter
+        scan_every = config.GROUP_CONTEXT_SCAN_EVERY
+        scan_tick = scan_every > 0 and (counter % scan_every == 0)
+        if not (triggered or scan_tick):
+            return False, "no_trigger"
+
+        # 3. Affinity-weighted dice roll.
+        mode_factor = _MODE_FACTORS.get(mode, 1.0)
+        p = config.GROUP_AMBIENT_BASE_RATE * affinity * mode_factor
+        # Clamp to [0, 1].
+        p = max(0.0, min(1.0, p))
+        if p <= 0.0:
+            return False, "dice"
+
+        draw = rng.random() if rng is not None else random.random()
+        if draw < p:
+            return True, "pass"
+        return False, "dice"
+
     def should_chime(
         self,
         chat_id: int,
@@ -339,65 +429,19 @@ class AmbientGate:
     ) -> bool:
         """Return True iff this non-addressed message should trigger a chime-in.
 
-        The funnel, in order (each step is no-LLM):
-
-        1. **Cooldown.** If the chat has chimed before and ``now`` is still
-           within ``GROUP_AMBIENT_COOLDOWN_SECS`` of the last chime, return
-           ``False``. A chat with no recorded chime (first ever message) is
-           treated as cooldown-elapsed.
-        2. **Trigger / scan tick.** Advance the per-chat message counter and
-           compute ``scan_tick = counter % GROUP_CONTEXT_SCAN_EVERY == 0``. The
-           candidate passes this step if the caller-supplied ``triggered`` (a
-           cheap-trigger hit) is True OR ``scan_tick`` is True; otherwise return
-           ``False``.
-        3. **Affinity-weighted dice roll.** Compute
-           ``p = GROUP_AMBIENT_BASE_RATE * affinity * mode_factor`` (mode_factor:
-           ``quiet`` → 0, ``auto`` → 1, ``chatty`` → 1.5), clamped to [0, 1]. If
-           ``p <= 0`` (covers ``quiet``), return ``False``. Otherwise draw a
-           single ``r`` from ``rng.random()`` (defaulting to the module's
-           :func:`random.random`) and return ``r < p``.
-
-        This method never resets the cooldown — see the class docstring and call
-        :meth:`mark_chimed` after dispatch.
-
-        Args:
-            chat_id: The group chat id.
-            affinity: The speaker's affinity in [0, 1].
-            mode: The speaker's mode (``auto`` / ``quiet`` / ``chatty``).
-            triggered: Whether a cheap trigger already matched (from the caller).
-            now: The current time (seconds); injectable for deterministic tests.
-            rng: Optional object exposing ``.random() -> float`` in [0, 1);
-                defaults to the module's :func:`random.random`.
-
-        Returns:
-            True if a chime-in should be attempted, otherwise False.
+        Thin wrapper around :meth:`decide` that discards the stage, preserved so
+        existing callers and tests that only need the boolean keep working. See
+        :meth:`decide` for the full funnel semantics.
         """
-        # Record activity for prune() bookkeeping (even when we ultimately stop).
-        self._last_seen[chat_id] = now
-
-        # 1. Cooldown — cheapest check, runs first. Absence = never chimed = elapsed.
-        last = self._last_chime_time.get(chat_id)
-        if last is not None and (now - last) < config.GROUP_AMBIENT_COOLDOWN_SECS:
-            return False
-
-        # 2. Trigger / periodic context-scan tick.
-        counter = self._msg_counter.get(chat_id, 0) + 1
-        self._msg_counter[chat_id] = counter
-        scan_every = config.GROUP_CONTEXT_SCAN_EVERY
-        scan_tick = scan_every > 0 and (counter % scan_every == 0)
-        if not (triggered or scan_tick):
-            return False
-
-        # 3. Affinity-weighted dice roll.
-        mode_factor = _MODE_FACTORS.get(mode, 1.0)
-        p = config.GROUP_AMBIENT_BASE_RATE * affinity * mode_factor
-        # Clamp to [0, 1].
-        p = max(0.0, min(1.0, p))
-        if p <= 0.0:
-            return False
-
-        draw = rng.random() if rng is not None else random.random()
-        return draw < p
+        chime, _stage = self.decide(
+            chat_id,
+            affinity=affinity,
+            mode=mode,
+            triggered=triggered,
+            now=now,
+            rng=rng,
+        )
+        return chime
 
     def mark_chimed(self, chat_id: int, now: float) -> None:
         """Record that an ambient chime-in was dispatched for ``chat_id`` at ``now``.

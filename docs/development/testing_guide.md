@@ -20,12 +20,20 @@ tests/
 ├── test_batching_and_concurrency.py  # Tests messaging queues, batching, throttling, and concurrency locks
 ├── test_reactions.py                 # Combined reply+reaction call & emoji normalization
 ├── test_hardening.py                 # Atomic trim race, dedup, cooldown, reset, budget enforcement, eviction, extraction retry/bounded-trim
+├── test_group_models.py              # chat_id buffers with sender attribution & chat_members CRUD (Phase 9)
+├── test_group_plumbing.py            # DM-unchanged + group multi-party handle_message / chat_id batching (Phase 9)
+├── test_group_routing.py             # is_addressed + chat-type routing + ambient handoff (Phase 9)
+├── test_ambient_gate.py              # AmbientGate funnel: cooldown, triggers, dice, prune, mark_chimed (Phase 9)
+├── test_affinity_and_commands.py     # AffinityCache read/write-through + /quiet /chatty (Phase 9)
+├── test_group_extraction.py          # Multi-party per-user extraction & attribution (Phase 9)
+├── test_group_config_observability.py # Ambient config knobs honored + per-stage drop observability (Phase 9)
 └── run_llm_live.py                   # Manual live check against the configured LLM (not part of the suite)
 ```
 
-> **Phase 9 (group chat)** adds `tests/test_group_chat.py`: chat-type routing, the ambient-gate
-> funnel (cooldown → keyword scan → affinity probability), affinity updates, and multi-party
-> per-user extraction. See [group_chat.md](group_chat.md).
+> **Phase 9 (group chat) is implemented and tested.** The seven `test_group_*` /
+> `test_ambient_gate` / `test_affinity_and_commands` files below cover chat-type routing, the
+> ambient-gate funnel, affinity, the group commands, and multi-party extraction. The full suite
+> is **125 passing**. See [group_chat.md](group_chat.md).
 
 ---
 
@@ -86,6 +94,39 @@ Locks in the Phase 7–8 fixes so they can't regress:
 Validates that `generate_reply_bundle` parses the `{reply, reaction}` JSON, degrades to plain
 text on bad JSON, and that `normalize_reaction` maps free-form emojis onto Telegram's accepted
 set (tolerant of variation selectors).
+
+---
+
+### 7. Group Chat Suite *(Phase 9)*
+Seven files lock in group behavior while proving the DM path is untouched:
+
+*   **`tests/test_group_models.py`** — each buffered message persists `sender_id`/`sender_name`;
+    `sender_id` defaults to `chat_id` when omitted; a DM-style call keeps `_id == chat_id`; the
+    `$slice` hard cap bounds the array; and `chat_members` upsert applies defaults, clamps affinity
+    to `[0, 1]`, coerces an invalid mode to `auto`, round-trips valid values, and `get_chat_member`
+    returns `None` when absent.
+*   **`tests/test_group_plumbing.py`** — `handle_message` in a DM is unchanged and renders a
+    single-party history; the group path renders multi-party `"Name: content"` history; and
+    `enqueue_message` batches by `chat_id` (not by sender).
+*   **`tests/test_group_routing.py`** — `is_addressed` for mention / name-token / reply-to-bot
+    (and the word-boundary non-match); addressed messages enqueue a reply with no extra buffer
+    write and no chime; non-addressed messages are buffered once and handed to the gate; channel
+    posts are ignored entirely; and bot commands in groups return early.
+*   **`tests/test_ambient_gate.py`** — the `AmbientGate` funnel: cooldown blocks a second chime in
+    the window, no-trigger/not-scan-tick drops, a scan tick passes without a keyword, the dice roll
+    respects `p = base × affinity × mode_factor`, `quiet` mode forces no chime, at most one chime
+    over a burst, `prune` drops stale state, and `mark_chimed` holds the window even on an empty reply.
+*   **`tests/test_affinity_and_commands.py`** — `AffinityCache` read-through defaults on miss
+    (creating the record), serves a warm read from cache without a DB hit, `bump` clamps and writes
+    through, `set_mode` writes through, and `prune` evicts idle entries; plus the `/quiet` `/chatty`
+    command behavior (group set vs. DM no-op).
+*   **`tests/test_group_extraction.py`** — a two-speaker segment attributes each fact to the correct
+    user profile in one extraction call; an update tagged to a non-participant is skipped (no crash,
+    no profile); and the processed segment is trimmed afterward.
+*   **`tests/test_group_config_observability.py`** — the `GROUP_AMBIENT_COOLDOWN_SECS`,
+    `GROUP_AMBIENT_BASE_RATE`, and `GROUP_CONTEXT_SCAN_EVERY` knobs each change the outcome as
+    expected, `decide` reports the correct drop `stage` for every funnel outcome, and the router
+    emits the per-stage drop log.
 
 ---
 

@@ -96,7 +96,9 @@ Handlers receive the MongoDB database (`AsyncIOMotorDatabase`) directly.
 ### 1. Commands (`app/handlers/commands.py`)
 
 `/start`, `/help`, `/profile`, and `/reset` are implemented. `/reset` requires explicit
-confirmation (`/reset confirm`) before wiping a user's stored state.
+confirmation (`/reset confirm`) before wiping a user's stored state. Two group-only commands —
+`/quiet` and `/chatty` — set the speaker's ambient `mode` via `affinity_cache.set_mode`; in a DM
+they reply with a graceful no-op explanation (see [Group Chat Routing](#-group-chat-routing-phase-9-implemented)).
 
 ```python
 from aiogram import Router, html
@@ -175,21 +177,43 @@ await last_message.answer(reply_text)
 
 ---
 
-## 👥 Group Chat Routing *(Phase 9)*
+## 👥 Group Chat Routing *(Phase 9, implemented)*
 
-In groups/supergroups the message router does **chat-type + identity routing** before enqueuing:
+In groups/supergroups the message router (`app/handlers/messages.py`) does **chat-type +
+identity routing** before enqueuing. `handle_user_message` branches on `message.chat.type`:
 
-- **Addressed** (bot @mentioned, bot's name used, or a reply to the bot's message) → always
-  reply, exactly like a DM.
-- **Not addressed** → run the **ambient gate** (per-chat cooldown → cheap keyword scan →
-  affinity-weighted probability) and only enqueue a chime-in for the few messages that survive.
-  Every group message is still buffered cheaply for context and learning.
-- **Channels** → ignored.
+- **`private`** → the exact DM path that existed before group support (length-guard, then a
+  positional `enqueue_message`), so DM behavior is byte-for-byte unchanged.
+- **`channel`** → ignored entirely (no buffer write, no reply).
+- **`group` / `supergroup`** → `_handle_group_message`, the multi-party path below.
+
+**Addressed detection.** The bot's identity (`id`, `username`, `name`) is resolved once via
+`bot.get_me()` and cached process-wide (`_get_bot_identity`) to avoid an API round-trip per
+message; a failed lookup degrades to "not addressed" rather than raising. `is_addressed`
+(in [`group_gate.py`](../../app/services/group_gate.py)) returns True when the message
+@mentions the bot's username, uses the bot's name as a standalone token, or replies to one of
+the bot's own messages.
+
+- **Addressed** → bump the speaker's affinity (`+0.05`) and `enqueue_message(..., reason="reply")`
+  — always reply, exactly like a DM.
+- **Not addressed** → record the message to the buffer (with `sender_id`/`sender_name`), then run
+  the **ambient gate** (`_maybe_ambient_chime`): read the speaker's affinity/mode, run the cheap
+  `scan_cheap_triggers`, and call `ambient_gate.decide(...)`. Only candidates that survive the
+  cooldown → trigger/scan-tick → affinity-weighted dice roll are enqueued as a chime-in
+  (`reason="ambient"`); `mark_chimed` is called before enqueue so a failed/empty reply still
+  holds the cooldown window.
+
+**Single-write invariant.** Each group message is buffered exactly once: addressed messages are
+written by the `enqueue_message → handle_message` path (like DMs), and non-addressed messages are
+written by the handler itself before the ambient gate (since they never reach `handle_message`).
+
+**Empty-ambient suppression.** An ambient chime-in may decline (empty reply); `UserTaskManager._process_batch`
+sends nothing in that case (skips both the reaction and the answer).
 
 Two extra commands manage chattiness per group: `/quiet` (mode → quiet, suppress ambient) and
-`/chatty` (mode → chatty, boost). Affinity and mode live in `chat_members` (see
-[database.md](database.md)). DMs are unchanged (`chat_id == user_id`). Full design and the
-no-LLM ambient funnel are in [group_chat.md](group_chat.md).
+`/chatty` (mode → chatty, boost), both set via `affinity_cache.set_mode`. Affinity and mode live
+in `chat_members` (see [database.md](database.md)). DMs are unchanged (`chat_id == user_id`). Full
+design and the no-LLM ambient funnel are in [group_chat.md](group_chat.md).
 
 ---
 

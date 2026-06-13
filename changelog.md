@@ -2,6 +2,19 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 9 Group Chat: Implemented (ambient gate, affinity, multi-party memory)
+
+### Added
+- **Group chat support** (Phase 9 complete). In groups/supergroups ThinkMate always replies when addressed (mention, bot-name token, or reply-to-bot) and otherwise runs a **no-LLM ambient gate** (`app/services/group_gate.py`: `AmbientGate` — per-chat cooldown → cheap trigger/scan-tick → affinity-weighted dice roll, `decide()` exposes the drop stage for observability), so it chimes in selectively at ≤ ~1 ambient LLM call per active group per cooldown window.
+- **Per-(chat, user) affinity** in a new `chat_members` collection (`_id="{chat_id}:{user_id}"`, affinity 0–1, mode auto/quiet/chatty), fronted by an in-memory read-through/write-through `AffinityCache` (`app/services/affinity.py`). Signals: mention/reply-to-bot up, "back off" keywords down, an optional `affinity_delta` folded from the reply call, and explicit `/quiet` `/chatty` commands.
+- **Multi-party memory extraction** (`extract_and_trim_group`): one LLM call over the group segment, attributed back to each participant via the segment's name→id map (first-id-wins on duplicate names; unresolved names skipped), saved per `user_id`. DM extraction unchanged.
+- **Group schemas/LLM**: `ReplyBundle.affinity_delta`, `GroupMemoryUpdate`/`GroupMemoryExtraction`; `generate_reply_bundle(..., with_affinity=True)` and `extract_group_memory`.
+- **Tests** (50 new, full suite 125 passing): `test_group_models`, `test_group_plumbing`, `test_group_routing`, `test_ambient_gate`, `test_affinity_and_commands`, `test_group_extraction`, `test_group_config_observability`.
+
+### Changed
+- **Buffer keyed by `chat_id`** with `sender_id`/`sender_name` per message (DM `chat_id == user_id`, on-disk shape compatible). `handle_message`/`enqueue_message` gained keyword-only chat context with DM-safe defaults; `messages.py` now branches private/channel/group with addressed detection and a single-write buffer invariant. **DM behavior is byte-for-byte unchanged** and all pre-existing tests pass unmodified.
+- **Docs** synced to "implemented": `group_chat.md`, `database.md`, `telegram_bot.md`, `memory_engine.md`, `llm_integration.md`, `architecture.md`, `testing_guide.md`, `README.md`, and `project_plan.md` (Phase 9 checked).
+
 ## [2026-06-14] - Phase 9 Group Chat: Spec (Requirements + Design + Tasks)
 
 ### Added

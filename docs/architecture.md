@@ -179,13 +179,20 @@ rules that keep one instance healthy at scale — live in
 
 ---
 
-## 👥 Group Chat (Phase 9)
+## 👥 Group Chat (Phase 9, implemented)
 
 In groups, the buffer is keyed by `chat_id` (a DM is just `chat_id == user_id`) and each
-message carries `sender_id`/`sender_name` for multi-party context. The bot **always** replies
-when addressed (mention, name, or reply-to-bot) and otherwise runs a **no-LLM ambient gate**
-(per-chat cooldown → cheap keyword scan → affinity-weighted dice roll) so it chimes in
-selectively without spamming or abusing the API — at most ~1 ambient LLM call per active group
-per cooldown window. Memory stays per `user_id`; group extraction is multi-party in a single
-call, attributed back to each participant. Per-(chat, user) affinity/mode lives in
-`chat_members`. Full design: [group_chat.md](development/group_chat.md).
+message carries `sender_id`/`sender_name` for multi-party context. The router
+(`handlers/messages.py`) branches on chat type: private → the unchanged DM path, channel →
+ignored, group/supergroup → the multi-party path. There it resolves the bot's identity (cached
+`get_me()`) and uses `is_addressed` to decide engagement. The bot **always** replies when
+addressed (mention, name, or reply-to-bot) and otherwise runs a **no-LLM ambient gate**
+(`AmbientGate` in `services/group_gate.py`: per-chat cooldown → cheap keyword/scan-tick →
+affinity-weighted dice roll) so it chimes in selectively without spamming or abusing the API —
+at most ~1 ambient LLM call per active group per cooldown window. Per-(chat, user) affinity/mode
+lives in `chat_members`, fronted by an in-memory read-through/write-through `AffinityCache`
+(`services/affinity.py`); affinity moves on mentions, "back off" keywords, an optional
+`affinity_delta` folded from the reply call, and the explicit `/quiet` `/chatty` commands. Memory
+stays per `user_id`; group extraction (`extract_and_trim_group`) is multi-party in a single LLM
+call, attributed back to each participant via the segment's own name→id map. The DM path is
+byte-for-byte unchanged. Full design: [group_chat.md](development/group_chat.md).

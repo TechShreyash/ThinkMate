@@ -14,6 +14,8 @@ Routing overview (Phase 9, group chat):
 Typing indicators are driven by ``UserTaskManager`` (which spans the batching delay and
 generation), so no aiogram typing middleware is involved here.
 """
+import time
+
 from aiogram import Router, F
 from aiogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -21,7 +23,7 @@ from loguru import logger
 from app.config import config
 from app.database import models
 from app.services.user_task_manager import user_task_manager
-from app.services.group_gate import is_addressed
+from app.services.group_gate import is_addressed, scan_cheap_triggers, ambient_gate
 from app.services.affinity import affinity_cache
 
 router = Router(name="messages")
@@ -78,15 +80,62 @@ async def _maybe_ambient_chime(
     user_text: str,
     sender_name: str,
 ) -> None:
-    """Hand-off point for non-addressed group messages → the ambient gate.
+    """Run the ambient gate on a non-addressed group message → maybe chime in.
 
-    The message has already been recorded to the buffer by the caller. The ambient-gate
-    wiring (cooldown → cheap trigger scan → affinity-weighted dice roll → at most one
-    chime-in enqueue) is completed in task 4.2; for now this is a thin stub that returns
-    without any LLM call so non-addressed messages are simply observed.
+    The message has already been recorded to the buffer by the caller. The funnel is a
+    no-LLM sequence — fetch the speaker's affinity/mode, run the cheap trigger scan, then
+    let :class:`AmbientGate` apply the cooldown → trigger/scan-tick → affinity-weighted
+    dice roll. Only a candidate that survives all three steps reaches the LLM via an
+    ``enqueue_message(reason="ambient")`` chime-in.
+
+    Defensiveness: the affinity read and the gate decision are wrapped so any failure on
+    this hot path degrades to "no chime" (Requirement 7.4 / error-handling contract)
+    rather than raising. When we do decide to chime in, ``mark_chimed`` is called *before*
+    enqueueing so the per-chat cooldown holds for the full window even if the eventual
+    model reply is empty or fails (Requirement 3.7).
     """
-    # ambient gate wiring completed in task 4.2
-    return
+    try:
+        # Speaker affinity/mode (group, so consulting chat_members is correct — Req 4.8
+        # only forbids it in DMs). The cache serves warm members from memory.
+        member = await affinity_cache.get(db, message.chat.id, message.from_user.id)
+
+        # Cheap, no-LLM trigger scan (birthdays, congrats, questions, greetings, ...).
+        triggered = scan_cheap_triggers(user_text)
+
+        now = time.time()
+        should, stage = ambient_gate.decide(
+            message.chat.id,
+            affinity=member["affinity"],
+            mode=member["mode"],
+            triggered=triggered,
+            now=now,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Any failure in the affinity read or gate decision degrades to "no chime".
+        logger.debug(f"ambient gate evaluation failed; dropping (no chime): {e}")
+        return
+
+    if not should:
+        # Per-stage drop logging (Req 7.2): surface WHICH funnel stage dropped the
+        # candidate (cooldown / no_trigger / dice) so the funnel is observable.
+        logger.debug(f"ambient drop stage={stage} chat={message.chat.id}")
+        return
+
+    # Passed the funnel — log the chime decision before dispatching (Req 7.2).
+    logger.debug(f"ambient chime stage={stage} chat={message.chat.id}")
+
+    # Reset the cooldown NOW so a failed/empty reply still holds the window (Req 3.7).
+    ambient_gate.mark_chimed(message.chat.id, now)
+    await user_task_manager.enqueue_message(
+        message.bot,
+        message.chat.id,
+        user_text,
+        message,
+        user_id=message.from_user.id,
+        chat_type=message.chat.type,
+        sender_name=sender_name,
+        reason="ambient",
+    )
 
 
 @router.message(F.text)
@@ -179,7 +228,14 @@ async def _handle_group_message(
         # Affinity-up: a mention / reply-to-bot is a routing-level engagement signal
         # (Requirement 4.4). The bump is small and clamped to [0, 1] by the cache.
         try:
-            await affinity_cache.bump(db, message.chat.id, message.from_user.id, 0.05)
+            new_affinity = await affinity_cache.bump(
+                db, message.chat.id, message.from_user.id, 0.05
+            )
+            # Signal-type-tagged debug log for traceability (Requirement 7.5).
+            logger.debug(
+                f"affinity signal=mention_up chat={message.chat.id} "
+                f"sender={message.from_user.id} delta=+0.050 -> {new_affinity:.3f}"
+            )
         except Exception as e:  # noqa: BLE001
             logger.debug(f"affinity bump on addressed message failed: {e}")
 
