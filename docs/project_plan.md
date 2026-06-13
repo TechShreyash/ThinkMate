@@ -30,10 +30,9 @@ Phase 8  Tests .................. mongomock suite; hot-path, race, retry, guard 
 Phase 9  Group chat ............. chat_id buffers, ambient gate, affinity, multi-party memory
 Phase 10 Observability & ops .... metrics, health checks, runbook
 Phase 11 Future: consolidation .. periodic "dreaming" pass
-Phase 12 Future: horizontal scale state interface, Redis, webhooks (see perf doc)
 ```
 
-Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phases 10–12 are operational
+Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phases 10–11 are operational
 and forward-looking. The exact efficiency invariants every phase must respect live in
 [performance_and_scaling.md](development/performance_and_scaling.md).
 
@@ -277,8 +276,8 @@ ambient-gate logic in `user_task_manager.py`/a new `group_gate.py`, `/quiet` `/c
 registry (`app/services/metrics.py`), additive hot-path instrumentation, liveness/readiness
 helpers (`app/services/health.py`), an admin `/health` (and `/metrics`) command gated by
 `ADMIN_USER_IDS` (DM-only default), and an optional periodic logger (`METRICS_LOG_INTERVAL_SECS`).
-Full metric catalog and runbook in [observability.md](development/observability.md). The
-Prometheus/OTel sink remains the future Phase 12 step.
+Full metric catalog and runbook in [observability.md](development/observability.md). An external
+Prometheus/OTel sink can be added later if a metrics backend is introduced.
 
 ---
 
@@ -287,16 +286,6 @@ Prometheus/OTel sink remains the future Phase 12 step.
 A scheduled background pass (daily/weekly) that reviews facts/beliefs/events across longer
 windows to synthesize behavioral trends and durable profile insights — beyond what localized
 per-overflow extraction can see. Runs under `memory_lock`, rate-limited, fully off the hot path.
-
----
-
-## Phase 12 — Future: horizontal scale
-
-Only when the LLM endpoint is *not* the bottleneck and a single event loop/DB is proven
-saturated. Mechanical, not a rewrite — externalize state behind a `StateStore` interface
-(in-memory → Redis), distributed locks, webhooks behind a load balancer, shard MongoDB on
-`user_id`. The data model, prompts, memory algorithms, and service APIs are unchanged. Full
-steps in [performance_and_scaling.md](development/performance_and_scaling.md#horizontal-scale-migration-path-future).
 
 ---
 
@@ -314,9 +303,9 @@ steps in [performance_and_scaling.md](development/performance_and_scaling.md#hor
 - [x] Phase 9 Group chat
 - [x] Phase 10 Observability & ops
 - [ ] Phase 11 Future: consolidation
-- [ ] Phase 12 Future: horizontal scale
 
 > Note: the current repository already implements Phases 0–10 (DM bot, hardened, group chat,
 > plus the observability/ops layer — in-process metrics, `/health` & `/metrics` commands, and
-> the runbook). Phases 11–12 are forward-looking. This plan is written so the project could
-> also be rebuilt cleanly from scratch in this exact order.
+> the runbook). Phase 11 (periodic consolidation) is the one remaining forward-looking item.
+> This plan is written so the project could also be rebuilt cleanly from scratch in this exact
+> order.

@@ -187,7 +187,7 @@ hot path — no added DB or LLM round-trip. Liveness/readiness helpers (`app/ser
 back an admin `/health` (and optional `/metrics`) command that reports uptime, a Mongo ping, and
 a metrics summary, and an optional periodic logger emits that summary every
 `METRICS_LOG_INTERVAL_SECS`. This is intentionally **not** a Prometheus/OTel server — that
-remains the future Phase 12 sink. See [observability.md](development/observability.md) for the
+remains an optional future sink. See [observability.md](development/observability.md) for the
 full metric catalog and runbook.
 
 ---

@@ -43,9 +43,8 @@ quickly: **"are we near the ceiling?"**
 - It is **not** a Prometheus/OpenTelemetry server. There is no scrape endpoint, no external
   time-series database, no exporter. The metrics live in memory in this one process and reset
   when it restarts.
-- The external metrics sink (Prometheus/OTel) is a **future** step — it is Step 5 of the
-  [horizontal-scale migration path](performance_and_scaling.md#horizontal-scale-migration-path-future)
-  (Phase 12), not part of this layer.
+- The external metrics sink (Prometheus/OTel) is an **optional future** addition — only if a
+  metrics backend is ever introduced — and is not part of this layer.
 
 Because everything is in-memory and single-instance, treat the numbers as a **live operational
 snapshot** for the running process, not a historical record. For history, use the periodic
@@ -145,8 +144,8 @@ singleton, `metrics`, is the only thing callers touch.
   atomically; the lock is uncontended on a single event loop.
 - **Bounded.** Callers only ever use the fixed metric set above, so registry memory cannot grow
   without limit. Unknown names auto-create empty rather than raising, but no caller uses them.
-- **Not a server.** Again: this registry is in-memory and resets on process restart. The external
-  Prometheus/OTel sink is the future Phase 12 step, not this.
+- **Not a server.** Again: this registry is in-memory and resets on process restart. An external
+  Prometheus/OTel sink is an optional future addition, not this.
 
 [Back to top](#table-of-contents)
 

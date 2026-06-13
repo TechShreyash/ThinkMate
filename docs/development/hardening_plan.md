@@ -98,7 +98,7 @@ Before → after this effort:
 - [ ] H3. **Single-pass budget enforcement.** Replace the per-item read/write loop in `_enforce_budget` with a single read + in-memory drop of lowest-priority items + single write. *(Designed; see [performance_and_scaling.md](performance_and_scaling.md). Apply in code.)*
 - [ ] H4. **pyproject hygiene.** Real metadata, runtime deps mirror `requirements.txt`, `requires-python` matches docs, `[tool.pytest.ini_options]` with `pythonpath`/`asyncio_mode`. *(Done in `pyproject.toml`.)*
 
-### Phase 12 — Horizontal scale (future, out of scope here)
+### Horizontal scale (future, out of scope here)
 The single-instance design is deliberate and handles 50k+ users; the ceiling is LLM throughput.
 The exact, mechanical scale-out path (state behind a `StateStore` interface → Redis, distributed
 locks, webhooks behind a load balancer, MongoDB sharding on `user_id`) is documented in
