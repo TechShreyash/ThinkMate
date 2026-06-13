@@ -96,12 +96,13 @@ async def handle_message(
     else:
         active_history = [{"role": m["role"], "content": m["content"]} for m in messages]
 
-    # 2. Buffer overflow -> non-blocking background extraction. Keyed by chat_id; group
-    #    extraction routing is handled in task 6.1, which will branch on chat_type.
+    # 2. Buffer overflow -> non-blocking background extraction. Keyed by chat_id; the
+    #    known group flag is passed through to the extractor so extraction dispatch is
+    #    authoritative rather than relying on a sender-count heuristic.
     if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
         from app.services.user_task_manager import user_task_manager
         logger.info(f"Buffer overflow for chat {chat_id} ({buffer_chars} chars); launching extraction.")
-        asyncio.create_task(user_task_manager.run_extractor(chat_id))
+        asyncio.create_task(user_task_manager.run_extractor(chat_id, is_group=is_group))
 
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()

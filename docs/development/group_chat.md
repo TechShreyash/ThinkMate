@@ -129,4 +129,4 @@ the handler.
 - [x] L5. Multi-party per-user memory extraction in groups — `extract_and_trim_group`
   ([`memory_extractor.py`](../../app/services/memory_extractor.py)).
 - [x] L6. Tests for routing, gate funnel, affinity, multi-party extraction — see
-  [testing_guide.md](testing_guide.md). Full suite: **125 passing**.
+  [testing_guide.md](testing_guide.md). Full suite: **158 passing**.

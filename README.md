@@ -56,7 +56,7 @@ ThinkMate/
 │   │
 │   ├── handlers/                   # Telegram event handlers (aiogram)
 │   │   ├── __init__.py
-│   │   ├── commands.py             # Slash commands (/start, /help, /profile, /reset, /quiet, /chatty)
+│   │   ├── commands.py             # Slash commands (/start, /help, /profile, /reset, /quiet, /chatty, /health, /metrics)
 │   │   └── messages.py             # Default message router, chat-type routing & ambient gate handoff
 │   │
 │   ├── services/                   # Core business logic
@@ -70,6 +70,8 @@ ThinkMate/
 │   │   ├── memory_extractor.py     # Memory extraction LLM interface (DM + multi-party group)
 │   │   ├── memory_loader.py        # System prompt memory compiler
 │   │   ├── memory_compressor.py    # LLM-powered memory compressor + budget enforcement
+│   │   ├── metrics.py              # In-process metrics registry (counters, gauges, timers)
+│   │   ├── health.py               # Liveness/readiness helpers + periodic metrics logger
 │   │   └── user_task_manager.py    # Concurrency, batching, queues & typing indicators
 │   │
 │   ├── database/                   # Database interaction layers

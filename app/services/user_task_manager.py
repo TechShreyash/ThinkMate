@@ -17,6 +17,8 @@ from app.config import config
 from app.database.connection import db_session
 from app.services.chat_manager import handle_message
 from app.services.metrics import metrics
+from app.services.group_gate import ambient_gate
+from app.services.affinity import affinity_cache
 
 # Telegram chat.type values that map to the multi-party group path.
 _GROUP_CHAT_TYPES = ("group", "supergroup")
@@ -94,6 +96,19 @@ class UserTaskManager:
             metrics.set_gauge("conversations.active", len(self._states))
         if stale:
             logger.debug(f"Evicted {len(stale)} idle conversation states (now {len(self._states)} active).")
+
+        # Prune the ambient gate and affinity cache so their per-chat/-member maps
+        # stay bounded at runtime (they have their own internal state, so this is
+        # safe outside the states lock). A prune failure must never break the sweep.
+        try:
+            gate_pruned = ambient_gate.prune(now)
+            affinity_pruned = affinity_cache.prune(now, max_idle=config.USER_STATE_TTL_SECS * 4)
+            if gate_pruned or affinity_pruned:
+                logger.debug(
+                    f"Pruned {gate_pruned} ambient-gate and {affinity_pruned} affinity-cache entries."
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Ambient/affinity prune error: {e}")
 
     async def enqueue_message(
         self,
@@ -203,46 +218,65 @@ class UserTaskManager:
             state.last_active = time.time()
 
             logger.info(f"Processing batch of {len(batch)} messages for chat {chat_id}")
-            combined_text = "\n".join(m["text"] for m in batch)
 
-            # Use the last message's metadata for the chat-context that handle_message needs.
-            last = batch[-1]
-            last_message = last["message"]
-            last_user_id = last["user_id"]
-            last_sender_name = last["sender_name"]
-            last_reason = last["reason"]
-            chat_type = self._resolve_chat_type(last_message)
+            # chat_type is a property of the conversation, so derive it once from the
+            # batch's last message (same chat for the whole batch).
+            chat_type = self._resolve_chat_type(batch[-1]["message"])
+
+            # Group the batch by sender, preserving the order each user_id first
+            # appears. In a GROUP, messages from different senders coalesced in one
+            # window must not be mis-attributed to the last speaker; per-sender
+            # grouping keeps sender_id/sender_name/affinity signals correct. For the
+            # common single-sender batch (all DMs, most group bursts) this yields
+            # exactly one group and is behaviorally identical to before.
+            grouped: dict[int, list[dict]] = {}
+            for m in batch:
+                grouped.setdefault(m["user_id"], []).append(m)
 
             try:
                 async with db_session() as db:
-                    reply_text, reaction = await handle_message(
-                        db,
-                        chat_id,
-                        combined_text,
-                        chat_type=chat_type,
-                        sender_id=last_user_id,
-                        sender_name=last_sender_name,
-                        reason=last_reason,
-                    )
+                    for sender_id, group in grouped.items():
+                        group_last = group[-1]
+                        last_message = group_last["message"]
+                        group_combined_text = "\n".join(m["text"] for m in group)
+                        sender_name = group_last["sender_name"]
+                        # Addressed reply takes precedence over ambient.
+                        reason = "reply" if any(m["reason"] == "reply" for m in group) else "ambient"
 
-                # Ambient empty-reply suppression (Req 3.6): an ambient chime-in may
-                # yield an empty/declined reply. In that case send nothing at all — skip
-                # BOTH the reaction and the answer. The cooldown was already reset at
-                # dispatch time, so a decline still holds the window. Non-ambient
-                # (reply/DM) paths keep the existing behavior of always answering.
-                if last_reason == "ambient" and (not reply_text or not reply_text.strip()):
-                    logger.debug(f"Ambient reply empty for chat {chat_id}; sending nothing.")
-                else:
-                    if reaction:
                         try:
-                            await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
-                        except Exception as react_err:  # noqa: BLE001
-                            logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
+                            reply_text, reaction = await handle_message(
+                                db,
+                                chat_id,
+                                group_combined_text,
+                                chat_type=chat_type,
+                                sender_id=sender_id,
+                                sender_name=sender_name,
+                                reason=reason,
+                            )
 
-                    await last_message.answer(reply_text)
+                            # Ambient empty-reply suppression (Req 3.6): an ambient
+                            # chime-in may yield an empty/declined reply. In that case
+                            # send nothing at all — skip BOTH the reaction and the
+                            # answer. The cooldown was already reset at dispatch time,
+                            # so a decline still holds the window. Non-ambient
+                            # (reply/DM) paths keep always answering.
+                            if reason == "ambient" and (not reply_text or not reply_text.strip()):
+                                logger.debug(f"Ambient reply empty for chat {chat_id}; sending nothing.")
+                            else:
+                                if reaction:
+                                    try:
+                                        await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
+                                    except Exception as react_err:  # noqa: BLE001
+                                        logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
+
+                                await last_message.answer(reply_text)
+                        except Exception as e:  # noqa: BLE001
+                            # A failure for one sender group must not abort the rest
+                            # of the batch — log, apologize to that group, continue.
+                            logger.error(f"Error processing sender {sender_id} batch for chat {chat_id}: {e}")
+                            await last_message.answer("Sorry, I ran into a problem just now — mind trying again?")
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Error processing batch for chat {chat_id}: {e}")
-                await last_message.answer("Sorry, I ran into a problem just now — mind trying again?")
             finally:
                 if not state.pending_messages:
                     self._stop_typing(state)
@@ -253,12 +287,13 @@ class UserTaskManager:
         if state.typing_task and not state.typing_task.done():
             state.typing_task.cancel()
 
-    async def run_extractor(self, chat_id: int):
+    async def run_extractor(self, chat_id: int, *, is_group: bool = False):
         """Run memory extraction in the background; at most one per conversation (shared memory_lock).
 
-        Operates per buffer/profile id (``chat_id``; in a DM this equals the user id). Group
-        extraction routing/branching is handled in task 6.1; here we only keep the id plumbing
-        consistent.
+        Operates per buffer/profile id (``chat_id``; in a DM this equals the user id). The
+        explicit ``is_group`` flag selects the extraction path directly instead of relying
+        on a fragile sender-count heuristic; it defaults to ``False`` so existing positional
+        callers (and tests) keep the DM path they expect.
         """
         state = await self.get_state(chat_id)
         if state.memory_lock.locked():
@@ -266,7 +301,7 @@ class UserTaskManager:
             return
         async with state.memory_lock:
             from app.services.memory_extractor import extract_and_trim
-            await extract_and_trim(chat_id)
+            await extract_and_trim(chat_id, is_group=is_group)
 
     async def run_compressor(self, chat_id: int):
         """Run memory compression in the background; rate-limited and serialized per conversation."""

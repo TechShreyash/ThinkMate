@@ -189,12 +189,15 @@ async def test_addressed_group_message_enqueues_reply_no_buffer_no_chime():
 
 
 @pytest.mark.asyncio
-async def test_non_addressed_group_message_buffers_and_hands_off_to_gate():
-    """A non-addressed group message is buffered and handed to the ambient gate.
+async def test_non_addressed_group_message_hands_off_to_gate_no_reply():
+    """A non-addressed group message is handed to the ambient gate, not replied to.
 
-    It is NOT directly enqueued as a reply; the buffer write happens in the
-    handler (it is the only writer for non-addressed messages), and the ambient
-    chime handoff is invoked (Req 2.5).
+    Single-write invariant (post-fix): the handler no longer writes the buffer
+    itself — the non-addressed buffer write moved INTO ``_maybe_ambient_chime``
+    (drop path only). So the handler's contract for a non-addressed message is:
+    it does NOT enqueue a direct reply (reason="reply"), and it DOES hand off to
+    ``_maybe_ambient_chime``. Because the chime helper is patched here, no buffer
+    write is expected from the handler at all (Req 2.5).
     """
     db = MagicMock()
     message = _make_group_message("just chatting with friends")
@@ -211,14 +214,20 @@ async def test_non_addressed_group_message_buffers_and_hands_off_to_gate():
         ]
         assert not reply_calls, "non-addressed message must not enqueue a direct reply"
 
-        # Buffer write for non-addressed messages happens in the handler.
-        assert mock_buffer.called, "non-addressed message must be buffered by the handler"
-        _, buf_kwargs = mock_buffer.call_args
-        buf_args, _ = mock_buffer.call_args
-        assert buf_args[1] == -100, "buffer write must target the group chat id"
+        # The handler itself no longer writes the buffer for non-addressed messages:
+        # that write moved into _maybe_ambient_chime (the drop-path sole writer),
+        # which is patched here. So the handler must not call add_message_to_buffer.
+        assert not mock_buffer.called, (
+            "handler must not write the buffer directly; the write moved into "
+            "_maybe_ambient_chime"
+        )
 
-        # Handed off to the ambient gate.
+        # Handed off to the ambient gate (the new single owner of the buffer write
+        # on the non-addressed path).
         assert mock_chime.called, "non-addressed message must hand off to the ambient gate"
+        chime_args, _ = mock_chime.call_args
+        assert chime_args[0] is message, "chime must receive the original message"
+        assert chime_args[1] is db, "chime must receive the db handle"
 
 
 @pytest.mark.asyncio

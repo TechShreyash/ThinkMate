@@ -158,9 +158,9 @@ by the caller from the segment's own name→id map (see [memory_engine.md](memor
 
 ## 🔎 Centralized Database Audit Trail (`llm_audit_log`)
 
-The three LLM call types — `chat_reply` (reply **and** reaction), `memory_extraction`, and
-`memory_compression` — are traced in `LLMService`, recording prompt inputs, outputs, parsed
-JSON, status, and error tracebacks.
+The four LLM call types — `chat_reply` (reply **and** reaction), `memory_extraction`,
+`group_memory_extraction` (multi-party group extraction), and `memory_compression` — are traced
+in `LLMService`, recording prompt inputs, outputs, parsed JSON, status, and error tracebacks.
 
 Three properties keep this safe at scale:
 

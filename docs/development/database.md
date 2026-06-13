@@ -105,7 +105,7 @@ A centralized audit log collection to trace all inputs, prompts, API parameters,
 {
   "_id": ObjectId("6e3b2e..."),
   "user_id": 12345678,
-  "call_type": "chat_reply",  // "chat_reply" | "memory_extraction" | "memory_compression"
+  "call_type": "chat_reply",  // "chat_reply" | "memory_extraction" | "group_memory_extraction" | "memory_compression"
   "inputs": {
     "system_prompt": "...",
     "messages": [...]

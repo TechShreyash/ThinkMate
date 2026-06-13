@@ -253,6 +253,8 @@ async def test_routing_emits_drop_stage_log():
         ), patch.object(
             messages.ambient_gate, "decide", return_value=(False, "cooldown")
         ), patch.object(
+            messages.models, "add_message_to_buffer", new=AsyncMock()
+        ) as mock_buffer, patch.object(
             messages.user_task_manager, "enqueue_message", new=AsyncMock()
         ) as mock_enqueue:
             await messages._maybe_ambient_chime(
@@ -263,5 +265,8 @@ async def test_routing_emits_drop_stage_log():
         assert "ambient drop stage=cooldown" in captured
         # A dropped candidate must never reach the LLM enqueue path.
         mock_enqueue.assert_not_awaited()
+        # Single-write invariant: the gate is the sole writer on the drop path, so a
+        # dropped non-addressed message is recorded to the buffer exactly once here.
+        mock_buffer.assert_awaited_once()
     finally:
         logger.remove(sink_id)

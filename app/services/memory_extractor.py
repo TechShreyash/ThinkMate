@@ -127,15 +127,29 @@ _GROUP_EXTRACTION_NOTE = (
 )
 
 
-async def extract_and_trim(chat_id: int):
+async def extract_and_trim(chat_id: int, *, is_group: bool | None = None):
     """Entry point for background memory extraction; dispatches DM vs group.
 
-    ``run_extractor(chat_id)`` in the task manager calls this with a ``chat_id``. To wire
-    group routing without changing any caller, we peek at the buffer once and decide which
-    path to run via :func:`_is_group_buffer` (more than one distinct human sender => group).
-    In a DM ``chat_id == user_id`` and there is exactly one human sender, so we take the
-    original single-party path unchanged.
+    The caller (``chat_manager`` via ``run_extractor``) now passes an explicit ``is_group``
+    derived from the real Telegram ``chat_type``, which is authoritative: when given it
+    overrides the heuristic entirely. ``is_group is True`` routes to
+    :func:`extract_and_trim_group`; ``is_group is False`` routes to
+    :func:`_extract_and_trim_single`.
+
+    When no hint is provided (``is_group is None`` — e.g. existing test callers that invoke
+    ``extract_and_trim(chat_id)``), we fall back to the CURRENT behavior: peek at the raw
+    buffer once and decide via :func:`_is_group_buffer` (more than one distinct human
+    sender => group). The sender-count heuristic is only this fallback; it can misclassify
+    a group whose extractable segment happens to contain a single active speaker, which is
+    exactly why an explicit hint is preferred when the caller knows the real chat type.
     """
+    if is_group is True:
+        await extract_and_trim_group(chat_id)
+        return
+    if is_group is False:
+        await _extract_and_trim_single(chat_id)
+        return
+
     try:
         async with db_session() as db:
             raw_messages = await _read_raw_buffer(db, chat_id)

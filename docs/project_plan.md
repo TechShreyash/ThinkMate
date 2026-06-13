@@ -302,15 +302,15 @@ steps in [performance_and_scaling.md](development/performance_and_scaling.md#hor
 
 ## Build order checklist
 
-- [ ] Phase 0 Foundations
-- [ ] Phase 1 Data layer
-- [ ] Phase 2 LLM service & audit
-- [ ] Phase 3 Memory engine
-- [ ] Phase 4 Orchestrator
-- [ ] Phase 5 Telegram (DM)
-- [ ] Phase 6 Guards & concurrency
-- [ ] Phase 7 Hardening & efficiency
-- [ ] Phase 8 Tests
+- [x] Phase 0 Foundations
+- [x] Phase 1 Data layer
+- [x] Phase 2 LLM service & audit
+- [x] Phase 3 Memory engine
+- [x] Phase 4 Orchestrator
+- [x] Phase 5 Telegram (DM)
+- [x] Phase 6 Guards & concurrency
+- [x] Phase 7 Hardening & efficiency
+- [x] Phase 8 Tests
 - [x] Phase 9 Group chat
 - [x] Phase 10 Observability & ops
 - [ ] Phase 11 Future: consolidation

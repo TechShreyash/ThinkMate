@@ -82,15 +82,22 @@ async def _maybe_ambient_chime(
 ) -> None:
     """Run the ambient gate on a non-addressed group message → maybe chime in.
 
-    The message has already been recorded to the buffer by the caller. The funnel is a
-    no-LLM sequence — fetch the speaker's affinity/mode, run the cheap trigger scan, then
-    let :class:`AmbientGate` apply the cooldown → trigger/scan-tick → affinity-weighted
-    dice roll. Only a candidate that survives all three steps reaches the LLM via an
-    ``enqueue_message(reason="ambient")`` chime-in.
+    This function owns the buffer write for the *drop* path (single-write invariant). The
+    funnel is a no-LLM sequence — fetch the speaker's affinity/mode, run the cheap trigger
+    scan, then let :class:`AmbientGate` apply the cooldown → trigger/scan-tick →
+    affinity-weighted dice roll. Only a candidate that survives all three steps reaches the
+    LLM via an ``enqueue_message(reason="ambient")`` chime-in.
+
+    Buffer-write strategy: when the gate does NOT pass (any drop stage, or a defensive
+    gate-evaluation failure), this is the ONLY place the non-addressed message can be
+    recorded, so we write it to the buffer here. When the gate DOES pass, the message is
+    enqueued and the ``enqueue_message`` → ``handle_message`` path appends it instead, so
+    we deliberately do NOT write it here. Net result: exactly one write per message.
 
     Defensiveness: the affinity read and the gate decision are wrapped so any failure on
     this hot path degrades to "no chime" (Requirement 7.4 / error-handling contract)
-    rather than raising. When we do decide to chime in, ``mark_chimed`` is called *before*
+    rather than raising — and that failure is treated as a drop, so the message is still
+    recorded once. When we do decide to chime in, ``mark_chimed`` is called *before*
     enqueueing so the per-chat cooldown holds for the full window even if the eventual
     model reply is empty or fails (Requirement 3.7).
     """
@@ -112,12 +119,31 @@ async def _maybe_ambient_chime(
         )
     except Exception as e:  # noqa: BLE001
         # Any failure in the affinity read or gate decision degrades to "no chime".
+        # Treat it as a drop: record the message once (the gate is the sole writer on the
+        # non-chime path) so a gate failure still preserves context and never chimes.
         logger.debug(f"ambient gate evaluation failed; dropping (no chime): {e}")
+        await models.add_message_to_buffer(
+            db,
+            message.chat.id,
+            "user",
+            user_text,
+            sender_id=message.from_user.id,
+            sender_name=sender_name,
+        )
         return
 
     if not should:
         # Per-stage drop logging (Req 7.2): surface WHICH funnel stage dropped the
         # candidate (cooldown / no_trigger / dice) so the funnel is observable.
+        # Drop path: this is the only writer for a non-chiming message, so record it once.
+        await models.add_message_to_buffer(
+            db,
+            message.chat.id,
+            "user",
+            user_text,
+            sender_id=message.from_user.id,
+            sender_name=sender_name,
+        )
         logger.debug(f"ambient drop stage={stage} chat={message.chat.id}")
         return
 
@@ -125,6 +151,8 @@ async def _maybe_ambient_chime(
     logger.debug(f"ambient chime stage={stage} chat={message.chat.id}")
 
     # Reset the cooldown NOW so a failed/empty reply still holds the window (Req 3.7).
+    # Do NOT write the buffer here: this message will be enqueued and the
+    # enqueue_message → handle_message path appends it (single-write invariant).
     ambient_gate.mark_chimed(message.chat.id, now)
     await user_task_manager.enqueue_message(
         message.bot,
@@ -192,13 +220,18 @@ async def _handle_group_message(
     """Group/supergroup routing: addressed → reply; otherwise → ambient gate.
 
     Buffer-write strategy (single-write invariant): every group message must be recorded
-    to the buffer (Requirement 2.1), but we must avoid writing the *user* message twice.
-    ADDRESSED messages are enqueued and the normal ``enqueue_message`` → ``handle_message``
-    path appends the user message itself — exactly like DMs — so we do NOT write here for
-    them (a single write). NON-ADDRESSED messages are never enqueued and never reach
-    ``handle_message``, so this handler is the only place that can record them; we write
-    them here before handing off to the ambient gate. Net result: each group message is
-    buffered exactly once, addressed by the enqueue path and non-addressed by this handler.
+    to the buffer (Requirement 2.1), but the *user* message must never be written twice.
+    The writer depends on the path:
+
+    - ADDRESSED → the message is enqueued and the normal ``enqueue_message`` →
+      ``handle_message`` path appends the user message itself (exactly like DMs), so we do
+      NOT write here.
+    - NON-ADDRESSED + gate DROPS → the message is never enqueued, so ``_maybe_ambient_chime``
+      records it on the drop path (the gate is the sole writer there).
+    - NON-ADDRESSED + gate PASSES → the message IS enqueued, so the ``enqueue_message`` →
+      ``handle_message`` path appends it; the gate deliberately does not write.
+
+    Net result: each group message is buffered exactly once.
     """
     # Length guard in groups: still don't process essays, but stay silent (no DM-style
     # deflection) to avoid group spam — just drop the over-long message quietly.
@@ -253,14 +286,7 @@ async def _handle_group_message(
         )
         return
 
-    # Not addressed: this handler is the only writer for non-addressed messages, so record
-    # the message to the chat buffer with sender attribution before handing off to the gate.
-    await models.add_message_to_buffer(
-        db,
-        message.chat.id,
-        "user",
-        user_text,
-        sender_id=message.from_user.id,
-        sender_name=sender_name,
-    )
+    # Not addressed: hand off to the ambient gate, which both decides whether to chime in
+    # and (on the drop path only) records the message to the buffer — preserving the
+    # single-write invariant.
     await _maybe_ambient_chime(message, db, user_text, sender_name)
