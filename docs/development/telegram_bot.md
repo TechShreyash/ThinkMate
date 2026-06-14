@@ -1,7 +1,24 @@
 # Telegram Bot Integration Guide (aiogram 3.x)
 
-This document details the Telegram interaction layer of ThinkMate, built on the asynchronous
-framework **aiogram 3.x** with dependency injection and per-user batching.
+This document details the Telegram interaction layer of ThinkMate — the code that receives
+messages from Telegram, decides how (and whether) to reply, and sends the answer back. It is
+built on the asynchronous framework **aiogram 3.x** with dependency injection and per-user
+batching.
+
+Two terms used throughout are worth defining up front. *Dependency injection* means a handler
+declares the resources it needs (such as the database) as parameters, and the framework supplies
+them at call time instead of the handler reaching for globals. *Batching* means messages sent in
+quick succession by the same user are collected and processed together, so a burst of short lines
+becomes a single, coherent reply.
+
+**What's in this doc:**
+
+- **Architecture** — why business logic stays out of handlers, and who owns the "typing…" indicator.
+- **Middlewares** — the two outer middlewares (rate limiting and database-session injection) and how they're registered.
+- **Dependency-injected handlers** — the command handlers, the conversational router, and how a reply and its emoji reaction come from one LLM call.
+- **Group chat routing** — how messages in groups are routed by chat type and whether the bot was addressed.
+- **Engagement commands** — the Phase 12 DM commands (`/onboard`, `/pause`, `/resume`) and the `/start`/`/help` enhancements.
+- **Key architectural guidelines** — the rules that keep the layer thin and predictable.
 
 ---
 
@@ -10,6 +27,8 @@ framework **aiogram 3.x** with dependency injection and per-user batching.
 `aiogram 3.x` is built on `asyncio`. We keep business logic out of handlers and rely on:
 
 1.  **Outer Middlewares** for system-wide concerns — rate limiting and database-session injection.
+    A *middleware* is a wrapper that runs around every update before (and after) the handler, so
+    cross-cutting work happens in one place rather than being repeated in each handler.
 2.  **Context Dependency Injection** — the active MongoDB database (`db`) is passed to handlers via the middleware `data` payload.
 3.  **A dedicated task manager** (`UserTaskManager`) that batches messages, serializes per-user work, and drives the "typing…" indicator across both the batching delay and generation.
 
@@ -22,7 +41,8 @@ framework **aiogram 3.x** with dependency injection and per-user batching.
 
 ## 🧱 Middlewares (`app/handlers/middlewares.py`)
 
-Two outer middlewares are registered on the update pipeline:
+Two outer middlewares are registered on the update pipeline. They run in order on every incoming
+update, before it reaches a handler:
 
 - **`ThrottlingMiddleware`** — a per-user sliding-window rate limiter, applied *before* any DB
   session is opened so floods are dropped cheaply. Its in-memory map is pruned periodically so
@@ -55,6 +75,10 @@ here is simply the shared database handle — there are no per-request connectio
 ---
 
 ## 🔀 Registering Middlewares and Routers (`main.py`)
+
+Startup wires the pieces together: it verifies the database is reachable, builds the indexes, then
+registers the two middlewares (throttling first, so floods never reach the database) and the main
+router before polling Telegram.
 
 ```python
 # main.py
@@ -91,13 +115,15 @@ async def main():
 
 ## ⚙️ Dependency-Injected Handlers
 
-Handlers receive the MongoDB database (`AsyncIOMotorDatabase`) directly.
+Handlers receive the MongoDB database (`AsyncIOMotorDatabase`) directly, so they never construct a
+client of their own — the middleware hands it over as a parameter.
 
 ### 1. Commands (`app/handlers/commands.py`)
 
 `/start`, `/help`, `/profile`, and `/reset` are implemented. `/reset` requires explicit
-confirmation (`/reset confirm`) before wiping a user's stored state. Two group-only commands —
-`/quiet` and `/chatty` — set the speaker's ambient `mode` via `affinity_cache.set_mode`; in a DM
+confirmation (`/reset confirm`) before wiping a user's stored state, which guards against an
+accidental, irreversible erase. Two group-only commands — `/quiet` and `/chatty` — set the
+speaker's ambient `mode` via `affinity_cache.set_mode`; in a DM
 they reply with a graceful no-op explanation (see [Group Chat Routing](#-group-chat-routing-phase-9-implemented)).
 
 ```python
@@ -131,7 +157,7 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
 ### 2. Conversational Router (`app/handlers/messages.py`)
 
 Text messages are guarded for length and enqueued for batching. Service/channel posts with
-no real sender are ignored.
+no real sender are ignored, since there is no user to remember or reply to.
 
 ```python
 from aiogram import Router, F
@@ -157,7 +183,8 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
 ### 3. Dynamic Message Reactions — one call
 
 The reply and the optional emoji reaction come from a **single** LLM call: `handle_message`
-returns `(reply_text, reaction)`. The batch processor applies the reaction (already normalized
+returns `(reply_text, reaction)`. Folding both into one call avoids a second round-trip and keeps
+the reaction consistent with the reply. The batch processor applies the reaction (already normalized
 to Telegram's accepted set) and sends the reply. Reaction failures (e.g. a chat that disallows
 reactions) are caught and never block delivery.
 
@@ -180,14 +207,16 @@ await last_message.answer(reply_text)
 ## 👥 Group Chat Routing *(Phase 9, implemented)*
 
 In groups/supergroups the message router (`app/handlers/messages.py`) does **chat-type +
-identity routing** before enqueuing. `handle_user_message` branches on `message.chat.type`:
+identity routing** before enqueuing — that is, it first decides what kind of chat the message came
+from and whether the bot was spoken to. `handle_user_message` branches on `message.chat.type`:
 
 - **`private`** → the exact DM path that existed before group support (length-guard, then a
   positional `enqueue_message`), so DM behavior is byte-for-byte unchanged.
 - **`channel`** → ignored entirely (no buffer write, no reply).
 - **`group` / `supergroup`** → `_handle_group_message`, the multi-party path below.
 
-**Addressed detection.** The bot's identity (`id`, `username`, `name`) is resolved once via
+**Addressed detection.** "Addressed" means the message was aimed at the bot rather than at other
+people in the group. The bot's identity (`id`, `username`, `name`) is resolved once via
 `bot.get_me()` and cached process-wide (`_get_bot_identity`) to avoid an API round-trip per
 message; a failed lookup degrades to "not addressed" rather than raising. `is_addressed`
 (in [`group_gate.py`](../../app/services/group_gate.py)) returns True when the message
@@ -195,10 +224,12 @@ message; a failed lookup degrades to "not addressed" rather than raising. `is_ad
 the bot's own messages.
 
 - **Addressed** → bump the speaker's affinity (`+0.05`) and `enqueue_message(..., reason="reply")`
-  — always reply, exactly like a DM.
+  — always reply, exactly like a DM. *Affinity* is a per-speaker warmth score that biases how
+  readily the bot joins in.
 - **Not addressed** → record the message to the buffer (with `sender_id`/`sender_name`), then run
   the **ambient gate** (`_maybe_ambient_chime`): read the speaker's affinity/mode, run the cheap
-  `scan_cheap_triggers`, and call `ambient_gate.decide(...)`. Only candidates that survive the
+  `scan_cheap_triggers`, and call `ambient_gate.decide(...)`. The ambient gate is the no-LLM filter
+  that decides whether an unaddressed message is worth chiming in on. Only candidates that survive the
   cooldown → trigger/scan-tick → affinity-weighted dice roll are enqueued as a chime-in
   (`reason="ambient"`); `mark_chimed` is called before enqueue so a failed/empty reply still
   holds the cooldown window.
@@ -221,7 +252,7 @@ design and the no-LLM ambient funnel are in [group_chat.md](group_chat.md).
 
 Phase 12 adds three small, DM-oriented commands plus light enhancements to `/start` and `/help`.
 They follow the exact same patterns as the existing commands — aiogram `Command`, the injected
-`db`, and `models` CRUD — and none of them makes an LLM call.
+`db`, and `models` CRUD — and none of them makes an LLM call, so they stay fast and predictable.
 
 ### `/onboard` — a static, no-LLM introduction
 
@@ -234,7 +265,8 @@ ordinary extraction pipeline like any other message.
 
 ### `/pause` and `/resume` — proactive opt-out / opt-in
 
-These toggle whether the user receives [proactive check-ins](configuration.md#-proactive-check-ins-phase-12):
+These toggle whether the user receives [proactive check-ins](configuration.md#-proactive-check-ins-phase-12) —
+the occasional messages the bot sends on its own initiative:
 
 - **`/pause`** → `models.set_proactive_enabled(db, user_id, False)` — "I won't reach out on my own
   anymore." The user is excluded from future proactive scans (the due-user query filters on
@@ -281,6 +313,8 @@ async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
 ---
 
 ## 💡 Key Architectural Guidelines
+
+These four rules keep the Telegram layer thin, fast, and easy to reason about:
 
 1.  **No business logic in handlers** — handlers validate, then call services/models with the injected `db`.
 2.  **No direct database clients in handlers** — the `motor` client/session is owned by `connection.py` and injected by `DbSessionMiddleware`.

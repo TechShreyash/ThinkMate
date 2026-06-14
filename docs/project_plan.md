@@ -1,10 +1,14 @@
 # Project Implementation Plan & Build Path
 
-The single, authoritative, step-by-step path to build ThinkMate from an empty directory to the
-full feature set — optimized for large load on a single instance. Each phase lists its **goal**,
-the **files** it produces, the **key design points** (with links to the deep-dive doc), and the
-**acceptance criteria** that prove it's done. Build phases in order; later phases assume earlier
-ones exist.
+This is the single, authoritative, step-by-step path for building ThinkMate from an empty
+directory all the way to the full feature set, tuned for heavy load on a single instance. Think
+of it as the master build map: it says what to construct, in what order, and how to know each
+step is finished, so a newcomer can follow the same route the project actually took.
+
+Every phase is described the same way, so you always know where to look. Each one lists its
+**goal** (what the phase delivers), the **files** it produces, the **key design points** (with
+links to the deep-dive doc for that subsystem), and the **acceptance criteria** that prove it's
+done. Build the phases in order; later phases assume the earlier ones already exist.
 
 > Companion docs: [architecture.md](architecture.md) ·
 > [performance_and_scaling.md](development/performance_and_scaling.md) ·
@@ -16,6 +20,10 @@ ones exist.
 ---
 
 ## 🗺️ Roadmap
+
+The roadmap below is the bird's-eye view: thirteen phases that move from a bare skeleton to a
+fully featured companion. Read it top to bottom to see how each layer builds on the one before
+it.
 
 ```
 Phase 0  Foundations ............. project skeleton, config, logging, deps
@@ -33,10 +41,10 @@ Phase 11 Consolidation .......... periodic "dreaming" pass
 Phase 12 Engagement & UX ........ temporal context, mood history, onboarding, proactive check-ins
 ```
 
-Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phase 10 adds the
-observability/ops layer, Phase 11 the periodic consolidation pass, and Phase 12 a set of
-engagement/UX features. The exact efficiency invariants every phase must respect live in
-[performance_and_scaling.md](development/performance_and_scaling.md).
+At a high level, Phases 0–8 deliver a production direct-message (DM) bot. Phase 9 then adds group
+chat, Phase 10 adds the observability/ops layer, Phase 11 the periodic consolidation pass, and
+Phase 12 a set of engagement/UX features. The exact efficiency invariants that every phase must
+respect live in [performance_and_scaling.md](development/performance_and_scaling.md).
 
 ---
 
@@ -351,6 +359,9 @@ intentionally **deferred** in this phase:
 ---
 
 ## Build order checklist
+
+The checklist below mirrors the roadmap and tracks what is built. Every box is checked because the
+repository currently implements the entire plan.
 
 - [x] Phase 0 Foundations
 - [x] Phase 1 Data layer

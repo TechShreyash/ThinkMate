@@ -2,6 +2,22 @@
 
 This document covers the core memory architecture of ThinkMate, detailing the sliding window extraction pipeline, memory loader block compilers, and memory compressors. All components are updated to use Pydantic models and MongoDB.
 
+The *memory engine* is the subsystem that lets ThinkMate remember a user across conversations without ever feeding an ever-growing transcript to the language model. It does this with a **sliding window**: only the most recent messages are kept verbatim in a short-lived buffer, while older messages are distilled into a compact, long-lived **memory profile** (facts, beliefs, events, mood, and — later — behavioral insights). The compiled profile is the **memory block** that gets injected into the system prompt on each reply, so the bot stays informed while the prompt stays bounded.
+
+Three priorities shape every design decision in this engine, in order: **responsiveness** (never block the user's reply on bookkeeping), **robustness** (never lose or corrupt memory, even during an LLM outage), and **minimizing LLM calls** (each call costs latency and money). Throughout this guide, the *hot path* means the per-message request/response flow that produces a reply; anything that can run after the reply is pushed off the hot path into a background task.
+
+### What this guide covers
+
+- **🛠️ Chat Manager Orchestration** — the per-message entry point that ties everything together: append the message, trigger background work when buffers or budgets are exceeded, compile the prompt, and make a single LLM call.
+- **🔍 Memory Extraction Logic** — how a full buffer window is summarized into durable memory, with retries and a "trim anyway on failure" safety rule.
+- **🧹 Memory Compression** — how an over-budget profile is shrunk without ever wiping memory on failure.
+- **🔒 Shared Task Concurrency Lock** — the per-user lock that keeps extraction, compression, and consolidation from racing each other.
+- **👥 Multi-Party Extraction in Groups** *(Phase 9)* — how group chats share one buffer but keep memory per user.
+- **🌙 Phase 11 — Periodic consolidation** — the long-horizon "dreaming" pass that reviews the whole profile and synthesizes behavioral insights.
+- **⏰ Phase 12 — Temporal context & emotional continuity** — small, additive features that give the bot a sense of time and a mood trend.
+
+For sibling subsystems, see the group-chat flow in [group_chat.md](group_chat.md), the LLM schemas in [llm_integration.md](llm_integration.md), and the tunable keys in [configuration.md](configuration.md).
+
 ---
 
 ## 🛠️ Chat Manager Orchestration (`chat_manager.py`)

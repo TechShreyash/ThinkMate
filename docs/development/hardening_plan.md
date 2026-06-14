@@ -4,6 +4,33 @@
 > Last updated: 2026-06-13. Boxes are checked as work lands. Read this before touching
 > the LLM, memory, or concurrency code.
 
+This page is the working plan for making ThinkMate robust enough to run as a live
+production service. It is a *living document*: the checklists below are updated in place
+as work lands, so a checked box (`[x]`) means the change is shipped and an unchecked box
+(`[ ]`) means it is still planned. If you are about to change the LLM service, the memory
+engine, or anything touching concurrency, read this first so your change fits the agreed
+direction instead of fighting it.
+
+## Overview
+
+The plan is organized so you can read it top to bottom and understand both *why* the work
+is being done and *what* exactly is being changed:
+
+- **Context & Goals** — who the bot serves today, what the runtime looks like, and the
+  ordered priorities the effort optimizes for.
+- **Decisions locked in** — the architectural choices that are settled, so they are not
+  relitigated mid-flight.
+- **LLM proxy capability findings** — what the live LLM proxy (the OpenAI-compatible HTTP
+  endpoint the bot talks to) actually supports, verified by hitting it directly.
+- **Hot-path cost model** — the "hot path" (the latency-sensitive code that runs on every
+  user message) and how many LLM and database calls it makes before and after this work.
+- **Phased checklist** — the concrete tasks, grouped into Phases A–H, each box tracking a
+  single landed change.
+
+Subsystem deep-dives that this plan refers to live in their own guides, most often
+[memory_engine.md](memory_engine.md) and
+[performance_and_scaling.md](performance_and_scaling.md).
+
 ## Context & Goals
 
 ThinkMate is a **live production** Telegram companion bot:
@@ -16,7 +43,16 @@ ThinkMate is a **live production** Telegram companion bot:
 - **Deployment is out of scope** for this effort — we test locally (mongomock / local
   Mongo, never the production cluster).
 
+"Long-polling" means the bot repeatedly asks Telegram for new updates over a single
+connection rather than receiving them via a public webhook; "in-memory per-user state"
+means each user's working context lives in the process's RAM rather than an external store.
+Both choices keep the single-instance runtime simple, which is exactly why the priorities
+above lead with responsiveness and per-call robustness.
+
 ### Decisions locked in (2026-06-13)
+
+These are settled so they are not reopened while the phased work is in flight. Each row
+records the choice and the reasoning behind it.
 
 | Topic | Decision |
 |---|---|
@@ -27,6 +63,11 @@ ThinkMate is a **live production** Telegram companion bot:
 | Reply model | **Optimize within flash-lite** (prompt, memory, params). Keep model configurable. |
 
 ## LLM proxy capability findings (verified live, 2026-06-13)
+
+Before committing to a structured-output strategy, each request mode was tried directly
+against the live proxy. The table records what worked and the consequence for our code.
+Here, "structured output" means asking the model to return machine-parseable JSON rather
+than free-form text.
 
 | Mode | Result | Consequence |
 |---|---|---|
@@ -41,6 +82,10 @@ gated by config so a future OpenAI deployment can re-enable native parse.
 
 ## Hot-path cost model (per user message batch)
 
+The "hot path" is the code that runs for every batch of user messages, so every call it
+makes is multiplied across ~50k users; trimming it is the highest-leverage win. The counts
+below are per user message batch, before and after this effort:
+
 Before → after this effort:
 
 - LLM calls: **2 → 1** (reply + reaction merged) on the chat path; extraction/compression
@@ -48,9 +93,17 @@ Before → after this effort:
 - Mongo round-trips on chat path: ~5 → ~3 (combine buffer write+read; cache persona).
 - Audit log writes moved **off** the chat hot path (fire-and-forget) + TTL retention.
 
+Here "fire-and-forget" means the write is kicked off without blocking the reply on its
+completion, and "TTL retention" (time-to-live) means old audit rows expire automatically so
+the collection cannot grow without bound.
+
 ---
 
 ## Phased checklist
+
+The work is grouped into phases by subsystem. Each box is a single landed change: `[x]`
+means it is implemented and merged, `[ ]` means it is still outstanding. Phases A–G cover
+the core hardening pass; Phase H captures efficiency and resilience follow-ups.
 
 ### Phase A — LLM service: robustness + fewer calls
 - [x] A1. Add `LLM_STRUCTURED_MODE` config (`json_object` default | `native_parse`). Skip the dead native-parse path for Gemini.

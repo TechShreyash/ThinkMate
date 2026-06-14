@@ -1,12 +1,16 @@
 # ThinkMate — Self-Learning Telegram AI Chatbot
 
-ThinkMate is a self-learning, long-term memory Telegram AI companion. Inspired by concepts like Hermes Agent and Hindsight, it operates without third-party memory SaaS providers, maintaining full ownership and control over its database.
+ThinkMate is a self-learning, long-term memory Telegram AI companion — a chatbot that keeps remembering you across conversations instead of forgetting everything the moment a session ends. Inspired by concepts like Hermes Agent and Hindsight, it runs entirely on infrastructure you own: there are no third-party memory SaaS providers in the loop, so you keep full ownership and control over its database.
 
-Rather than relying on simple session timeouts or expensive vector databases, ThinkMate implements a **Sliding Window Chat Buffer** combined with a custom memory model in MongoDB. This allows the bot to continuously extract facts, events, and emotional states from conversational overflows and inject them back into the LLM's system prompt as structured memory.
+Most chatbots either drop their context when a session times out or lean on expensive vector databases to fake recall. ThinkMate takes a different route. It pairs a **Sliding Window Chat Buffer** — a rolling window that keeps only the most recent messages in active context — with a custom memory model stored in MongoDB. As older messages slide out of that window, the bot extracts the facts, events, and emotional states worth keeping and injects them back into the LLM's (Large Language Model's) system prompt as structured, long-term memory. The payoff is continuity: the bot recalls what matters without paying to store every message forever.
+
+This README is the project's entry point. It summarizes the headline features, maps the repository layout, lists the tech stack, and links out to the detailed guides under `docs/`. If you're new here, read this page first, then follow the [Complete Documentation Index](#-complete-documentation-index) below to go deeper.
 
 ---
 
 ## 🌟 Key Features
+
+Each feature below links to the guide that explains it in depth, so you can skim the highlights here and dive into specifics when you need them.
 
 *   **Sliding Window Memory**: Keeps the last $N$ messages in active context. When the limit is reached, it automatically extracts facts and events.
 *   **Character-Budget Memory Profile**: Consolidates user profiles, facts, subjective beliefs, events, and moods into a unified text block. If the text block size exceeds `USER_MEMORY_BUDGET_CHARS` (default 4,000 chars), a non-blocking background compression task is triggered to reduce memory usage to ≤ 80% of the budget.
@@ -25,6 +29,8 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 ---
 
 ## 📂 File/Folder Structure
+
+The tree below is the map of the repository. Source code lives under `app/`, the prose guides live under `docs/`, and the root holds the entry point and configuration templates.
 
 ```
 ThinkMate/
@@ -111,12 +117,15 @@ To implement or contribute to this project, please consult the specialized guide
     *   [Group Chat, Ambient Replies & Affinity](docs/development/group_chat.md)
     *   [Performance, Efficiency & Scaling](docs/development/performance_and_scaling.md)
     *   [Observability & Ops Runbook](docs/development/observability.md)
+    *   [Production Hardening & Scaling Plan](docs/development/hardening_plan.md)
     *   [Testing Infrastructure & Mocking Suite](docs/development/testing_guide.md)
     *   [Configuration & Tuning Parameters Reference](docs/development/configuration.md)
 
 ---
 
 ## 🛠️ Tech Stack Overview
+
+ThinkMate is intentionally built on a small, async-first Python stack so the whole bot can run as a single process without external orchestration:
 
 *   **Language**: Python 3.12+
 *   **Telegram Framework**: `aiogram` (v3.x) with DB dependency injection & task-manager-driven typing indicators

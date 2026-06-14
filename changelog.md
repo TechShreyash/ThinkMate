@@ -1,6 +1,8 @@
 # Changelog
 
-All notable changes to the ThinkMate project will be documented in this file.
+This file is the running history of notable changes to ThinkMate, the self-learning, long-term-memory Telegram AI companion. It exists so that contributors and open-source readers can see how the project grew, what shipped in each step, and why, without having to read through the commit log.
+
+Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
 ## [2026-06-14] - Phase 12 Engagement & UX: Implemented
 

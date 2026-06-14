@@ -1,6 +1,8 @@
 # System Setup & Deployment Guide
 
-This guide provides step-by-step instructions to configure, run, and host the ThinkMate self-learning Telegram bot.
+This guide provides step-by-step instructions to configure, run, and host the ThinkMate self-learning Telegram bot. It is written for newcomers: each step explains not just *what* to type but *why* it matters, so you can adapt the process to your own environment with confidence.
+
+You will move through five stages — checking prerequisites, cloning and preparing the project, registering a Telegram bot, pointing ThinkMate at your LLM and database, and finally launching the application. The defaults shown here mirror the values in [`.env.example`](../.env.example), so if you ever want a quick reference for a setting, that file is the source of truth. For a deeper explanation of every variable and how to tune it, see the [configuration guide](development/configuration.md); for the bird's-eye view of how the pieces fit together, see the [architecture overview](architecture.md). To return to the project entry point at any time, head back to the [README](../README.md).
 
 ---
 
@@ -13,11 +15,13 @@ Before starting, ensure your system meets the following requirements:
 *   **LLM Provider**: Either an active API key (OpenAI, OpenRouter, Groq) or a running local inference server (LM Studio, Ollama).
 *   **Telegram Client**: An active Telegram account to register the bot and obtain tokens.
 
+These are the moving parts ThinkMate depends on at runtime: Python runs the bot, MongoDB stores its long-term memory, and the LLM provider supplies the language model that powers conversation and memory extraction. Telegram is the front door users talk through. Confirming all five up front avoids stalling partway through setup.
+
 ---
 
 ## 🛠️ Step 1: Clone the Repository & Configure Environment
 
-ThinkMate uses the high-performance Python package manager **`uv`** for managing virtual environments, installing dependencies, and executing scripts.
+ThinkMate uses the high-performance Python package manager **`uv`** for managing virtual environments, installing dependencies, and executing scripts. `uv` is chosen because it resolves and installs dependencies far faster than the traditional `pip`/`venv` combination while using the same familiar commands, which keeps onboarding quick.
 
 1.  **Clone the code** to your local machine:
     ```bash
@@ -26,12 +30,13 @@ ThinkMate uses the high-performance Python package manager **`uv`** for managing
     ```
 
 2.  **Create a virtual environment**:
-    Using `uv`, create the virtual environment:
+    A virtual environment isolates ThinkMate's dependencies from the rest of your system, so project versions never clash with other Python tools. Using `uv`, create the virtual environment:
     ```bash
     uv venv
     ```
 
 3.  **Activate the virtual environment**:
+    Activation points your shell at the isolated environment you just created. Pick the command that matches your operating system:
     *   **Windows (Powershell / Command Prompt)**:
         ```powershell
         .venv\Scripts\activate
@@ -42,12 +47,13 @@ ThinkMate uses the high-performance Python package manager **`uv`** for managing
         ```
 
 4.  **Install dependencies**:
+    This pulls in every package ThinkMate needs, pinned in `requirements.txt`:
     ```bash
     uv pip install -r requirements.txt
     ```
 
 4.  **Copy the configuration file**:
-    Create a custom `.env` file by copying the template:
+    ThinkMate reads its settings from a `.env` file that is never committed to version control, so your secrets stay local. Create a custom `.env` file by copying the template:
     ```bash
     cp .env.example .env
     ```
@@ -56,7 +62,7 @@ ThinkMate uses the high-performance Python package manager **`uv`** for managing
 
 ## 🤖 Step 2: Create a Telegram Bot
 
-To interact with the bot, you must register a token via Telegram's official **BotFather**:
+Every Telegram bot needs an identity and an API token, and those are issued by Telegram's own bot-management bot. To interact with the bot, you must register a token via Telegram's official **BotFather**:
 
 1.  Open Telegram and search for `@BotFather`.
 2.  Send the `/newbot` command to initiate the creation process.
@@ -68,11 +74,13 @@ To interact with the bot, you must register a token via Telegram's official **Bo
     TELEGRAM_BOT_TOKEN=1234567890:ABCdefGhIJKlmNoPQRsTUVwxyZ
     ```
 
+This token is the credential ThinkMate uses to send and receive messages on behalf of your bot, so treat it like a password and keep it out of shared or public places.
+
 ---
 
 ## 🧠 Step 3: Configure Your LLM & Database Endpoints
 
-ThinkMate is compatible with any inference service that supports the standard OpenAI Chat Completion protocol. 
+ThinkMate is compatible with any inference service that supports the standard OpenAI Chat Completion protocol. That compatibility is intentional: it lets you start on a free local model and later switch to a hosted API without changing any code — only the values in your `.env` file change. This section wires up two things: where ThinkMate stores memory (MongoDB) and which model it talks to (the LLM provider).
 
 ### MongoDB Settings
 Configure the connection to your MongoDB instance:
@@ -82,6 +90,8 @@ MONGODB_DB=thinkmate_db
 ```
 
 ### LLM Provider Options
+
+Choose **one** of the options below based on whether you want to run a model locally or call a cloud API. Local options keep everything on your machine and cost nothing to run; the cloud option trades that for higher-quality models and zero local hardware requirements.
 
 #### Option A: Local LLM (LM Studio)
 1.  Download and open **LM Studio**.
@@ -124,7 +134,7 @@ MONGODB_DB=thinkmate_db
 
 ## ⚙️ Step 4: Environment Variable Reference
 
-Open your `.env` file and review the following configurations:
+The table below lists the core settings you are most likely to touch, along with their defaults. ThinkMate ships with sensible defaults for all of them, so you only need to change what your setup requires; the rest can be left alone. Open your `.env` file and review the following configurations:
 
 | Parameter | Type | Default Value | Description |
 |---|---|---|---|
@@ -145,6 +155,8 @@ Open your `.env` file and review the following configurations:
 | `MAX_RESPONSE_CHARS` | Integer | `2000` | Generous ceiling for reply length (drives `max_tokens`); actual length is matched to the user's message. |
 | `PERSONA_FILE` | Path | `persona.md` | Location of the Markdown configuration defining the bot's tone. |
 
+This reference covers the everyday settings; the full list, including group-chat, observability, and consolidation tuning, lives in [`.env.example`](../.env.example) and is explained in the [configuration guide](development/configuration.md).
+
 ---
 
 ## 🚀 Step 5: Start the Application
@@ -152,14 +164,16 @@ Open your `.env` file and review the following configurations:
 Once variables are configured, run the following verification checks:
 
 1.  **Start Polling**:
-    Using `uv run` to execute the application:
+    "Polling" means the bot repeatedly asks Telegram for new messages, which needs no public URL or webhook setup — ideal for local development. Using `uv run` to execute the application:
     ```bash
     uv run main.py
     ```
-2.  Look for logging outputs in the terminal. The logs should report:
+2.  Look for logging outputs in the terminal. These lines confirm each subsystem came up cleanly. The logs should report:
     *   Successful connection to the MongoDB client and database.
     *   Initialization of database indexes.
     *   Polling loop initialization for the bot's username.
 
 3.  Open Telegram, search for your bot's username, and press **Start** (or send `/start`).
 4.  Confirm the bot replies with the startup welcome message.
+
+A successful welcome reply means the full loop — Telegram, the bot, the LLM, and MongoDB — is working end to end. From here, see the [architecture overview](architecture.md) to understand what happens on each message.

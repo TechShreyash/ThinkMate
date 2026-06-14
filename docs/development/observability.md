@@ -8,6 +8,18 @@
 > [database.md](database.md) (the audit-log schema and indexes), and
 > [configuration.md](configuration.md) (every tuning knob).
 
+**How to read this runbook.** It moves from concepts to action. It first explains what the
+observability layer is and isn't, then walks through every metric and the in-memory registry
+that holds them, then covers the health probes and admin commands you read those numbers
+through. The last three sections are operational: how to recognize the throughput ceiling, and
+which configuration knobs to turn in response. If you are mid-incident, skip straight to
+[Recognizing the LLM-throughput ceiling](#recognizing-the-llm-throughput-ceiling) and then
+[Tuning budgets & batching in response](#tuning-budgets--batching-in-response). A few terms used
+throughout: the **hot path** is the latency-sensitive code that runs while a user waits for a
+reply; **background work** is everything deferred off that path (memory extraction, compression,
+audit writes); and the **ceiling** is the point where incoming load outpaces what the single
+process can serve.
+
 ## Table of Contents
 1. [What this layer is (and isn't)](#what-this-layer-is-and-isnt)
 2. [The metric set](#the-metric-set)
@@ -24,8 +36,9 @@
 
 ## What this layer is (and isn't)
 
-ThinkMate runs as **one long-polling process** whose practical ceiling is **LLM throughput**,
-not the Python event loop or MongoDB (see
+ThinkMate runs as **one long-polling process** (a single Python process that continuously asks
+Telegram for new updates rather than receiving webhooks) whose practical ceiling is **LLM
+throughput**, not the Python event loop or MongoDB (see
 [performance_and_scaling.md](performance_and_scaling.md#the-single-instance-ceiling)). Phase 10
 adds a lightweight, in-process observability layer so an operator can answer one question
 quickly: **"are we near the ceiling?"**

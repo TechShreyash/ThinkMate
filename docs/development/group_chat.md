@@ -5,9 +5,17 @@
 > the behavior below reflects the shipped code. DMs are unaffected — the private-chat path is
 > byte-for-byte unchanged.
 
-How ThinkMate behaves in group chats vs. DMs, how it decides when to chime in without being
-spammy or abusing the LLM API, and how per-user affinity tunes its chattiness.
+This guide covers ThinkMate's group-chat subsystem: how the bot behaves in multi-user group and
+supergroup chats versus one-on-one direct messages (DMs), how it decides when to join a
+conversation on its own without being spammy or wasting LLM API calls, and how a per-user
+*affinity* score — a learned value between 0 and 1 that measures how welcome the bot is to a given
+person — tunes how chatty it is. Two ideas recur throughout. The *ambient gate* is a cheap,
+no-LLM funnel that filters unaddressed messages before any model call. *Affinity* biases that
+funnel per person, so the bot leans into people who engage and backs off those who do not.
 
+This guide is organized as a tour of the moving parts followed by the rules that drive them:
+behavior by chat type, the data model behind it, the ambient gate, the affinity signals that feed
+it, the single-write buffer invariant, the configuration knobs, and an implementation checklist.
 The pieces, at a glance:
 
 | Concern | Where it lives |
@@ -21,6 +29,11 @@ The pieces, at a glance:
 | `chat_members` / buffer attribution | [`app/database/models.py`](../../app/database/models.py) (see [database.md](database.md)) |
 
 ## Behavior by chat type
+
+The first decision for any incoming message is what kind of chat it arrived in, because the reply
+policy differs sharply between a private DM and a busy group. *Addressed* means the message
+targets the bot directly — an @mention, the bot's name, or a reply to one of the bot's messages.
+The rules by chat type:
 
 | Chat type | Behavior |
 |---|---|
@@ -36,6 +49,10 @@ The pieces, at a glance:
 
 ## Data model
 
+The group features rest on three storage decisions: where messages are buffered, where extracted
+memory lives, and where affinity is stored. Keeping these separate is what lets a single
+group-aware path serve DMs unchanged.
+
 * **Buffers are keyed by `chat_id`** (in a DM, `chat_id == user_id`, so DMs are unchanged).
   Each buffered message carries `sender_id` + `sender_name`, so group context is multi-party
   ("Alice: …", "Bob: …") and memory can be attributed to the right person.
@@ -46,6 +63,10 @@ The pieces, at a glance:
   default 0.5), `mode` (`auto` / `quiet` / `chatty`). Cached in memory, written through on change.
 
 ## The ambient gate (never abuses the LLM)
+
+*Ambient* replies are the messages the bot volunteers when nobody addressed it directly. The hard
+part is picking those moments without spamming the chat or burning an LLM call on every line, so
+the decision runs through a staged funnel that only reaches the model at the very end.
 
 Every group message is recorded to the buffer (cheap, for context + learning). Whether to
 *reply* runs through `AmbientGate` in [`group_gate.py`](../../app/services/group_gate.py) — a
@@ -79,7 +100,9 @@ per cooldown window.
 
 ## Affinity signals (no extra LLM calls)
 
-Affinity lives in [`affinity.py`](../../app/services/affinity.py)'s `AffinityCache` (write-through
+Affinity is the bot's running sense of how welcome it is to each person, and it moves only on
+cheap signals — never a dedicated LLM call. It lives in
+[`affinity.py`](../../app/services/affinity.py)'s `AffinityCache` (write-through
 to `chat_members`, clamped to `[0, 1]`). Signals:
 
 * **Up**: a mention / reply-to-bot is a routing-level engagement signal — the router bumps the
@@ -97,8 +120,9 @@ to `chat_members`, clamped to `[0, 1]`). Signals:
 
 ## The single-write buffer invariant
 
-Every group message must be buffered exactly once. The router enforces this by splitting the
-write by path:
+Group context is only trustworthy if every message lands in the buffer exactly once — no drops,
+no duplicates. Every group message must be buffered exactly once. The router enforces this by
+splitting the write by path:
 
 * **Addressed** messages are enqueued and the normal `enqueue_message → handle_message` path
   appends the user message itself (exactly like a DM), so the handler does **not** write them.
@@ -110,10 +134,16 @@ the handler.
 
 ## Config knobs
 
+These knobs tune the ambient gate's pacing and the affinity defaults; each is documented with its
+default in the configuration guide.
+
 `GROUP_AMBIENT_COOLDOWN_SECS`, `GROUP_AMBIENT_BASE_RATE`, `GROUP_CONTEXT_SCAN_EVERY`,
 `AFFINITY_DEFAULT`. See `docs/development/configuration.md`.
 
 ## Implementation checklist
+
+The lettered items (L1–L6) track the shipped layers of the group-chat feature; every box is
+checked, matching the Phase 9 status noted at the top of this guide.
 
 - [x] L1. Bot identity (mention/reply-to-bot detection) + chat-type routing — `is_addressed`
   in [`group_gate.py`](../../app/services/group_gate.py); routing + cached `get_me()` identity in

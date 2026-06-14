@@ -2,16 +2,42 @@
 
 This document describes how ThinkMate integrates with LLM backends, the structured-output
 strategy, the single combined reply call, retry behavior, and the MongoDB-backed audit log.
+In other words, it covers the **LLM layer** — the seam between the bot and whichever language
+model provider it talks to, plus everything that keeps those calls reliable, observable, and
+provider-agnostic.
 
 All LLM access goes through one shared `LLMService` instance (`app/services/llm_service.py`,
 exported as `llm_service`) so the whole process reuses a single client and connection pool.
+Routing every call through one service is what makes the patterns below — uniform retries,
+provider-portable JSON, and a single audit trail — possible to enforce in one place.
+
+A few terms used throughout this guide:
+
+* **Structured output** — an LLM response that must conform to a fixed JSON shape so the code
+  can parse it deterministically, rather than free-form prose.
+* **Audit trail** — a stored, after-the-fact record of every LLM call (its inputs, outputs, and
+  status) used for debugging and observability, kept in the `llm_audit_log` MongoDB collection.
+* **Hot path** — the latency-sensitive code that runs while a user is waiting for a reply; work
+  that would slow it down is deferred to the background.
+
+What's in this doc:
+
+* **Structured outputs** — how JSON is coaxed out of the model and validated, and why
+  `json_object` is the default.
+* **The single combined reply call** — how one call produces both the conversational reply and
+  the optional emoji reaction (and the group-chat affinity signal).
+* **Schema definitions** — the Pydantic models for memory extraction, compression, and the
+  group-chat additions.
+* **The centralized audit trail** — how every LLM call is traced without slowing the user down.
+* **Prompt engineering templates** — the prompt builders under `app/prompts/`.
 
 ---
 
 ## ⚡ Structured Outputs: `json_object` by default
 
-Every structured call is validated against a **Pydantic** schema. The *mechanism* used to
-get JSON from the model is controlled by `LLM_STRUCTURED_MODE`:
+Every structured call is validated against a **Pydantic** schema — Pydantic being the Python
+library that parses and type-checks JSON into typed model objects, rejecting anything malformed.
+The *mechanism* used to get JSON from the model is controlled by `LLM_STRUCTURED_MODE`:
 
 * **`json_object` (default)** — sends `response_format={"type": "json_object"}` with the
   schema appended to the system prompt, then validates the result with Pydantic. This is
@@ -28,14 +54,15 @@ get JSON from the model is controlled by `LLM_STRUCTURED_MODE`:
 ### Transient-error retries
 `_with_retries` wraps API calls and retries transient failures (timeout, connection, 429,
 5xx) with exponential backoff (`LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECS`). Client errors
-like `400` are not retried.
+like `400` are not retried, because a malformed request will fail the same way on every attempt.
 
 ---
 
 ## 💬 Single combined reply call (`generate_reply_bundle`)
 
 The conversational reply and the optional Telegram emoji reaction are produced in **one**
-LLM call (not two). `generate_reply_bundle` requests a strict JSON object:
+LLM call (not two). Folding both into a single call halves the per-message LLM cost and latency.
+`generate_reply_bundle` requests a strict JSON object:
 
 ```json
 {"reply": "<natural conversational message>", "reaction": "<single emoji or empty>"}
@@ -161,6 +188,8 @@ by the caller from the segment's own name→id map (see [memory_engine.md](memor
 The four LLM call types — `chat_reply` (reply **and** reaction), `memory_extraction`,
 `group_memory_extraction` (multi-party group extraction), and `memory_compression` — are traced
 in `LLMService`, recording prompt inputs, outputs, parsed JSON, status, and error tracebacks.
+Centralizing this trace in one service means every call type is logged the same way, with no
+per-caller bookkeeping.
 
 Three properties keep this safe at scale:
 
@@ -168,6 +197,7 @@ Three properties keep this safe at scale:
    reply is never delayed by an audit insert.
 2. **TTL-friendly timestamp.** `timestamp` is stored as a real `datetime` (not an ISO string)
    so the TTL index in `init_db` (`AUDIT_LOG_RETENTION_DAYS`) actually expires old entries.
+   (TTL — "time to live" — is MongoDB's mechanism for auto-deleting documents after an age.)
 3. **Bounded size.** Long strings (prompts, histories) are truncated via `_truncate` before
    insertion, so a single document can't balloon.
 
@@ -192,6 +222,9 @@ def _fire_log(self, *args, **kwargs):
 
 
 ## ✍️ Prompt Engineering Templates (`app/prompts/`)
+
+Each prompt builder lives in its own module under `app/prompts/` and assembles the text sent to
+the model for a specific job:
 
 1.  **Extraction Prompt (`extraction_prompt.py`)**: Directs the LLM to process a conversation segment, identifying objective facts, subjective beliefs, and timeline milestones, mapping updates relative to the user's current memory card.
 2.  **Compression Prompt (`compression_prompt.py`)**: Instructs the LLM to summarize and trim user details holistically when the memory size breaches the character budget limit (4,000 characters).

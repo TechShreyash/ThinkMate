@@ -1,12 +1,14 @@
 # Testing Infrastructure & Test Suite Guide
 
-This guide documents the ThinkMate testing infrastructure, explaining what each component in the `tests/` folder does, how MongoDB is mocked in-memory during testing, and how to execute the test suite.
+This guide documents the ThinkMate testing infrastructure — the setup that lets the project's automated tests run quickly and in isolation. It explains what each component in the `tests/` folder does, how MongoDB is mocked in-memory during testing, and how to execute the test suite. The focus here is the test subsystem itself, not the bot's runtime behavior; for that, see the subsystem guides linked throughout.
 
 ---
 
 ## 📋 Overview
 
-ThinkMate has a robust test suite powered by `pytest` and `pytest-asyncio`. To make execution fast and independent of external resources, **all tests are run against an in-memory database mock**. You do not need a running MongoDB server instance to execute the tests.
+ThinkMate has a robust test suite powered by `pytest` (Python's standard testing framework) and `pytest-asyncio` (its companion plugin for exercising `async`/`await` code). To make execution fast and independent of external resources, **all tests are run against an in-memory database mock** — a stand-in object that behaves like the real database but keeps its data in process memory. You do not need a running MongoDB server instance to execute the tests.
+
+This guide is organized in three parts: a map of the `tests/` folder, a detailed breakdown of what each test file verifies, and the commands you use to run everything.
 
 ---
 
@@ -49,13 +51,15 @@ tests/
 
 ## 🔍 Detailed Component Breakdown
 
+The sections below walk through the suite file by file, grouped roughly by the subsystem each one exercises. Every entry names the file and summarizes the specific behaviors its test cases lock in, so you can find the right place to add or update a test.
+
 ### 1. `tests/conftest.py` (The Mocking Layer)
-Because `mongomock` is a synchronous in-memory MongoDB mock library, it does not natively support the async `motor` driver. The `conftest.py` file defines a custom async wrapper to bridge this gap:
+A `conftest.py` is a pytest file that holds shared fixtures (reusable setup objects) and configuration for the tests beside it. Because `mongomock` is a synchronous in-memory MongoDB mock library, it does not natively support the async `motor` driver (the async MongoDB client the application uses). The `conftest.py` file defines a custom async wrapper to bridge this gap:
 
 *   **`AsyncMockCursor`**: Simulates the behavior of motor's async cursors (supporting async iteration using `__aiter__` and `__anext__`).
 *   **`AsyncMockCollection`**: Intercepts queries (like `find_one`, `update_one`, `find_one_and_update`, `insert_one`, `delete_one`, `delete_many`, `create_index`, and `find`) and maps them to synchronous calls on the underlying `mongomock` collection wrapper.
 *   **`AsyncMockDatabase` / `AsyncMockClient`**: Wraps the database and client instances.
-*   **`mock_mongodb` Fixture**: An autouse fixture that dynamically patches `app.database.connection.get_db` and `app.database.connection.get_db_client` globally for all tests. This ensures that every test gets a clean, isolated, in-memory MongoDB environment automatically.
+*   **`mock_mongodb` Fixture**: An autouse fixture (one that applies automatically without a test asking for it) that dynamically patches `app.database.connection.get_db` and `app.database.connection.get_db_client` globally for all tests. This ensures that every test gets a clean, isolated, in-memory MongoDB environment automatically.
 
 ---
 
@@ -69,7 +73,7 @@ Validates the database accessors inside `app/database/models.py`:
 ---
 
 ### 3. `tests/test_guards_and_compression.py` (Memory Constraints & Budgets)
-Validates limits, formatted system prompts, and memory compression:
+Validates limits, formatted system prompts, and memory compression (the step that condenses a user's stored memory when it grows too large):
 
 *   **`test_input_guard_config`**: Confirms all default limits are configured correctly (e.g. `USER_MEMORY_BUDGET_CHARS = 4000`).
 *   **`test_build_memory_block_and_compression_flag`**: Ensures the prompt context block compiling structures Facts, Subjective Beliefs, Events, and Mood correctly, and sets the `needs_compression` flag if the compiled length breaches the character budget.
@@ -78,7 +82,7 @@ Validates limits, formatted system prompts, and memory compression:
 ---
 
 ### 4. `tests/test_batching_and_concurrency.py` (Concurrency & Flow Controls)
-Validates the message batching queue, rate limiting, and execution locks inside the `UserTaskManager`:
+Validates the message batching queue, rate limiting, and execution locks inside the `UserTaskManager` (the component that coordinates per-user work). Batching here means grouping several quick messages into one request:
 
 *   **`test_message_batching_delay`**: Verifies that rapid-fire messages sent within the delay window are coalesced into a single combined batch request.
 *   **`test_character_count_extraction_trigger`**: Verifies that a background memory extraction task is spawned when the chat buffer character count breaches the threshold.
@@ -91,7 +95,7 @@ Validates the message batching queue, rate limiting, and execution locks inside 
 ---
 
 ### 5. `tests/test_hardening.py` (Hardening & Resilience Regressions)
-Locks in the Phase 7–8 fixes so they can't regress:
+Locks in the Phase 7–8 fixes so they can't regress (a regression is the reappearance of a previously fixed bug):
 
 *   **`test_atomic_trim_preserves_concurrent_appends`**: the atomic `$pull` trim keeps messages appended during a trim (the old read-slice-overwrite would have lost them).
 *   **`test_buffer_hard_cap`**: the messages array never exceeds `CHAT_BUFFER_HARD_CAP`.
@@ -108,7 +112,7 @@ set (tolerant of variation selectors).
 ---
 
 ### 7. Group Chat Suite *(Phase 9)*
-Seven files lock in group behavior while proving the DM path is untouched:
+Seven files lock in group behavior while proving the DM (direct-message) path is untouched:
 
 *   **`tests/test_group_models.py`** — each buffered message persists `sender_id`/`sender_name`;
     `sender_id` defaults to `chat_id` when omitted; a DM-style call keeps `_id == chat_id`; the
@@ -154,7 +158,7 @@ Locks in two memory-compression hardening guarantees:
 ---
 
 ### 9. Bugfix Suite — DM "skip bot commands" (`test_command_skip.py`, `test_command_preservation.py`)
-Two files capture the bug-condition and preservation properties of the catch-all text handler:
+Two files capture the bug-condition and preservation properties of the catch-all text handler (the handler that receives any message no more specific handler claimed):
 
 *   **`tests/test_command_skip.py`** — a bot command (e.g. `/foo`, `/foo@ThinkMateBot`) reaching
     the catch-all `handle_user_message` must be ignored: neither enqueued to the pipeline nor
@@ -166,7 +170,7 @@ Two files capture the bug-condition and preservation properties of the catch-all
 ---
 
 ### 10. Observability Suite *(Phase 10)*
-Four files cover the in-process metrics/health layer:
+Four files cover the in-process metrics/health layer (the counters, gauges, and health probes that report how the running bot is doing):
 
 *   **`tests/test_metrics.py`** — the `MetricsRegistry` contract: `incr` accumulates and
     auto-creates counters, `set_gauge` replaces, `observe`/`record_latency` build count/sum/max
@@ -190,7 +194,7 @@ Four files cover the in-process metrics/health layer:
 
 ## 🚀 Running the Tests
 
-To run the test suite, always use `uv` from the repository root:
+To run the test suite, always use `uv` (the project's Python package manager and task runner) from the repository root:
 
 ```bash
 uv run python -m pytest

@@ -1,6 +1,14 @@
 # Database Architecture & Schema Design (MongoDB)
 
-This guide documents the persistent storage layout of the ThinkMate system, MongoDB document structures, connection management using `motor`, and implementation details for asynchronous database interactions.
+This guide documents the persistent storage layout of the ThinkMate system, MongoDB document structures, connection management using `motor`, and implementation details for asynchronous database interactions. In short, it is the reference for *where* the bot keeps its state and *how* that state is read and written safely under concurrent background tasks.
+
+ThinkMate persists everything in MongoDB, a document database that stores records as nested JSON-like documents rather than rows across normalized tables. If you are new to the project, this guide is the place to learn the shape of each stored document, the indexes that keep lookups fast, and the patterns used to update memory without losing data.
+
+**What this guide covers:**
+
+- **Collection & document schema design** — the three primary collections (`user_profiles`, `chat_buffers`, `llm_audit_log`) plus the group-chat `chat_members` collection, each with an example document.
+- **CRUD models & operations** — the atomic, concurrency-safe read/write helpers in `models.py` for chat history and memory updates. (CRUD is the standard create/read/update/delete set of database operations.)
+- **Design decisions & FAQ** — the reasoning behind the major storage choices, including the migration from SQLite to MongoDB.
 
 ---
 
@@ -61,7 +69,7 @@ Tracks biographical profiles, communication preferences, direct emotional states
 ---
 
 ### 2. `chat_buffers` Collection
-Manages the sliding window of active conversation history. Kept separate from profiles to
+Manages the sliding window of active conversation history — that is, only the most recent stretch of messages is retained, and older ones fall out of the window as new ones arrive. It is kept separate from profiles to
 optimize high-frequency chat reads and writes.
 
 * **Primary Key (`_id`)**: Telegram **chat ID** (`int`). In a DM, `chat_id == user_id`, so DMs
@@ -95,7 +103,7 @@ optimize high-frequency chat reads and writes.
 ---
 
 ### 3. `llm_audit_log` Collection
-A centralized audit log collection to trace all inputs, prompts, API parameters, raw response text, parsed outputs, and latency/error information for LLM executions.
+A centralized audit log collection to trace all inputs, prompts, API parameters, raw response text, parsed outputs, and latency/error information for LLM executions. The audit log is an append-only diagnostic trail: it records what was sent to and received from the language model so failures can be traced after the fact.
 
 * **Primary Key (`_id`)**: Auto-generated `ObjectId`
 * **Compound Index**: `("user_id", 1), ("timestamp", -1)` to optimize log inspection and chronological query lookups per user.
@@ -124,7 +132,7 @@ A centralized audit log collection to trace all inputs, prompts, API parameters,
 
 ### 4. `chat_members` Collection *(group chat — Phase 9, implemented)*
 Stores per-(chat, user) affinity and ambient-reply mode so the bot can tune how readily it
-engages each person in a group. Cached in memory and written through on change, so it adds no
+engages each person in a group. Here *affinity* is a 0..1 score of how warmly the bot leans toward replying to a given person, and *mode* is that person's reply preference. Cached in memory and written through on change, so it adds no
 hot-path read. Has no effect in DMs.
 
 * **Primary Key (`_id`)**: composite string `"{chat_id}:{user_id}"`.
@@ -155,7 +163,7 @@ the DB on the hot path.
 
 ---
 
-Database connections are managed asynchronously via `motor.motor_asyncio.AsyncIOMotorClient`. A single database client singleton is instantiated and reused.
+Database connections are managed asynchronously via `motor.motor_asyncio.AsyncIOMotorClient`. A single database client singleton is instantiated and reused — a *singleton* here means one shared client object is created on first use and handed out on every subsequent call, so the bot never opens redundant connection pools.
 
 ```python
 # app/database/connection.py
@@ -202,6 +210,8 @@ async def init_db():
         logger.warning(f"Could not create audit-log TTL index: {e}")
 ```
 
+A TTL (time-to-live) index is a MongoDB index that automatically deletes documents once they exceed a configured age, which is how old audit entries expire without a manual cleanup job.
+
 > **Index summary.** `user_profiles` and `chat_buffers` are matched by `_id` (no secondary
 > indexes needed). `chat_members` is matched by its composite `_id` string. `llm_audit_log`
 > carries a compound `(user_id, 1),(timestamp, -1)` index plus a `(timestamp, 1)` TTL index.
@@ -211,7 +221,7 @@ async def init_db():
 
 ## 🛠️ CRUD Models & Operations (`models.py`)
 
-CRUD methods are designed to perform atomic document modifications, avoiding raw SQL statements or SQLite table constraints.
+CRUD methods are designed to perform atomic document modifications, avoiding raw SQL statements or SQLite table constraints. *Atomic* here means each update lands as a single indivisible MongoDB operation, so a concurrent task never observes a half-applied write.
 
 ### 1. Active Chat History Operations
 Chat history is appended via `find_one_and_update` so the post-update array is returned in a
@@ -276,7 +286,7 @@ async def delete_oldest_buffer_messages(db, chat_id: int, count: int):
 ### 2. Surgical Memory Updates (`save_extracted_memories`)
 When the background Extractor processes message history, updates are applied inside the user's
 profile document in a **single read-modify-write** (load the arrays once, mutate in memory, then
-one `$set`). This is the efficient pattern — never a query per fact/belief/event. It supports
+one `$set`) — a read-modify-write reads the current arrays, changes them in process memory, and writes the whole result back in one operation. This is the efficient pattern — never a query per fact/belief/event. It supports
 full **hard deletion** of refuted facts, outdated beliefs, and old events, applies the same CRUD
 to all three arrays, and is robust to LLM phrasing drift:
 
@@ -320,6 +330,8 @@ async def save_extracted_memories(db, user_id: int, extraction: MemoryExtraction
 ---
 
 ## 🙋 Design Decisions & FAQ
+
+This section captures the "why" behind the storage model. Each entry records a decision the project made and the reasoning that led to it, so future contributors understand the trade-offs before changing them.
 
 ### Q1: Why did we migrate from SQLite to MongoDB?
 SQLite requires a local database file, which restricts multi-instance bot scaling, horizontal container deployments (like Docker/Kubernetes on cloud platforms), and creates file locking risks when concurrent background tasks write to disk. MongoDB enables cloud-native bot scaling, offers document nesting that maps naturally to Python's Pydantic schemas, and supports high-concurrency database drivers (`motor`).

@@ -5,6 +5,20 @@
 > scale. Read this alongside [architecture.md](../architecture.md) and
 > [hardening_plan.md](hardening_plan.md).
 
+This guide is the performance, efficiency, and scaling reference for ThinkMate's
+single-instance design. It explains how the bot keeps replies fast and LLM costs low, where the
+one-process architecture tops out, and the concrete steps to scale horizontally when that day
+comes. A few terms recur throughout: the **single-instance** design means the whole bot runs as
+one process that holds per-user state in memory; the **hot path** is the short sequence of work
+between receiving a user's message and sending the reply; and **horizontal scale** means running
+several interchangeable copies (replicas) of the bot behind a load balancer.
+
+New to the codebase? Skim the section list below to see how the document is laid out, then read
+[architecture.md](../architecture.md) for the system-wide picture and
+[hardening_plan.md](hardening_plan.md) for the reliability work that complements the performance
+rules here. The sections move from goals, to the request hot path, to cost and efficiency rules,
+to the data layer, and finally to where a single instance stops and how to grow past it.
+
 ## Table of Contents
 1. [Design goals & priorities](#design-goals--priorities)
 2. [The hot path (per message batch)](#the-hot-path-per-message-batch)
@@ -21,6 +35,10 @@
 
 ## Design goals & priorities
 
+These priorities are the tie-breaker for every performance decision in the system: when two
+goals pull in opposite directions, the higher-ranked one wins. Listing them explicitly keeps the
+trade-offs honest and consistent across the codebase.
+
 In strict priority order (a tie is broken by the higher item):
 
 1. **Responsiveness** — the user gets a reply fast; nothing slow runs on the reply path.
@@ -36,8 +54,10 @@ higher-priority item wins and the trade is documented.
 
 ## The hot path (per message batch)
 
-The hot path is everything between "a user's batch is ready" and "the reply is sent". It must
-stay minimal. The target shape:
+The hot path is everything between "a user's batch is ready" and "the reply is sent". A *batch*
+is the set of rapid-fire messages from one user that are coalesced and answered together (see
+[LLM call minimization](#llm-call-minimization)). Because the user is waiting during this window,
+the hot path must stay minimal — anything that can run later is pushed off it. The target shape:
 
 ```mermaid
 graph LR
@@ -67,6 +87,10 @@ If a feature wants to add a hot-path round-trip or LLM call, it must justify it 
 
 ## Cost model & budgets
 
+This table is the per-batch budget the hot path is held to. It makes the cost of answering one
+user explicit so any regression (an extra LLM call, an extra query) is easy to spot. "Amortized"
+values are work that happens only occasionally and is averaged over many messages.
+
 | Resource | Per message batch | Notes |
 |---|---|---|
 | LLM calls (chat) | **1** | reply + reaction merged into one `json_object` call |
@@ -83,6 +107,10 @@ context and learning, but the decision to *reply* is gated by a no-LLM funnel.
 ---
 
 ## Efficiency rules (do / don't)
+
+These rules turn the priorities and budgets above into concrete habits. The common thread is to
+do work once, in memory, and to never let a structure grow without a cap. Following them keeps
+the hot path within its round-trip budget and protects the process from unbounded growth.
 
 **DO**
 - Reuse the compiled memory block for both the prompt *and* the `needs_compression` check —
@@ -106,6 +134,11 @@ context and learning, but the decision to *reply* is gated by a no-LLM funnel.
 ---
 
 ## Database access patterns & indexes
+
+The data layer is designed so that the most frequent operations — the hot-path reads and writes —
+are the cheapest. Each collection is keyed for O(1)/O(log n) access and strict per-tenant
+isolation, meaning one user's or chat's data is never mixed with another's. The table below maps
+each collection to its key, indexes, and how it is accessed.
 
 All collections are keyed for O(1)/O(log n) access and strict per-tenant isolation.
 
@@ -132,8 +165,10 @@ All collections are keyed for O(1)/O(log n) access and strict per-tenant isolati
 
 ## Bounded memory at 50k+ users
 
-In-process state is the main scaling risk for a single instance. Every in-memory structure
-has a bound:
+In-process state is the main scaling risk for a single instance. A long-running process that
+keeps per-user data in RAM will eventually exhaust memory if anything is allowed to accumulate
+without limit, so every in-memory structure is given an explicit bound and a policy that reclaims
+it once a user goes idle:
 
 | Structure | Owner | Bound |
 |---|---|---|
@@ -151,6 +186,10 @@ A periodic sweeper evicts idle `UserState`; the throttle map self-prunes on acce
 
 ## LLM call minimization
 
+LLM calls are both the largest cost and the throughput ceiling (priority 3 above), so the system
+works hard to make fewer of them. The techniques below either merge two calls into one, defer
+work until a threshold is crossed, or filter out work before any call is made:
+
 The LLM is the throughput ceiling, so calls are cut aggressively:
 
 - **Merged reply+reaction** — one call instead of two on every message.
@@ -167,6 +206,11 @@ The LLM is the throughput ceiling, so calls are cut aggressively:
 
 ## Background work & locking
 
+Work that the user does not have to wait for is moved off the hot path and run in the background,
+and per-user locks keep that concurrent work from corrupting shared state. The two lock types
+below serialize different pipelines so the reply path and the memory-maintenance path never step
+on each other:
+
 - `chat_lock` (per user) serializes the reply pipeline for one user so batches don't interleave.
 - `memory_lock` (per user) serializes the extractor and compressor so they never corrupt each
   other's read-modify-write on `user_profiles`.
@@ -182,9 +226,11 @@ The LLM is the throughput ceiling, so calls are cut aggressively:
 
 ## The single-instance ceiling
 
-ThinkMate runs as **one long-polling process** with in-memory per-user state. This is a
-deliberate choice: it is simpler, cheaper, and correct up to a high user count. The practical
-ceiling is **LLM throughput**, not the Python event loop or MongoDB.
+ThinkMate runs as **one long-polling process** with in-memory per-user state. ("Long-polling"
+means the bot repeatedly asks Telegram for new updates over a single connection, rather than
+having updates pushed to it.) This is a deliberate choice: it is simpler, cheaper, and correct up
+to a high user count. The practical ceiling is **LLM throughput**, not the Python event loop or
+MongoDB.
 
 What stays healthy at scale (documented above): bounded memory, ≤1 chat LLM call per batch,
 ~3 hot-path round-trips, off-hot-path audit, atomic buffer ops.
@@ -196,7 +242,8 @@ What stays healthy at scale (documented above): bounded memory, ≤1 chat LLM ca
 
 The first is almost always the real limit — and it is solved by a faster/parallel LLM
 endpoint, not by more bot replicas. Only scale horizontally when the event loop or DB is the
-proven bottleneck.
+proven bottleneck. Reaching for more replicas before that point adds the complexity of
+distributed state without removing the actual constraint.
 
 These saturation signals are exactly what the in-process metrics surface (LLM
 volume/latency, throttle/queue drops, active conversations) — see
@@ -207,8 +254,10 @@ them via `/health`.
 
 ## Horizontal-scale migration path (future)
 
-Not built in v1, but specified so the jump is mechanical, not a rewrite. The only thing that
-blocks multiple replicas today is **in-process state** and **single-consumer long-polling**.
+Not built in v1, but specified so the jump is mechanical, not a rewrite. Capturing the plan now
+keeps today's code shaped for it, so scaling out later is a series of well-understood swaps
+rather than a redesign. The only thing that blocks multiple replicas today is **in-process
+state** and **single-consumer long-polling**.
 
 **Step 1 — Externalize state behind an interface.** Introduce a `StateStore` abstraction with
 two implementations: the current in-memory one (default) and a Redis-backed one. It owns:

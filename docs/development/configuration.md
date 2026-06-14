@@ -1,6 +1,28 @@
 # Configuration & Tuning Parameter Reference
 
-This guide provides a detailed description of all environment variables configured in the `.env` file of the ThinkMate system. Use this reference to tune conversational behavior, API budgets, batching speeds, and security rate limits.
+ThinkMate reads its runtime configuration from **environment variables** — values supplied through the `.env` file in the project root and loaded once at startup by `app/config.py`. This guide is the reference for every one of those variables: what each one does, the value it falls back to when you leave it unset, and how to adjust it safely. Use it to tune conversational behavior, API budgets, batching speeds, memory limits, and security rate limits without changing any application code.
+
+Every setting below is documented in a table with four columns: **Parameter** (the environment-variable name), **Type** (the value's shape — `String`, `Integer`, `Float`, `Bool`, `URL`, or `Path`), **Default** (the value used when the variable is unset), and **Description & How to Adjust** (what the setting controls and the trade-offs of changing it). A handful of terms recur throughout, so they are defined once here:
+
+- **Environment variable** — a key/value pair read from the process environment (populated here from `.env`); a change takes effect on the next restart.
+- **TTL (time-to-live)** — an expiry window after which a stored value is automatically dropped, bounding how much state can accumulate.
+- **Backoff** — a deliberately growing wait between retries, so a struggling service is not hammered.
+- **Master switch** — a single setting that, at its default, keeps an optional subsystem turned off entirely.
+
+The variables are grouped by the subsystem they govern, in the order they appear below:
+
+- **🔑 Credentials & Connection Settings** — Telegram and MongoDB connection details plus audit-log retention.
+- **🧠 LLM Server Settings** — the inference endpoint, model selection, retries, and sampling temperatures.
+- **📐 Memory Tuning & Budget Constraints** — buffer sizes and the character budgets that drive extraction and compression.
+- **⏱️ Queue & Message Batching** — how the bot groups rapid-fire messages and evicts idle per-user state.
+- **🛡️ Input & Output Security Guards** — rate limits and length caps that protect against spam and abuse.
+- **👤 Persona Settings** — the persona-file path and the emoji-reaction switch.
+- **👥 Group Chat & Ambient Replies** — how the bot behaves in groups and supergroups.
+- **📊 Observability / ops** — in-process metrics and the admin `/health` and `/metrics` commands.
+- **🌙 Consolidation (Phase 11)** — the optional background "dreaming" pass over a user's whole profile.
+- **💞 Engagement / Mood History (Phase 12)** — the bounded mood-trend history.
+- **🔔 Proactive Check-ins (Phase 12)** — the optional, memory-grounded "thinking of you" scheduler.
+- **🔌 Connection Pool (advanced)** — MongoDB driver connection-pool tuning.
 
 ---
 
