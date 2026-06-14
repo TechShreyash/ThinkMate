@@ -18,6 +18,7 @@ Rather than relying on simple session timeouts or expensive vector databases, Th
 *   **Group Chat & Affinity** *(supported; see [group_chat.md](docs/development/group_chat.md))*: In groups the bot always replies when addressed (mention, name, or reply-to-bot) and otherwise chimes in selectively through a no-LLM ambient gate (cooldown → keyword/scan-tick → affinity-weighted probability), keeping it engaging without spam or API abuse. Per-(chat, user) affinity and `/quiet` `/chatty` modes tune its chattiness, and group memory is extracted multi-party while staying attributed per user. DMs are unchanged.
 *   **Built for load**: Single long-polling instance hardened for 50k+ users — one LLM call per reply, ~3 DB round-trips on the hot path, bounded in-memory state, and a documented scale-out path (see [performance_and_scaling.md](docs/development/performance_and_scaling.md)).
 *   **Observability & ops** *(Phase 10)*: A dependency-free, in-process metrics registry tracks LLM volume/latency, throttle and queue drops, active conversations, and background-job runs. An admin `/health` command reports liveness, readiness, and a metrics summary, with an optional periodic metrics logger — all explained in the [Observability & Ops Runbook](docs/development/observability.md).
+*   **Memory Consolidation ("dreaming" pass)** *(Phase 11)*: An optional periodic background pass reviews each user's whole profile to refresh the summary/style, merge duplicates, and synthesize a small bounded set of durable **behavioral insights** that localized extraction can't see. It runs entirely off the hot path under the shared memory lock, never wipes memory on failure, and is **disabled by default** — see [memory_engine.md](docs/development/memory_engine.md#-phase-11--periodic-consolidation-the-dreaming-pass-implemented).
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `motor` (MongoDB async driver) for high performance and standard async workflow.
 
 ---
@@ -70,6 +71,7 @@ ThinkMate/
 │   │   ├── memory_extractor.py     # Memory extraction LLM interface (DM + multi-party group)
 │   │   ├── memory_loader.py        # System prompt memory compiler
 │   │   ├── memory_compressor.py    # LLM-powered memory compressor + budget enforcement
+│   │   ├── memory_consolidator.py  # Periodic "dreaming" consolidation pass + insights (Phase 11)
 │   │   ├── metrics.py              # In-process metrics registry (counters, gauges, timers)
 │   │   ├── health.py               # Liveness/readiness helpers + periodic metrics logger
 │   │   └── user_task_manager.py    # Concurrency, batching, queues & typing indicators
@@ -83,7 +85,8 @@ ThinkMate/
 │   │   ├── __init__.py
 │   │   ├── system_prompt.py        # Chat response prompt assembler
 │   │   ├── extraction_prompt.py    # Structured JSON extraction template
-│   │   └── compression_prompt.py   # Memory compression instructions
+│   │   ├── compression_prompt.py   # Memory compression instructions
+│   │   └── consolidation_prompt.py # Consolidation ("dreaming") + insights synthesis prompt
 │   │
 │   └── __init__.py                 # Package init + loguru logging setup
 │

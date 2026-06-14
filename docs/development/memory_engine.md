@@ -202,3 +202,119 @@ The group path, `extract_and_trim_group(chat_id)`:
 
 DMs are unchanged (a single participant). See [group_chat.md](group_chat.md) and the
 `GroupMemoryExtraction` schema in [llm_integration.md](llm_integration.md).
+
+---
+
+## 🌙 Phase 11 — Periodic consolidation (the "dreaming" pass) *(implemented)*
+
+Localized extraction (above) only ever sees one recent buffer window, and compression only fires
+when the compiled profile is over budget. Neither can step back and look at the user's **whole**
+profile over a long horizon. Phase 11 adds that long-horizon pass — a periodic background
+"dreaming" step that reviews the complete profile to refresh the summary/style, merge and
+de-duplicate items, and synthesize a small set of durable **behavioral insights** that only emerge
+across the entire history.
+
+It is modeled directly on compression: **one LLM call, a single-write apply, never-wipe-on-failure,
+deterministic budget enforcement, and metrics**. It runs entirely off the hot path and is
+**disabled by default** (see [configuration.md](configuration.md#-consolidation-phase-11)).
+
+### Pipeline
+
+The flow is: **scheduler → `run_consolidator` (under `memory_lock`) → one `consolidate_memory` call
+→ `apply_consolidation` (single write) → `_enforce_budget`**.
+
+1. **Scheduler** ([health.py](../../app/services/health.py)) — `start_consolidation_scheduler`
+   starts a periodic loop (`_consolidation_loop`) when enabled, mirroring the Phase 10 metrics
+   logger. It is:
+   - **Periodic** — every `CONSOLIDATION_SCAN_INTERVAL_SECS` (default `3600`) it runs one scan.
+   - **Disabled by default** — when `CONSOLIDATION_INTERVAL_SECS <= 0` the starter is a no-op and
+     returns `None`, so the feature is entirely off unless explicitly enabled. `main.py` starts the
+     scheduler after `init_db()`, under the same asyncio loop.
+   - **Bounded per scan** — each `_run_consolidation_scan` processes at most
+     `CONSOLIDATION_MAX_USERS_PER_SCAN` (default `50`) due users.
+   - **Self-healing** — one user's failure is logged and skipped without aborting the scan, and any
+     loop-iteration error is swallowed so the loop never crashes (it only exits on cancellation).
+2. **`run_consolidator`** ([user_task_manager.py](../../app/services/user_task_manager.py)) —
+   dispatches each due user under that conversation's shared `memory_lock`, so consolidation never
+   races the extractor or compressor for the same id. No per-user cooldown is needed — cadence is
+   governed by `last_consolidated_at` at scan time (see "due" below).
+3. **`consolidate_user_memory`** ([memory_consolidator.py](../../app/services/memory_consolidator.py))
+   — builds the memory block, makes **one** `consolidate_memory` LLM call, applies the result in a
+   single write, then enforces the budget. It increments `consolidation.runs` on entry and
+   `consolidation.success` / `consolidation.failure` on outcome; it never raises into the scheduler.
+4. **`apply_consolidation`** ([models.py](../../app/database/models.py)) — a single-`$set` write
+   (mirroring `replace_user_memory`) that refreshes summary/style (only when present), replaces
+   facts/beliefs/events with the merged layouts, preserves the latest emotional state, writes the
+   bounded `insights` list, and advances `last_consolidated_at` / `updated_at`.
+5. **`_enforce_budget`** — the same deterministic, single-read/single-write enforcement reused from
+   the compressor, so the consolidated profile still fits `USER_MEMORY_BUDGET_CHARS`.
+
+```python
+# app/services/memory_consolidator.py (essence)
+async def consolidate_user_memory(user_id: int) -> None:
+    metrics.incr("consolidation.runs")
+    try:
+        async with db_session() as db:
+            memory_text, _ = await build_memory_block(db, user_id)
+            consolidation = await llm_service.consolidate_memory(user_id, system_prompt, memory_text)
+            if consolidation is None:
+                metrics.incr("consolidation.failure")
+                return                                  # never wipe — and don't advance the clock
+            await models.apply_consolidation(db, user_id, consolidation)
+            await _enforce_budget(db, user_id)          # single read + single write
+            metrics.incr("consolidation.success")
+    except Exception as e:
+        metrics.incr("consolidation.failure")
+```
+
+### The never-wipe contract
+
+Like compression, consolidation **never wipes memory on failure**: `consolidate_memory` returns
+`None` when the LLM call fails or the JSON can't be validated. On `None` the write is **skipped**,
+so existing memory is preserved. Crucially, a `None` result **also does not advance**
+`last_consolidated_at` — because the clock is only set inside `apply_consolidation`, which is never
+reached on failure. That means a failed run leaves the user **still due**, so the next scan retries
+naturally rather than silently waiting a whole interval.
+
+### Behavioral insights — a dedicated, bounded list
+
+Insights are the unique value of this pass: synthesized, higher-level reads on how the user behaves
+or who they are over time (e.g. "Tends to get stressed during exam season; values reassurance
+then"). They are produced into a **dedicated `insights` list** on the user profile, distinct from
+facts (atomic details the user shared) and beliefs (the user's own stated opinions):
+
+- **Bounded** — `apply_consolidation` truncates to `MAX_INSIGHTS` (default `5`), and the prompt is
+  also told the cap, so the list can never grow unbounded.
+- **Rendered in the prompt** — `compile_memory_text`
+  ([memory_loader.py](../../app/services/memory_loader.py)) emits a dedicated
+  `=== BEHAVIORAL INSIGHTS ===` section (it reads `insights` defensively, showing
+  `(No long-term insights yet)` when empty). `ensure_user` initializes `insights=[]` on insert.
+- **Never dropped by budget enforcement** — the deterministic enforcer only sheds the
+  lowest-priority items (oldest events → beliefs → facts). Insights are intentionally **not** in
+  that drop order, so the hard-won long-horizon synthesis survives a tight budget.
+
+**Why a dedicated list rather than folding insights into beliefs?** Beliefs are the user's *own*
+stated convictions; an insight is *the bot's* synthesized inference about patterns. Keeping them
+separate preserves that provenance distinction (so an inferred pattern is never mistaken for
+something the user explicitly said), lets insights be capped and prioritized independently, and
+keeps them safe from budget-driven eviction. The consolidation prompt enforces the same boundary —
+it must not fold an insight into facts or beliefs.
+
+### How "due" is determined
+
+`find_users_due_for_consolidation` ([models.py](../../app/database/models.py)) returns up to `limit`
+users that satisfy **both**:
+
+- **Time** — `last_consolidated_at` is null/absent **OR** older than `now - CONSOLIDATION_INTERVAL_SECS`
+  (this predicate runs in the Mongo query), and
+- **Substance** — the user has at least `CONSOLIDATION_MIN_ITEMS` (default `8`) stored items, counted
+  as `len(facts) + len(beliefs) + len(events)` (applied in Python, since array-length predicates
+  aren't portable to the mongomock test backend).
+
+Collection stops as soon as `limit` qualifying users are found, so the helper's own work is bounded.
+The `CONSOLIDATION_MIN_ITEMS` floor avoids spending an LLM call "dreaming" over a profile too thin to
+yield any durable pattern.
+
+> See [configuration.md](configuration.md#-consolidation-phase-11) for every consolidation key, its
+> default, and tuning guidance, and the `MemoryConsolidation` / `ConsolidatedInsight` schemas in
+> [schemas.py](../../app/services/schemas.py).

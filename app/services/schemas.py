@@ -108,3 +108,16 @@ class MemoryCompression(BaseModel):
     compressed_beliefs: list[CompressedBelief] = Field(default_factory=list)
     compressed_events: list[CompressedEvent] = Field(default_factory=list)
     emotional_state: Optional[EmotionLog] = None
+
+# --- CONSOLIDATION SCHEMAS ---
+class ConsolidatedInsight(BaseModel):
+    content: str = Field(description="A durable, higher-level behavioral/identity observation synthesized across the user's whole history.")
+
+class MemoryConsolidation(BaseModel):
+    profile_summary: Optional[str] = Field(None, description="Refreshed high-level profile summary of the user.")
+    communication_style: Optional[str] = Field(None, description="Refreshed communication preferences.")
+    consolidated_facts: list[CompressedFact] = Field(default_factory=list)
+    consolidated_beliefs: list[CompressedBelief] = Field(default_factory=list)
+    consolidated_events: list[CompressedEvent] = Field(default_factory=list)
+    insights: list[ConsolidatedInsight] = Field(default_factory=list)
+    emotional_state: Optional[EmotionLog] = None

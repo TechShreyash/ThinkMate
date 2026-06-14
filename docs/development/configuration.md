@@ -103,6 +103,25 @@ metric catalog and runbook.
 
 ---
 
+## 🌙 Consolidation (Phase 11)
+
+These tune the periodic background **consolidation** ("dreaming") pass — a long-horizon review of a
+user's whole profile that refreshes the summary/style, merges/de-duplicates items, and synthesizes a
+small bounded set of durable behavioral **insights**. The pass runs entirely off the hot path under
+the shared `memory_lock` and is **disabled by default**. See
+[memory_engine.md](memory_engine.md#-phase-11--periodic-consolidation-the-dreaming-pass-implemented) for the full
+design.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`CONSOLIDATION_INTERVAL_SECS`** | Float | `0.0` | **Purpose**: The minimum age of a user's last consolidation before they become "due" again — and the master switch for the whole feature.<br>**How to Tune**: Keep `0` (or any value ≤ 0) to **disable the dreaming pass entirely** (the scheduler is never started). Set a positive value to enable it and define the per-user cadence (e.g. `86400` for daily, `604800` for weekly). |
+| **`CONSOLIDATION_SCAN_INTERVAL_SECS`** | Float | `3600` | **Purpose**: How often the scheduler wakes to scan for due users (one scan per interval).<br>**How to Tune**: Lower for tighter cadence/quicker pickup; raise to scan less often. Independent of the per-user interval above — a scan only consolidates users who are actually due. |
+| **`CONSOLIDATION_MAX_USERS_PER_SCAN`** | Integer | `50` | **Purpose**: Upper bound on how many due users a single scan processes, keeping each scan's work (and LLM volume) bounded.<br>**How to Tune**: Raise to drain a large due backlog faster; lower to spread consolidation cost across more scans. |
+| **`CONSOLIDATION_MIN_ITEMS`** | Integer | `8` | **Purpose**: Minimum stored items (`facts + beliefs + events`) a user must have before they are eligible, so the pass never "dreams" over a profile too thin to yield a durable pattern.<br>**How to Tune**: Raise to consolidate only richer profiles; lower to start synthesizing insights sooner. |
+| **`MAX_INSIGHTS`** | Integer | `5` | **Purpose**: Hard cap on the dedicated `insights` list. Both the apply step and the prompt honor it, so the list can never grow unbounded.<br>**How to Tune**: Raise for more synthesized observations per user; lower to keep the behavioral-insights section terse. |
+
+---
+
 ## 🔌 Connection Pool (advanced)
 
 The `motor` client uses a connection pool (driver default `maxPoolSize=100`). The *concurrently

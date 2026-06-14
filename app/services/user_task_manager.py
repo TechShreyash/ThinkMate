@@ -317,5 +317,20 @@ class UserTaskManager:
             await compress_user_memory(chat_id)
         state.last_compression_time = time.time()
 
+    async def run_consolidator(self, chat_id: int):
+        """Run memory consolidation in the background, serialized per conversation via memory_lock.
+
+        No per-user cooldown is needed — cadence is governed by ``last_consolidated_at`` at scan
+        time; the ``memory_lock`` only guarantees consolidation never races the extractor or
+        compressor for the same id.
+        """
+        state = await self.get_state(chat_id)
+        if state.memory_lock.locked():
+            logger.info(f"Memory lock held for chat {chat_id}; skipping consolidator.")
+            return
+        async with state.memory_lock:
+            from app.services.memory_consolidator import consolidate_user_memory
+            await consolidate_user_memory(chat_id)
+
 
 user_task_manager = UserTaskManager()

@@ -14,7 +14,7 @@ from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 from app.config import config
-from app.services.schemas import MemoryExtraction, MemoryCompression
+from app.services.schemas import MemoryExtraction, MemoryCompression, MemoryConsolidation
 
 _ts_lock = threading.Lock()
 _last_ts: datetime | None = None
@@ -65,6 +65,7 @@ async def ensure_user(db: AsyncIOMotorDatabase, user_id: int, username: str, dis
                 "facts": [],
                 "beliefs": [],
                 "events": [],
+                "insights": [],
                 "created_at": now,
             },
         },
@@ -332,6 +333,88 @@ async def replace_user_memory(
          "significance": event.significance, "emotional_context": "", "created_at": now}
         for event in compression.compressed_events
     ]
+    set_fields["updated_at"] = now
+
+    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+
+
+async def find_users_due_for_consolidation(
+    db: AsyncIOMotorDatabase, *, interval_secs: float, min_items: int, limit: int
+) -> list[int]:
+    """Return up to ``limit`` user ids due for consolidation.
+
+    Due = ``last_consolidated_at`` null/absent OR older than ``now - interval_secs``, AND
+    ``len(facts)+len(beliefs)+len(events) >= min_items``. The time predicate runs in the
+    query; the item-count threshold is applied in Python (array-length predicates aren't
+    portable to mongomock). Collection stops once ``limit`` qualifying users are found, so
+    the helper's own work is bounded (Req 1.9).
+    """
+    cutoff = _utcnow() - timedelta(seconds=interval_secs)
+    query = {
+        "$or": [
+            {"last_consolidated_at": {"$exists": False}},
+            {"last_consolidated_at": None},
+            {"last_consolidated_at": {"$lt": cutoff}},
+        ]
+    }
+    due: list[int] = []
+    async for doc in db["user_profiles"].find(query, {"facts": 1, "beliefs": 1, "events": 1}):
+        count = (
+            len(doc.get("facts") or [])
+            + len(doc.get("beliefs") or [])
+            + len(doc.get("events") or [])
+        )
+        if count >= min_items:
+            due.append(doc["_id"])
+            if len(due) >= limit:
+                break
+    return due
+
+
+async def apply_consolidation(
+    db: AsyncIOMotorDatabase, user_id: int, consolidation: MemoryConsolidation
+):
+    """Single-``$set`` apply of a consolidation result + ``last_consolidated_at``.
+
+    Mirrors ``replace_user_memory``'s single-write style: refreshes summary/style (only
+    when present), replaces facts/beliefs/events with merged layouts, preserves the latest
+    emotional state, writes ``insights`` truncated to ``config.MAX_INSIGHTS`` (Req 8.4),
+    and advances ``last_consolidated_at`` / ``updated_at``.
+    """
+    now = _utcnow()
+    set_fields: dict = {}
+
+    if consolidation.profile_summary is not None:
+        set_fields["profile_summary"] = consolidation.profile_summary
+    if consolidation.communication_style is not None:
+        set_fields["communication_style"] = consolidation.communication_style
+    if consolidation.emotional_state:
+        set_fields["emotional_state"] = {
+            "mood": consolidation.emotional_state.mood,
+            "intensity": consolidation.emotional_state.intensity,
+            "trigger": consolidation.emotional_state.trigger or "",
+            "detected_at": now,
+        }
+
+    set_fields["facts"] = [
+        {"category": fact.category, "content": fact.content,
+         "confidence": 1.0, "created_at": now, "updated_at": now}
+        for fact in consolidation.consolidated_facts
+    ]
+    set_fields["beliefs"] = [
+        {"content": belief.content, "created_at": now, "updated_at": now}
+        for belief in consolidation.consolidated_beliefs
+    ]
+    set_fields["events"] = [
+        {"description": event.description, "event_date": event.date,
+         "significance": event.significance, "emotional_context": "", "created_at": now}
+        for event in consolidation.consolidated_events
+    ]
+    set_fields["insights"] = [
+        {"content": ins.content, "created_at": now, "updated_at": now}
+        for ins in consolidation.insights[: config.MAX_INSIGHTS]
+    ]
+    set_fields["last_consolidated_at"] = now
     set_fields["updated_at"] = now
 
     await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})

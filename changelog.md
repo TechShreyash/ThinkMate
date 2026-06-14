@@ -2,6 +2,18 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 11 Consolidation: Implemented (the "dreaming" pass)
+
+### Added
+- **Periodic memory consolidation** (Phase 11 complete) — a scheduled, off-hot-path background pass that reviews a user's whole profile to refresh the summary/style, merge & de-duplicate items, and synthesize durable behavioral **insights**. **Disabled by default** (`CONSOLIDATION_INTERVAL_SECS=0`).
+  - `app/services/memory_consolidator.py`: `consolidate_user_memory` — one `consolidate_memory` LLM call, single-write apply, **never-wipe on failure** (a `None` result skips the write and does not advance `last_consolidated_at`), reuses `_enforce_budget`, increments `consolidation.runs/success/failure`.
+  - `app/services/health.py`: `start_consolidation_scheduler`/`_consolidation_loop`/`_run_consolidation_scan` — periodic scan (mirrors the metrics logger), bounded to `CONSOLIDATION_MAX_USERS_PER_SCAN`, self-healing, dispatches via `run_consolidator` under `memory_lock`. Wired into `main.py`.
+  - `app/database/models.py`: `find_users_due_for_consolidation` (null/old `last_consolidated_at` AND ≥ `CONSOLIDATION_MIN_ITEMS`) and `apply_consolidation` (single `$set`, insights truncated to `MAX_INSIGHTS`); `ensure_user` initializes `insights=[]`.
+  - **Insights** stored in a dedicated bounded `insights` list (not folded into beliefs), rendered in `compile_memory_text`'s `=== BEHAVIORAL INSIGHTS ===` section, and never dropped by budget enforcement. New `MemoryConsolidation`/`ConsolidatedInsight` schemas, `LLMService.consolidate_memory`, and `app/prompts/consolidation_prompt.py`.
+  - Config: `CONSOLIDATION_INTERVAL_SECS` (0=off), `CONSOLIDATION_SCAN_INTERVAL_SECS`, `CONSOLIDATION_MAX_USERS_PER_SCAN`, `CONSOLIDATION_MIN_ITEMS`, `MAX_INSIGHTS` (all optional, safe defaults; mirrored in `.env.example`/`configuration.md`).
+  - **Tests** (25 new, full suite **183 passing**): `test_consolidation_models`, `test_consolidation_llm`, `test_consolidation_run`, `test_consolidation_scheduler`. All pre-existing tests pass unmodified.
+- Docs: `memory_engine.md`, `configuration.md`, `README.md` updated; `project_plan.md` marks Phase 11 implemented — the full roadmap (Phases 0–11) is now complete.
+
 ## [2026-06-14] - Phase 11 Consolidation: Spec (the "dreaming" pass)
 
 ### Added

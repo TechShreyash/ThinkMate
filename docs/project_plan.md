@@ -29,11 +29,12 @@ Phase 7  Hardening & efficiency . bounded memory, atomic ops, single-pass budget
 Phase 8  Tests .................. mongomock suite; hot-path, race, retry, guard regressions
 Phase 9  Group chat ............. chat_id buffers, ambient gate, affinity, multi-party memory
 Phase 10 Observability & ops .... metrics, health checks, runbook
-Phase 11 Future: consolidation .. periodic "dreaming" pass
+Phase 11 Consolidation .......... periodic "dreaming" pass
 ```
 
-Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phases 10–11 are operational
-and forward-looking. The exact efficiency invariants every phase must respect live in
+Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phase 10 adds the
+observability/ops layer and Phase 11 the periodic consolidation pass. The exact efficiency
+invariants every phase must respect live in
 [performance_and_scaling.md](development/performance_and_scaling.md).
 
 ---
@@ -281,11 +282,24 @@ Prometheus/OTel sink can be added later if a metrics backend is introduced.
 
 ---
 
-## Phase 11 — Future: periodic consolidation ("dreaming")
+## Phase 11 — Periodic consolidation ("dreaming")
 
-A scheduled background pass (daily/weekly) that reviews facts/beliefs/events across longer
-windows to synthesize behavioral trends and durable profile insights — beyond what localized
-per-overflow extraction can see. Runs under `memory_lock`, rate-limited, fully off the hot path.
+A scheduled background pass that reviews facts/beliefs/events across the user's whole profile to
+synthesize behavioral trends and durable profile insights — beyond what localized per-overflow
+extraction can see. Runs under `memory_lock`, fully off the hot path, and is disabled by default.
+
+**Status: implemented.** Delivered as a periodic scheduler (`start_consolidation_scheduler` in
+`app/services/health.py`, started from `main.py` after `init_db()`) that finds due users
+(`find_users_due_for_consolidation`) and dispatches each through `run_consolidator` under the shared
+`memory_lock`. `consolidate_user_memory` (`app/services/memory_consolidator.py`) makes **one**
+`consolidate_memory` LLM call, applies the result in a single write (`apply_consolidation`), and
+reuses the deterministic budget enforcer — never wiping memory on failure and not advancing
+`last_consolidated_at` when a run fails. Synthesized **behavioral insights** live in a dedicated,
+bounded `insights` list (capped at `MAX_INSIGHTS`), rendered in the
+`=== BEHAVIORAL INSIGHTS ===` section and never dropped by budget enforcement. Disabled by default
+(`CONSOLIDATION_INTERVAL_SECS=0`). Full design in
+[memory_engine.md](development/memory_engine.md#-phase-11--periodic-consolidation-the-dreaming-pass-implemented);
+keys in [configuration.md](development/configuration.md#-consolidation-phase-11).
 
 ---
 
@@ -302,10 +316,9 @@ per-overflow extraction can see. Runs under `memory_lock`, rate-limited, fully o
 - [x] Phase 8 Tests
 - [x] Phase 9 Group chat
 - [x] Phase 10 Observability & ops
-- [ ] Phase 11 Future: consolidation
+- [x] Phase 11 Consolidation
 
-> Note: the current repository already implements Phases 0–10 (DM bot, hardened, group chat,
-> plus the observability/ops layer — in-process metrics, `/health` & `/metrics` commands, and
-> the runbook). Phase 11 (periodic consolidation) is the one remaining forward-looking item.
-> This plan is written so the project could also be rebuilt cleanly from scratch in this exact
-> order.
+> Note: the current repository now implements Phases 0–11 — the full roadmap (DM bot, hardened,
+> group chat, the observability/ops layer, and the periodic consolidation "dreaming" pass). There
+> is no remaining forward-looking phase. This plan is written so the project could also be rebuilt
+> cleanly from scratch in this exact order.

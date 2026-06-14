@@ -8,7 +8,7 @@ from app.config import config
 from app.handlers import main_router
 from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db, ping_db
-from app.services.health import start_metrics_logger
+from app.services.health import start_metrics_logger, start_consolidation_scheduler
 
 
 async def main():
@@ -27,6 +27,14 @@ async def main():
     if start_metrics_logger() is not None:
         logger.info(
             f"Periodic metrics logger started (every {config.METRICS_LOG_INTERVAL_SECS}s)."
+        )
+
+    # Optional periodic consolidation scheduler (Phase 11). No-op unless
+    # config.CONSOLIDATION_INTERVAL_SECS > 0; runs under this asyncio loop.
+    if start_consolidation_scheduler() is not None:
+        logger.info(
+            f"Consolidation scheduler started (scan every {config.CONSOLIDATION_SCAN_INTERVAL_SECS}s, "
+            f"per-user every {config.CONSOLIDATION_INTERVAL_SECS}s)."
         )
 
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)

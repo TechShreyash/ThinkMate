@@ -102,5 +102,12 @@ class Config(BaseModel):
     ADMIN_USER_IDS: set[int] = Field(default_factory=lambda: _env_int_set("ADMIN_USER_IDS"))
     METRICS_LOG_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_LOG_INTERVAL_SECS", 0.0))
 
+    # --- Consolidation (Phase 11) ---
+    CONSOLIDATION_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("CONSOLIDATION_INTERVAL_SECS", 0.0))
+    CONSOLIDATION_SCAN_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("CONSOLIDATION_SCAN_INTERVAL_SECS", 3600.0))
+    CONSOLIDATION_MAX_USERS_PER_SCAN: int = Field(default_factory=lambda: _env_int("CONSOLIDATION_MAX_USERS_PER_SCAN", 50))
+    CONSOLIDATION_MIN_ITEMS: int = Field(default_factory=lambda: _env_int("CONSOLIDATION_MIN_ITEMS", 8))
+    MAX_INSIGHTS: int = Field(default_factory=lambda: _env_int("MAX_INSIGHTS", 5))
+
 
 config = Config()

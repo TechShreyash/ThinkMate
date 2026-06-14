@@ -140,3 +140,57 @@ def start_metrics_logger() -> "asyncio.Task | None":
     except RuntimeError:
         # No running loop (e.g. called outside async context) — caller should start it under the loop.
         return None
+
+
+# --- Periodic consolidation scheduler (Phase 11, Requirement 1) ---
+
+
+async def _run_consolidation_scan() -> None:
+    """One scan: find due users and dispatch each through the per-user memory_lock."""
+    # Lazy imports avoid an import cycle (user_task_manager -> chat_manager -> ...).
+    from app.database.connection import db_session
+    from app.database import models
+    from app.services.user_task_manager import user_task_manager
+
+    async with db_session() as db:
+        due = await models.find_users_due_for_consolidation(
+            db,
+            interval_secs=config.CONSOLIDATION_INTERVAL_SECS,
+            min_items=config.CONSOLIDATION_MIN_ITEMS,
+            limit=config.CONSOLIDATION_MAX_USERS_PER_SCAN,
+        )
+    processed = 0
+    for user_id in due:
+        try:
+            await user_task_manager.run_consolidator(user_id)
+            processed += 1
+        except Exception as e:  # one user's failure must not abort the scan (Req 1.6)
+            logger.warning(f"Consolidation failed for user {user_id}: {e}")
+    logger.info(f"[consolidation] scan: {len(due)} due, {processed} processed.")
+
+
+async def _consolidation_loop(scan_interval: float) -> None:
+    while True:
+        try:
+            await asyncio.sleep(scan_interval)
+            await _run_consolidation_scan()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:  # never crash the loop (Req 1.7)
+            logger.debug(f"consolidation scan iteration failed: {e}")
+
+
+def start_consolidation_scheduler() -> "asyncio.Task | None":
+    """Start the periodic consolidation scheduler when enabled; no-op (None) when disabled.
+
+    Enabled only when config.CONSOLIDATION_INTERVAL_SECS > 0 (Req 1.2). Mirrors
+    start_metrics_logger. The loop self-heals (Req 1.7).
+    """
+    if config.CONSOLIDATION_INTERVAL_SECS <= 0:
+        return None
+    try:
+        return asyncio.get_running_loop().create_task(
+            _consolidation_loop(config.CONSOLIDATION_SCAN_INTERVAL_SECS)
+        )
+    except RuntimeError:
+        return None

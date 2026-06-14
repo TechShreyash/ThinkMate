@@ -51,6 +51,16 @@ def compile_memory_text(doc: dict) -> str:
         lines.append("(No beliefs stored)")
     lines.append("")
 
+    # Section: Behavioral Insights (Phase 11 consolidation; read defensively)
+    insights = doc.get("insights") or []
+    lines.append("=== BEHAVIORAL INSIGHTS ===")
+    if insights:
+        for ins in insights:
+            lines.append(f"- {ins.get('content')}")
+    else:
+        lines.append("(No long-term insights yet)")
+    lines.append("")
+
     # Section 4: Life Events Timeline
     lines.append("=== LIFE EVENTS TIMELINE ===")
     if events:

@@ -26,6 +26,7 @@ from app.config import config
 from app.services.schemas import (
     MemoryExtraction,
     MemoryCompression,
+    MemoryConsolidation,
     ReplyBundle,
     GroupMemoryExtraction,
 )
@@ -388,6 +389,24 @@ class LLMService:
         return await self._structured_call(
             user_id=user_id, call_type="memory_compression", model=model, messages=messages,
             schema=MemoryCompression, temperature=config.EXTRACTION_TEMPERATURE, timeout=60.0,
+        )
+
+    async def consolidate_memory(
+        self, user_id: int, system_prompt: str, raw_memory_text: str
+    ) -> MemoryConsolidation | None:
+        """Consolidate a user's full profile into a refreshed profile + durable insights.
+
+        Returns ``None`` on failure (mirrors ``compress_memory``) so the caller skips the
+        write and never wipes memory.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_memory_text},
+        ]
+        model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
+        return await self._structured_call(
+            user_id=user_id, call_type="memory_consolidation", model=model, messages=messages,
+            schema=MemoryConsolidation, temperature=config.EXTRACTION_TEMPERATURE, timeout=60.0,
         )
 
 
