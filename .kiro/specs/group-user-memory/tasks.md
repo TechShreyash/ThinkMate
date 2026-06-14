@@ -181,8 +181,8 @@ tasks also reference their design property number for traceability.
 - [x] 8. Checkpoint - foundations
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Wire per-user memory into the group reply path
-  - [-] 9.1 Compose group prompt with per-user and group blocks in `handle_message` (`app/services/chat_manager.py`)
+- [x] 9. Wire per-user memory into the group reply path
+  - [x] 9.1 Compose group prompt with per-user and group blocks in `handle_message` (`app/services/chat_manager.py`)
     - In the group branch, load `group_block` keyed by `chat_id` (Req 3.2) and `user_block` keyed by `sender_id` (Req 3.1, 3.4)
     - Wrap the per-user load so a failure degrades to group-only without raising (Req 3.7)
     - Call `build_system_prompt(persona, group_block, time_context="", user_memory_text=user_block)` (Req 3.3, 3.5)
@@ -195,8 +195,8 @@ tasks also reference their design property number for traceability.
     - Stub `build_memory_block` to raise for the `sender_id` and assert the reply is still generated with the group block only and no exception propagates
     - _Requirements: 3.7, 5.4_
 
-- [ ] 10. Wire identity capture into the group handler
-  - [-] 10.1 Add best-effort identity refresh to `_handle_group_message` in `app/handlers/messages.py`
+- [x] 10. Wire identity capture into the group handler
+  - [x] 10.1 Add best-effort identity refresh to `_handle_group_message` in `app/handlers/messages.py`
     - Early (before routing), compute `sender_name` via `_display_name(message)` and call `models.refresh_identity_if_changed(db, message.from_user.id, message.from_user.username or "", sender_name)`
     - On a non-None change, forward an `identity` event via `log_forwarder.send(message.bot, message.chat.id, …)` (Req 4.2)
     - Wrap in try/except so any failure is logged at debug and does not raise on the hot path (Req 1.7, 5.4)
@@ -208,8 +208,8 @@ tasks also reference their design property number for traceability.
     - Stub `refresh_identity_if_changed` to raise and assert `_handle_group_message` continues without raising and the buffer write still happens exactly once
     - _Requirements: 1.7, 5.1, 5.4_
 
-- [ ] 11. Wire extractor logging
-  - [-] 11.1 Forward saved/skipped events in `app/services/memory_extractor.py`
+- [x] 11. Wire extractor logging
+  - [x] 11.1 Forward saved/skipped events in `app/services/memory_extractor.py`
     - On each successful `save_extracted_memories`, forward a `memory-extraction-saved` event via the process-wide bot (Req 4.3)
     - On each unresolved-participant skip, forward a `memory-extraction-skipped` event (Req 4.4)
     - Confirm unresolved names are skipped without creating misattributed/empty-identity profiles (Req 2.3) and resolved memory persists against the identity-bearing `sender_id` (Req 2.1, 2.2)
@@ -225,8 +225,8 @@ tasks also reference their design property number for traceability.
     - For any update whose participant name does not resolve in the name→id map, assert no profile is created and no memory is written for that name
     - **Validates: Requirements 2.3**
 
-- [ ] 12. Implement Command_Registry and metrics reporting in commands
-  - [-] 12.1 Convert command decorators to a registry in `app/handlers/commands.py`
+- [x] 12. Implement Command_Registry and metrics reporting in commands
+  - [x] 12.1 Convert command decorators to a registry in `app/handlers/commands.py`
     - Convert each hardcoded `@router.message(Command(...))` handler to a plain coroutine with an unchanged body
     - Add the `_COMMANDS` map (`command_key -> (handler, help description)`) ordered to match `_BUILTIN_COMMANDS`
     - Add `register_commands(router)` driven by `config.COMMANDS`: bind enabled commands to their resolved trigger; skip disabled commands so they stay unregistered and draw no response (Req 7.3); bind renamed commands' existing handler under the new trigger (Req 7.4); guard each binding to fall back to the default trigger on unexpected failure
@@ -235,7 +235,7 @@ tasks also reference their design property number for traceability.
     - Call `register_commands(router)` at import time (bottom of `commands.py`)
     - _Requirements: 7.3, 7.4, 7.6_
 
-  - [~] 12.2 Enhance `_render_metrics` with an "LLM calls by task" section in `app/handlers/commands.py`
+  - [x] 12.2 Enhance `_render_metrics` with an "LLM calls by task" section in `app/handlers/commands.py`
     - Add `_render_llm_by_task(snap)` that iterates the canonical `LLM_TASK_TYPES` and, per task type, reads `llm.<prefix>.calls/.success/.failure` from counters and `avg`/`max` from the `llm.<prefix>.latency` timer, rendering missing values as `0` (Req 6.4, 6.5, 6.8)
     - Prepend the "LLM calls by task" lines in `_render_metrics`, retaining the existing counters/gauges/timers dump unchanged
     - Keep the report downstream of the existing Admin_Gate in `cmd_metrics` (Req 6.6)
@@ -270,7 +270,7 @@ tasks also reference their design property number for traceability.
     - Not asserting Telegram delivery
     - _Requirements: 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7_
 
-- [~] 14. Final checkpoint - Ensure all tests pass
+- [x] 14. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

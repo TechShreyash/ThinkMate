@@ -17,6 +17,7 @@ from app.database import models
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block
 from app.services.metrics import metrics
+from app.services import log_forwarder
 from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 
 # Maximum number of extraction LLM calls per run; each call re-snapshots the latest buffer.
@@ -290,9 +291,20 @@ async def extract_and_trim_group(chat_id: int):
                                 f"Group extraction: participant {update.participant!r} could not be "
                                 f"resolved to a sender in chat {chat_id}; skipping (no misattribution)."
                             )
+                            await log_forwarder.send(
+                                None,
+                                chat_id,
+                                f"memory-extraction-skipped: chat={chat_id} "
+                                f"participant={update.participant!r} (unresolved sender)",
+                            )
                             continue
                         await models.save_extracted_memories(db, resolved_id, update.extraction)
                         saved += 1
+                        await log_forwarder.send(
+                            None,
+                            chat_id,
+                            f"memory-extraction-saved: chat={chat_id} participant_id={resolved_id}",
+                        )
 
                     # Atomic trim of the processed segment (concurrent appends preserved).
                     await models.delete_oldest_buffer_messages(db, chat_id, trim_size)

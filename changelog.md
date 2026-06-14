@@ -4,6 +4,27 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-14] - Gender Inference + Group Per-User Memory Composition
+
+### Added
+- **AI-inferred `gender` profile field** — a first-class, top-level user-profile field (`male` / `female` / `non-binary` / `null`) rather than a free-text fact, so it stays stable and is always visible to the reply model. Set by the shared extraction prompt only on a confident signal (explicit self-identification, self-referential gendered terms, pronouns, or grammatical gender in gendered languages such as Hindi `मैं गया` vs `मैं गई`); left null when absent or ambiguous (including name-only guesses). Persisted only when emitted (an uncertain run never clears a known value), seeded as `None` in both profile skeletons, and surfaced as a `Gender:` line in the `=== USER PROFILE ===` block so it survives compression/consolidation. Applies to both DM and group paths.
+- **Group per-user memory composition** (`app/services/chat_manager.py`) — group replies now load a per-user memory block for the *triggering* sender (keyed by `sender_id`) in addition to the group block (keyed by `chat_id`), included via `build_system_prompt(..., user_memory_text=...)`. The per-user block is additive (never replaces the group block) and degrades to group-only on load failure; the DM path stays byte-for-byte unchanged.
+- **Best-effort group-sender identity refresh** (`app/handlers/messages.py`) — every group message refreshes the sender's `username`/`display_name` via `models.refresh_identity_if_changed` before routing, on the group path only, without writing the chat buffer (single-write invariant preserved) and swallowing any error on the hot path.
+- **Log-forwarder hooks** wired into the group identity-refresh and group memory-extraction (saved / skipped-unresolved) events via `app/services/log_forwarder.py`.
+
+### Changed
+- Docs updated: `docs/development/database.md` (new `gender` profile field) and `docs/development/memory_engine.md` (gender-inference section: extraction, persistence, and prompt surfacing).
+
+## [2026-06-14] - Configurable Commands: Docs + Detailed Help
+
+### Added
+- **Documentation for env-driven command remapping** — the existing `CMD_<KEY>_NAME` (rename a command's trigger, e.g. `CMD_HELP_NAME=chatbot` maps `/help` to `/chatbot`) and `CMD_<KEY>_ENABLED` (disable a command, e.g. `CMD_RESET_ENABLED=False`) settings are now documented:
+  - New "Commands (rename / disable, optional)" section in `.env.example` listing all built-in command keys (`start onboard pause resume help profile reset quiet chatty health metrics`), the trigger-name rules (1–32 chars, letters/digits/underscore, leading `/` stripped, invalid/duplicate names fall back to the default), and worked examples.
+  - New "⌨️ Commands (rename / disable)" section in `configuration.md` (with index entry) covering both keys, the validation/duplicate-fallback behavior, the admin-gate survives-rename guarantee, and the fact that `/help` is rendered live from this config.
+
+### Changed
+- **Detailed `/help` descriptions** (`app/handlers/commands.py`) — every command's help line now spells out what it does and notes its constraints (`/reset` requires `/reset confirm`, `/quiet`/`/chatty` are group-only, `/health`/`/metrics` are admin-only). The help list remains generated from `config.COMMANDS`, so renamed commands appear under their custom trigger and disabled commands are hidden.
+
 ## [2026-06-14] - Implicit Bot Addressing + Group Spam Protection: Implemented
 
 ### Added

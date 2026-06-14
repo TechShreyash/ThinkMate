@@ -104,7 +104,7 @@ The numbered steps below expand each stage of the diagram. Together they describ
     *   The current facts, events, beliefs, and profile summary are retrieved.
     *   The system calls the extraction model (`LLM_EXTRACTION_MODEL`) requesting updates.
     *   The returned JSON conforms to the `MemoryExtraction` schema and contains:
-        *   `profile_updates`: Dynamic updates to the user's `communication_style` preference.
+        *   `profile_updates`: Dynamic updates to the user's `communication_style` preference and AI-inferred `gender` (`male` / `female` / `non-binary`), the latter set only when the conversation gives a confident signal so the bot stops mis-gendering the user.
         *   `new_facts` / `updated_facts` / `removed_facts`: Full CRUD operations to keep user facts synchronized.
         *   `new_beliefs` / `updated_beliefs` / `removed_beliefs`: Full CRUD operations to keep subjective beliefs synchronized.
         *   `new_events` / `updated_events` / `removed_events`: Full CRUD operations to keep timeline milestones updated.

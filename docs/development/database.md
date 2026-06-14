@@ -30,6 +30,7 @@ Tracks biographical profiles, communication preferences, direct emotional states
   "display_name": "Shreyash",
   "profile_summary": "Software developer from Seattle.",
   "communication_style": "Friendly and direct.",
+  "gender": "male",  // "male" | "female" | "non-binary" | null — AI-inferred, used as reply context
   "emotional_state": {
     "mood": "happy",
     "intensity": 0.9,

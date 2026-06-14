@@ -129,18 +129,34 @@ async def handle_message(
 
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()
-    memory_block, needs_compression = await build_memory_block(db, chat_id)
 
-    # Temporal context: DM path only. Record the user's last-interaction time and compute a
-    # concise "now + last talked" string in a single combined round-trip (no extra LLM call,
-    # no upsert). Groups keep an empty time_context so multi-party behavior is unchanged.
-    if not is_group:
+    if is_group:
+        # Group block keyed by chat_id (existing behavior); needs_compression continues to
+        # track the GROUP block (Req 3.2).
+        group_block, needs_compression = await build_memory_block(db, chat_id)
+        # Per-user block for the TRIGGERING sender only (Req 3.1, 3.4). Degrade to
+        # group-only on failure without raising (Req 3.7).
+        user_block = ""
+        try:
+            user_block, _ = await build_memory_block(db, sender_id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"per-user memory load failed for sender {sender_id}: {e}")
+            user_block = ""
+        # Both blocks are included; the per-user block is added, never replaces the
+        # group block (Req 3.3, 3.5). Groups keep an empty time_context.
+        system_prompt = build_system_prompt(
+            persona, group_block, time_context="", user_memory_text=user_block
+        )
+    else:
+        # DM path: byte-for-byte unchanged (Req 3.6, 5.2).
+        memory_block, needs_compression = await build_memory_block(db, chat_id)
+        # Temporal context: DM path only. Record the user's last-interaction time and
+        # compute a concise "now + last talked" string in a single combined round-trip
+        # (no extra LLM call, no upsert).
         now = datetime.now(timezone.utc)
         prev = await models.touch_and_get_last_interaction(db, chat_id, now=now)
         time_context = build_time_context(now, prev)
-    else:
-        time_context = ""
-    system_prompt = build_system_prompt(persona, memory_block, time_context=time_context)
+        system_prompt = build_system_prompt(persona, memory_block, time_context=time_context)
 
     # 4. Single LLM call -> reply + optional reaction (+ optional affinity_delta for groups).
     if is_group:

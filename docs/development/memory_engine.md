@@ -374,6 +374,32 @@ exchange. Phase 12 threads a small, optional time context into the system prompt
 Because the gap is computed from one timestamp and the section is default-empty, this adds no LLM
 call and only the single combined read-then-set to the hot path.
 
+### Gender inference — stable reply context
+
+The bot used to have no notion of the user's gender, so it would sometimes mis-gender people (for
+example, addressing a male user as if he were female). Gender is now an AI-inferred, first-class
+profile field rather than a free-text fact, so it stays stable and is always visible to the reply
+model.
+
+- **Extracted with the rest of memory.** The extraction prompt
+  ([extraction_prompt.py](../../app/prompts/extraction_prompt.py)) instructs the model to set
+  `profile_updates.gender` to one of `male` / `female` / `non-binary` — but **only on a confident
+  signal**: explicit self-identification, self-referential gendered terms ("my wife", "as a guy"),
+  pronouns, or grammatical gender in gendered languages (e.g. Hindi `मैं गया` vs `मैं गई`). When the
+  signal is absent or ambiguous (including guessing from a name alone), it leaves the field null.
+  This works for both the DM and group paths since both share `SYSTEM_EXTRACTION_PROMPT` and the
+  `MemoryExtraction` schema.
+- **Persisted as a top-level field.** `save_extracted_memories`
+  ([models.py](../../app/database/models.py)) writes `gender` only when the extractor emits a value,
+  so an uncertain run never clears a previously-known value. Because `gender` is a dedicated
+  top-level field (seeded as `None` in both profile skeletons), it **survives compression and
+  consolidation** — those phases `$set` only their own fields and never touch it, unlike a fact
+  which could be merged or dropped.
+- **Surfaced in the prompt.** `compile_memory_text`
+  ([memory_loader.py](../../app/services/memory_loader.py)) renders a `Gender:` line inside the
+  `=== USER PROFILE ===` block (showing `Unknown` until inferred), so every reply the model writes
+  has the user's gender in context.
+
 ### Emotional continuity — a bounded mood history
 
 ThinkMate already tracked a *current* `emotional_state`, but overwrote it each time, so it could

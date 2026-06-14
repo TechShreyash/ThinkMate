@@ -18,7 +18,9 @@ The variables are grouped by the subsystem they govern, in the order they appear
 - **🛡️ Input & Output Security Guards** — rate limits and length caps that protect against spam and abuse.
 - **👤 Persona Settings** — the persona-file path, the name the bot answers to, and the emoji-reaction switch.
 - **👥 Group Chat & Ambient Replies** — how the bot behaves in groups and supergroups.
+- **🗣️ Group Chat / Implicit Addressing & Spam** — implicit follow-up detection and mass-tag/greeting-burst defenses.
 - **📊 Observability / ops** — in-process metrics and the admin `/health` and `/metrics` commands.
+- **⌨️ Commands (rename / disable)** — remap any slash command to a custom trigger or turn it off.
 - **🌙 Consolidation (Phase 11)** — the optional background "dreaming" pass over a user's whole profile.
 - **💞 Engagement / Mood History (Phase 12)** — the bounded mood-trend history.
 - **🔔 Proactive Check-ins (Phase 12)** — the optional, memory-grounded "thinking of you" scheduler.
@@ -110,6 +112,25 @@ These tune ThinkMate's behavior in groups/supergroups. They have no effect in DM
 
 ---
 
+## 🗣️ Group Chat / Implicit Addressing & Spam
+
+These tune how ThinkMate recognizes follow-up messages that are *implicitly* addressed to it (without
+a fresh @mention) and how it defends against mass-tag and greeting-burst spam in groups. They have no
+effect in DMs. See [group_chat.md](group_chat.md) for the full design.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`GROUP_IMPLICIT_RECENCY_SECS`** | Float | `120.0` | **Purpose**: Maximum seconds after the bot speaks for a follow-up to still count as implicitly addressed.<br>**How to Tune**: Raise to keep treating follow-ups as directed at the bot for longer; lower to require a fresh mention sooner. |
+| **`GROUP_IMPLICIT_RECENCY_MAX_MSGS`** | Integer | `4` | **Purpose**: Maximum intervening human messages since the bot last spoke for an implicit follow-up to still count.<br>**How to Tune**: Raise to tolerate busier interleaving; lower to require a tighter back-and-forth. |
+| **`GROUP_IMPLICIT_COOLDOWN_SECS`** | Float | `30.0` | **Purpose**: Minimum seconds between implicit direct replies per group (anti-noise throttle).<br>**How to Tune**: Raise to make implicit replies rarer; lower for snappier follow-ups. |
+| **`GROUP_MASS_TAG_SPAM_THRESHOLD`** | Integer | `5` | **Purpose**: Distinct `@mentions` above which a single message is classified as mass-tag spam (strict `>`).<br>**How to Tune**: Lower to flag mass-tagging sooner; raise to allow more legitimate multi-mentions. |
+| **`GROUP_SPAM_BURST_SIMILARITY`** | Float | `0.85` | **Purpose**: Mention-stripped similarity ratio (0–1) at/above which messages are treated as near-identical.<br>**How to Tune**: Raise to require closer matches before flagging; lower to catch looser repeats. |
+| **`GROUP_SPAM_BURST_COUNT`** | Integer | `3` | **Purpose**: Near-identical messages within the window that classify a greeting burst.<br>**How to Tune**: Raise to tolerate more repeats before flagging; lower to react sooner. |
+| **`GROUP_SPAM_BURST_WINDOW_SECS`** | Float | `60.0` | **Purpose**: Time window (seconds) for counting near-identical greeting-burst messages.<br>**How to Tune**: Raise to count repeats over a longer span; lower to require a tighter burst. |
+| **`GROUP_SPAM_BURST_TRACK_MAX`** | Integer | `20` | **Purpose**: Hard cap on tracked recent messages per chat, bounding memory used for burst detection.<br>**How to Tune**: Raise to track more history per chat; lower to bound memory more tightly. |
+
+---
+
 ## 📊 Observability / ops
 
 These tune the Phase 10 observability layer (in-process metrics, the `/health` and `/metrics`
@@ -121,6 +142,35 @@ metric catalog and runbook.
 | :--- | :--- | :--- | :--- |
 | **`ADMIN_USER_IDS`** | String (CSV) | *(blank → DM-only)* | **Purpose**: Comma-separated list of Telegram user ids allowed to use the `/health` and `/metrics` admin commands. Blanks are ignored and each id is coerced to `int`.<br>**How to Tune**: Leave empty to apply the safe default — the commands answer **only in private chats (DMs)** so a status report is never broadcast to a group. Set to specific ids (e.g. `123456789,987654321`) to restrict the commands to those operators in any chat. |
 | **`METRICS_LOG_INTERVAL_SECS`** | Float | `0.0` | **Purpose**: Interval, in seconds, for the optional background task that logs the metrics-snapshot summary (no DB/LLM call).<br>**How to Tune**: Keep `0` (or any value ≤ 0) to disable the periodic logger entirely. Set a positive value (e.g. `60`) to emit one summary log line per interval for a lightweight time series in the logs. |
+
+---
+
+## ⌨️ Commands (rename / disable)
+
+Every built-in slash command can be **renamed** to a custom trigger or **disabled** entirely, all
+from the environment — no code change. This is useful for white-labeling the bot (e.g. mapping
+`/help` to `/chatbot`), avoiding command clashes with other bots in a group, or hiding capabilities
+you don't want exposed. Both settings have safe defaults (the trigger equals the command key and the
+command is enabled), so you only set the ones you want to change.
+
+The live `/help` message is generated from this configuration, so a renamed command appears under its
+new trigger and a disabled command is hidden and unregistered (it draws no response at all).
+
+**The built-in command keys** (in help-display order) are: `start`, `onboard`, `pause`, `resume`,
+`help`, `profile`, `reset`, `quiet`, `chatty`, `health`, `metrics`.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`CMD_<KEY>_NAME`** | String | *(the key)* | **Purpose**: The trigger the command is bound under. `<KEY>` is the upper-cased command key (e.g. `CMD_HELP_NAME`). A leading `/` is stripped; the name must be 1–32 characters of letters, digits, or underscores (Telegram's command rule).<br>**How to Tune**: Set e.g. `CMD_HELP_NAME=chatbot` to expose `/help` as `/chatbot`. An invalid name, or one that **duplicates** another enabled command's trigger, safely falls back to the default key with a logged warning (startup never crashes). |
+| **`CMD_<KEY>_ENABLED`** | Boolean | `True` | **Purpose**: Whether the command is registered at all.<br>**How to Tune**: Set e.g. `CMD_RESET_ENABLED=False` to remove `/reset` — it is left unregistered and omitted from `/help`. Admin-only commands (`/health`, `/metrics`) remain admin-gated regardless of any rename. |
+
+**Examples**
+
+```dotenv
+CMD_HELP_NAME=chatbot       # /help is now /chatbot
+CMD_PROFILE_NAME=memories   # /profile is now /memories
+CMD_RESET_ENABLED=False     # /reset is removed entirely
+```
 
 ---
 

@@ -2,13 +2,14 @@
 from aiogram import Router, html
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.database import models
 from app.services.affinity import affinity_cache
 from app.services.health import liveness, readiness
 from app.services.memory_loader import build_memory_block
-from app.services.metrics import metrics
+from app.services.metrics import metrics, LLM_TASK_TYPES
 
 router = Router(name="commands")
 
@@ -53,12 +54,39 @@ def _render_health(live: dict, ready: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_llm_by_task(snap: dict) -> list[str]:
+    """Render one line per canonical LLM_Task_Type (Req 6.4, 6.5, 6.8).
+
+    Driven by ``LLM_TASK_TYPES`` so every task type appears in a stable order even
+    with zero recorded calls; ``.get(..., 0)`` defaults ensure an absent task type
+    never raises and renders as zero figures.
+    """
+    counters = snap.get("counters", {}) or {}
+    timers = snap.get("timers", {}) or {}
+    lines = ["LLM calls by task:"]
+    for task_type, prefix in LLM_TASK_TYPES:
+        calls = counters.get(f"llm.{prefix}.calls", 0)
+        success = counters.get(f"llm.{prefix}.success", 0)
+        failure = counters.get(f"llm.{prefix}.failure", 0)
+        lat = timers.get(f"llm.{prefix}.latency", {}) or {}
+        avg = lat.get("avg", 0)
+        mx = lat.get("max", 0)
+        lines.append(
+            f"  {task_type}: calls={calls} ok={success} fail={failure} "
+            f"avg={avg} max={mx}"
+        )
+    return lines
+
+
 def _render_metrics(snap: dict) -> str:
     """Render a compact plain-text dump of ``metrics.snapshot()``."""
     counters = snap.get("counters", {}) or {}
     gauges = snap.get("gauges", {}) or {}
     timers = snap.get("timers", {}) or {}
-    lines = ["📊 ThinkMate metrics", "", "counters:"]
+    lines = ["📊 ThinkMate metrics", ""]
+    # Prepend the per-task LLM section above the raw counters/gauges/timers dump.
+    lines += _render_llm_by_task(snap)
+    lines += ["", "counters:"]
     if counters:
         lines += [f"  {name}: {value}" for name, value in sorted(counters.items())]
     else:
@@ -80,7 +108,6 @@ def _render_metrics(snap: dict) -> str:
     return "\n".join(lines)
 
 
-@router.message(Command("start"))
 async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
     user = message.from_user
     if not user:
@@ -102,7 +129,6 @@ async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
     await message.answer(msg, parse_mode="HTML")
 
 
-@router.message(Command("onboard"))
 async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -122,7 +148,6 @@ async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
     )
 
 
-@router.message(Command("pause"))
 async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -133,7 +158,6 @@ async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
     )
 
 
-@router.message(Command("resume"))
 async def cmd_resume(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -143,23 +167,21 @@ async def cmd_resume(message: Message, db: AsyncIOMotorDatabase):
     )
 
 
-@router.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer(
-        f"{html.bold('Here is what I can do:')}\n\n"
-        "/start — say hi and set up your profile\n"
-        "/onboard — help me get to know you\n"
-        "/profile — see what I remember about you\n"
-        "/pause — stop me from messaging first\n"
-        "/resume — let me check in again\n"
-        "/reset — make me forget everything (with confirmation)\n"
-        "/help — show this message\n\n"
-        "Mostly though, just talk to me. 🙂",
-        parse_mode="HTML",
-    )
+    resolved = config.COMMANDS
+    lines = [f"{html.bold('Here is what I can do:')}", ""]
+    for key, (_handler, desc) in _COMMANDS.items():
+        trigger, enabled = resolved.get(key, (key, True))
+        if not enabled:
+            continue
+        # Admin-only commands are omitted from the public help in non-admin contexts.
+        if key in ("health", "metrics") and not _admin_allowed(message):
+            continue
+        lines.append(f"/{trigger} — {desc}")
+    lines += ["", "Mostly though, just talk to me. 🙂"]
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
-@router.message(Command("profile"))
 async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -183,7 +205,6 @@ async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
     )
 
 
-@router.message(Command("reset"))
 async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -197,7 +218,6 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
     await message.answer("Done — I've cleared everything. We're starting fresh. 🌱")
 
 
-@router.message(Command("quiet"))
 async def cmd_quiet(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -211,7 +231,6 @@ async def cmd_quiet(message: Message, db: AsyncIOMotorDatabase):
     await message.answer("Okay, I'll stay quiet around you here. Mention me if you need me. 🤫")
 
 
-@router.message(Command("chatty"))
 async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
@@ -225,7 +244,6 @@ async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
     await message.answer("You got it — I'll chime in more with you here! 😄")
 
 
-@router.message(Command("health"))
 async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
     if not _admin_allowed(message):
         return  # fail closed; never leak a report (Req 4.3, 4.4)
@@ -234,8 +252,45 @@ async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
     await message.answer(_render_health(live, ready))
 
 
-@router.message(Command("metrics"))
 async def cmd_metrics(message: Message, db: AsyncIOMotorDatabase):
     if not _admin_allowed(message):
         return  # same authorization rule as /health (Req 4.5)
     await message.answer(_render_metrics(metrics.snapshot()))
+
+
+# Static map: command_key -> (handler, help description). Order follows _BUILTIN_COMMANDS.
+_COMMANDS: dict[str, tuple] = {
+    "start":   (cmd_start,   "say hi and set up your profile"),
+    "onboard": (cmd_onboard, "a quick intro so I can get to know you faster"),
+    "pause":   (cmd_pause,   "stop me from messaging you first (proactive check-ins off)"),
+    "resume":  (cmd_resume,  "let me check in with you again now and then"),
+    "help":    (cmd_help,    "show this list of everything I can do"),
+    "profile": (cmd_profile, "see the memories I've saved about you"),
+    "reset":   (cmd_reset,   "make me forget everything about you — needs /reset confirm"),
+    "quiet":   (cmd_quiet,   "tell me to chime in less in this group (group-only)"),
+    "chatty":  (cmd_chatty,  "tell me to chime in more in this group (group-only)"),
+    "health":  (cmd_health,  "ops health + readiness report (admin-only)"),
+    "metrics": (cmd_metrics, "ops metrics snapshot, incl. LLM-by-task (admin-only)"),
+}
+
+
+def register_commands(router: Router) -> None:
+    """Bind each ENABLED Built_In_Command to its configured trigger (Req 7.3, 7.4)."""
+    resolved = config.COMMANDS
+    for key, (handler, _desc) in _COMMANDS.items():
+        trigger, enabled = resolved.get(key, (key, True))
+        if not enabled:
+            logger.info(f"command {key!r} disabled by config; not registering")
+            continue  # disabled -> unregistered -> no response to its trigger (Req 7.3)
+        try:
+            router.message(Command(trigger))(handler)
+        except Exception as exc:  # extreme defense: bad trigger slipped through
+            logger.warning(
+                f"failed to register command {key!r} as {trigger!r} ({exc}); "
+                f"registering under default {key!r}"
+            )
+            router.message(Command(key))(handler)
+
+
+# Bind at import time so handlers/__init__.py picks up a fully-wired router.
+register_commands(router)

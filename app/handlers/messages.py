@@ -33,6 +33,7 @@ from app.services.group_gate import (
     spam_burst_detector,
 )
 from app.services.affinity import affinity_cache
+from app.services import log_forwarder
 
 router = Router(name="messages")
 
@@ -255,6 +256,27 @@ async def _handle_group_message(
         return
 
     sender_name = _display_name(message)
+
+    # Best-effort identity capture/refresh for EVERY group sender (Req 1.*). This runs only
+    # on the group path (the DM branch never reaches here — Req 5.3) and never writes the
+    # chat buffer, so the Single_Write_Invariant is unaffected (Req 5.1). Any failure is
+    # logged at debug and swallowed so it can never raise on the hot path (Req 1.7, 5.4).
+    try:
+        change = await models.refresh_identity_if_changed(
+            db,
+            message.from_user.id,
+            message.from_user.username or "",
+            sender_name,
+        )
+        if change is not None:
+            await log_forwarder.send(
+                message.bot,
+                message.chat.id,
+                f"👤 identity {'created' if change['created'] else 'refreshed'} "
+                f"for {message.from_user.id} in chat {message.chat.id}",
+            )
+    except Exception as e:  # noqa: BLE001 - degrade, never raise on the hot path (Req 1.7)
+        logger.debug(f"identity refresh failed for {message.from_user.id}: {e}")
 
     # Resolve (cached) bot identity for addressed-detection.
     identity = await _get_bot_identity(message)
