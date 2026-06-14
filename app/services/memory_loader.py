@@ -92,20 +92,32 @@ def compile_memory_text(doc: dict) -> str:
     return "\n".join(lines)
 
 
+async def load_profile_doc(db: AsyncIOMotorDatabase, user_id: int) -> dict:
+    """Fetch the raw ``user_profiles`` document for ``user_id`` (``{}`` when absent).
+
+    Exposed so a caller that needs both the memory block *and* another profile field
+    (e.g. the per-user ``reactions_enabled`` flag read on the reply path) can do it from a
+    single ``find_one`` rather than issuing a second round-trip.
+    """
+    return await db["user_profiles"].find_one({"_id": user_id}) or {}
+
+
+def compile_memory_block(doc: dict) -> tuple[str, bool]:
+    """Compile an already-fetched profile ``doc`` into ``(memory_text, needs_compression)``.
+
+    Pure (no I/O); pairs with :func:`load_profile_doc` so the read and the compile can be
+    split when the caller already holds the document.
+    """
+    compiled_text = compile_memory_text(doc)
+    needs_compression = len(compiled_text) > config.USER_MEMORY_BUDGET_CHARS
+    return compiled_text, needs_compression
+
+
 async def build_memory_block(db: AsyncIOMotorDatabase, user_id: int) -> tuple[str, bool]:
     """
     Loads all components of the user's memory from MongoDB and compiles them into a structured text block.
     Returns:
         (compiled_memory_text, needs_compression_flag)
     """
-    # Fetch unified user profile
-    doc = await db["user_profiles"].find_one({"_id": user_id})
-    if not doc:
-        doc = {}
-
-    compiled_text = compile_memory_text(doc)
-
-    # Check if compiled text length exceeds the user memory budget
-    needs_compression = len(compiled_text) > config.USER_MEMORY_BUDGET_CHARS
-
-    return compiled_text, needs_compression
+    doc = await load_profile_doc(db, user_id)
+    return compile_memory_block(doc)

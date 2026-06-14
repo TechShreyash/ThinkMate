@@ -43,8 +43,13 @@ async def handle_message(
     buffer_chars = sum(len(m["content"]) for m in messages)
     active_history = [{"role": m["role"], "content": m["content"]} for m in messages]
 
-    # 2. Buffer overflow -> non-blocking background extraction.
-    if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
+    # 2. Buffer overflow -> non-blocking background extraction. New/sparse users use a
+    #    lower trigger (NEW_USER_EXTRACTION_CHARS) so their profile builds fast; established
+    #    users use CHAT_BUFFER_MAX_CHARS. See models.count_memory_items + the trigger note below.
+    extraction_threshold = config.CHAT_BUFFER_MAX_CHARS
+    if await models.count_memory_items(db, user_id) < config.NEW_USER_MEMORY_THRESHOLD:
+        extraction_threshold = min(config.NEW_USER_EXTRACTION_CHARS, config.CHAT_BUFFER_MAX_CHARS)
+    if buffer_chars >= extraction_threshold:
         from app.services.user_task_manager import user_task_manager
         asyncio.create_task(user_task_manager.run_extractor(user_id))
 
@@ -80,6 +85,10 @@ async def handle_message(
 The memory extraction pipeline in [memory_extractor.py](../../app/services/memory_extractor.py) extracts key details from conversation histories and saves them to the database. All LLM access goes through the shared `llm_service` singleton (one client/connection pool per process).
 
 The extraction call is **retried up to `MAX_EXTRACTION_ATTEMPTS` (3) times**, and the buffer is **re-read on every attempt** so messages that arrive while a slow call is in flight are folded into the next attempt rather than missed. Success vs. failure is distinguished by `extract_memory` returning a value vs. `None` — an *empty* `MemoryExtraction` still counts as success (nothing was worth saving). If every attempt fails (e.g. an LLM outage), the oldest messages are trimmed anyway so the buffer stays bounded; memory is never written on a failed run.
+
+**Adaptive trigger for new users.** The extraction trigger is not a single fixed threshold. A user whose stored memory items (facts + beliefs + events, via `models.count_memory_items`) number fewer than `NEW_USER_MEMORY_THRESHOLD` is treated as "new/sparse" and extracts at the lower `NEW_USER_EXTRACTION_CHARS` (capped at `CHAT_BUFFER_MAX_CHARS`), so a fresh profile starts capturing memories quickly. Established users fall back to the normal `CHAT_BUFFER_MAX_CHARS`.
+
+**Date-stamped transcript + date normalization.** Each line of the transcript handed to the model is prefixed with the sending date (`[YYYY-MM-DD]`, from the message's `created_at`), and the prompt is given a `=== CURRENT DATE ===` block. The extraction prompt's *Date Normalization* rules require every event `date` to be an absolute ISO date (`YYYY-MM-DD` / `YYYY-MM` / `YYYY`) resolved from any relative reference ("yesterday", "last week") against the message's own date — never a vague word like "today" or "recent". This keeps the life-events timeline accurate even when extraction runs well after the conversation happened.
 
 ```python
 # app/services/memory_extractor.py

@@ -45,13 +45,14 @@ def test_recency_and_burst_state_pruning(activity, extra, max_idle):
         assert cid in gate._last_seen
 
     # --- SpamBurstDetector ---
+    # Keyed per (chat_id, user_id); these calls omit user_id so the key is (cid, None).
     det = SpamBurstDetector()
     for cid, t in activity.items():
         det.observe(cid, "hi", None, now=t)
     removed_b = det.prune(now, max_idle=max_idle)
     assert removed_b == len(expected_removed)
     for cid in expected_removed:
-        assert cid not in det._last_seen
-        assert cid not in det._recent
+        assert (cid, None) not in det._last_seen
+        assert (cid, None) not in det._recent
     for cid in expected_kept:
-        assert cid in det._last_seen
+        assert (cid, None) in det._last_seen

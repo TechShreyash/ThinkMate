@@ -18,6 +18,7 @@ becomes a single, coherent reply.
 - **Dependency-injected handlers** — the command handlers, the conversational router, and how a reply and its emoji reaction come from one LLM call.
 - **Group chat routing** — how messages in groups are routed by chat type and whether the bot was addressed.
 - **Engagement commands** — the Phase 12 DM commands (`/onboard`, `/pause`, `/resume`) and the `/start`/`/help` enhancements.
+- **Interactive guide** — the button-driven `/guide` tour and the `callback_query` handler that powers it.
 - **Key architectural guidelines** — the rules that keep the layer thin and predictable.
 
 ---
@@ -150,9 +151,28 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
     if (command.args or "").strip().lower() != "confirm":
         await message.answer("⚠️ This erases everything I remember. To confirm, send: /reset confirm")
         return
+    # Back up the full profile to the Logs_Channel BEFORE deleting (best-effort), so an
+    # admin can restore it if the user changes their mind, then wipe stored state.
+    snapshot = await models.export_user_data(db, message.from_user.id)
+    if snapshot is not None:
+        await log_forwarder.send_document(
+            message.bot, message.chat.id,
+            filename=f"backup_{message.from_user.id}.json",
+            content=json.dumps(snapshot, default=str).encode("utf-8"),
+            caption="🗂 Profile backup before /reset",
+        )
     await models.reset_user(db, message.from_user.id)
-    await message.answer("Done — I've cleared everything. 🌱")
+    await message.answer("Done — I've cleared everything. 🌱 A backup was saved; an admin can help restore it.")
 ```
+
+`/reset` is a one-way door for the user, so the handler does a **best-effort backup first**:
+[`models.export_user_data`](../../app/database/models.py) bundles the full `user_profiles`
+document plus the `chat_buffers` document into a JSON-serializable snapshot, and
+[`log_forwarder.send_document`](../../app/services/log_forwarder.py) uploads it to the
+**Logs_Channel** (`LOGS_CHANNEL_ID`) as a `backup_<user_id>.json` file with an identifying
+caption. The backup is wrapped so a failure is logged but never blocks the erase the user
+asked for. If the user later wants their memories back, an admin can restore them from that
+archived file. See [database.md](database.md) for the export shape.
 
 ### 2. Conversational Router (`app/handlers/messages.py`)
 
@@ -241,6 +261,13 @@ written by the handler itself before the ambient gate (since they never reach `h
 **Empty-ambient suppression.** An ambient chime-in may decline (empty reply); `UserTaskManager._process_batch`
 sends nothing in that case (skips both the reaction and the answer).
 
+**Empty-reply fallback (reply/DM).** Non-ambient paths must always answer, but the LLM can
+occasionally yield an empty/blank reply (for example, an unparseable reply bundle that degrades to
+empty raw text in `LLMService._parse_reply_bundle` — see [llm_integration.md](llm_integration.md)).
+Sending that verbatim makes Telegram reject the call with `Bad Request: message text is empty`, so
+`UserTaskManager._process_batch` substitutes a short graceful line ("Sorry, I lost my train of
+thought there — could you say that again?") and logs a warning instead of crashing the sender's batch.
+
 Two extra commands manage chattiness per group: `/quiet` (mode → quiet, suppress ambient) and
 `/chatty` (mode → chatty, boost), both set via `affinity_cache.set_mode`. Affinity and mode live
 in `chat_members` (see [database.md](database.md)). DMs are unchanged (`chat_id == user_id`). Full
@@ -263,27 +290,59 @@ memory profile seeded faster. It is **static** — there is no LLM call. Under t
 `onboarded` flag. It does **not** gate normal chat: the user's eventual answers are captured by the
 ordinary extraction pipeline like any other message.
 
-### `/pause` and `/resume` — proactive opt-out / opt-in
+### `/checkins` — proactive opt-out / opt-in
 
-These toggle whether the user receives [proactive check-ins](configuration.md#-proactive-check-ins-phase-12) —
-the occasional messages the bot sends on its own initiative:
+`/checkins` controls whether the user receives [proactive check-ins](configuration.md#-proactive-check-ins-phase-12) —
+the occasional messages the bot sends on its own initiative. It replaces the former
+`/pause` + `/resume` pair with a single status-aware toggle:
 
-- **`/pause`** → `models.set_proactive_enabled(db, user_id, False)` — "I won't reach out on my own
-  anymore." The user is excluded from future proactive scans (the due-user query filters on
+- **`/checkins`** (no argument) reports the current setting using `models.get_proactive_enabled`.
+- **`/checkins off`** → `models.set_proactive_enabled(db, user_id, False)` — "I won't reach out on
+  my own anymore." The user is excluded from future proactive scans (the due-user query filters on
   `proactive_enabled != False`).
-- **`/resume`** → `models.set_proactive_enabled(db, user_id, True)` — re-enables the occasional
+- **`/checkins on`** → `models.set_proactive_enabled(db, user_id, True)` — re-enables the occasional
   nudge.
 
-They are DM-oriented; in a group they harmlessly toggle the caller's own flag, consistent with how
+It is DM-oriented; in a group it harmlessly toggles the caller's own flag, consistent with how
 `/quiet` and `/chatty` behave.
 
-### Enhanced `/start` and `/help`
+### `/reactions` — per-user emoji-reaction opt-out
 
-- **`/start`** still upserts the profile, but now checks the `onboarded` flag and **nudges
-  `/onboard` only when the user has not onboarded yet**. Already-onboarded users get the normal
-  pointer to `/profile` and `/help` instead.
-- **`/help`** now lists the new `/onboard`, `/pause`, and `/resume` commands alongside the existing
-  ones.
+Some users find the little emoji reactions the bot drops on their messages (the 👍/❤️/🎉 that ride
+the combined reply call — see [LLM integration](llm_integration.md)) annoying. `/reactions` lets each
+user turn those off just for themselves:
+
+- **`/reactions`** (no argument) reports the current setting; **`/reactions on`** / **`/reactions off`**
+  set it explicitly (a bare command no longer flips it silently).
+- It is persisted per user via `models.set_reactions_enabled(db, user_id, enabled)`. On the reply hot
+  path the flag is **not** read separately — `chat_manager.handle_message` reads `reactions_enabled`
+  straight off the sender's profile document it already fetches for the memory block (via
+  `memory_loader.load_profile_doc` + `compile_memory_block`), so there is no extra round-trip. The
+  `/reactions` command itself uses `models.get_reactions_enabled` to read the current value. The
+  preference is keyed on the **user**, not the chat, so it follows them across DMs and every group (the
+  reaction is applied to *their* message).
+- It is independent of the global `ENABLE_MESSAGE_REACTIONS` master switch: when reactions are off globally
+  no reaction is ever produced, and when on, this per-user flag is the final gate — `handle_message`
+  drops the reaction (returns `None`) before delivery if the sender opted out. A missing profile/flag
+  defaults to "enabled" so a read failure never silently suppresses reactions.
+
+### `/groupbot` — group on/off kill switch
+
+`/groupbot` turns the bot on or off for an entire group. It replaces the former `/groupon` + `/groupoff`
+pair with a single status-aware toggle:
+
+- **`/groupbot`** (no argument) reports the group's current state via `models.is_group_enabled` — open
+  to anyone in the chat.
+- **`/groupbot on|off`** sets it via `models.set_group_enabled`, but only for **group admins** (the same
+  authorization as before, via `_is_group_admin`). When off, the bot won't reply or remember anything in
+  that chat until an admin runs `/groupbot on`.
+
+### `/start` — the single entry point
+
+**`/start`** upserts the profile and checks the `onboarded` flag, **nudging `/onboard` only when the
+user has not onboarded yet**. Its inline buttons open the interactive guide (*How I work*) and the full
+command list (*Commands*), so there is no separate `/help` or `/guide` command — `/start` is the one
+discoverable entry point.
 
 ```python
 @router.message(Command("onboard"))
@@ -296,12 +355,10 @@ async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
     await message.answer("hey, glad you're here. i'm ThinkMate ...")  # static, conversational
 
 
-@router.message(Command("pause"))
-async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
-    if not message.from_user:
-        return
-    await models.set_proactive_enabled(db, message.from_user.id, False)
-    await message.answer("Got it — I won't reach out on my own anymore. ...")
+@router.message(Command("checkins"))
+async def cmd_checkins(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
+    # bare -> report status; on/off -> set
+    ...
 ```
 
 > The background scheduler that actually sends the check-ins (and how "due" users are selected,
@@ -309,6 +366,83 @@ async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
 > [memory_engine.md](memory_engine.md#-phase-12--temporal-context--emotional-continuity-implemented),
 > [configuration.md](configuration.md#-proactive-check-ins-phase-12), and
 > [observability.md](observability.md#proactive-check-in-metrics-phase-12).
+
+---
+
+## 📖 Interactive guide (inline buttons from `/start`)
+
+Because ThinkMate behaves differently from a typical command bot — it remembers people
+across conversations — newcomers benefit from a short, plain-language tour rather than a
+wall of slash commands. The guide provides exactly that: a small set of screens the user
+pages through with Telegram **inline buttons** (`InlineKeyboardMarkup`), all inside a
+single message. There is no dedicated `/guide` or `/help` command — the guide is opened
+from the buttons attached to `/start`.
+
+### How it works
+
+The guide's **home menu** (`_guide_home_text` + `_kb_guide_home`) is a one-line
+explanation of what the bot is plus one button per topic:
+
+- 🧠 **How my memory works** — what gets remembered and that it's automatic.
+- 🔒 **Your privacy & control** — `/profile`, `/reset`, and per-user isolation.
+- 👥 **Using me in groups** — addressing, ambient chime-ins, personal `/quiet` `/chatty`, admin toggles.
+- 🔔 **Staying in touch** — proactive check-ins and the `/checkins` opt-out.
+- 📋 **All commands** — the grouped command list.
+
+Every tap is a `callback_query` whose `callback_data` lives in the short `gd:` namespace
+(e.g. `gd:memory`). One handler — `on_guide_nav` — resolves the screen, **edits the message
+in place** (`message.edit_text`), and answers the callback to dismiss Telegram's loading
+spinner. Each topic screen carries a consistent footer built by `_kb_topic(screen)`: an
+**⬅️ Menu** button (`gd:home`) so there is never a dead-end, plus a **Next: … ▶️** button
+(driven by the ordered `_GUIDE_TOPICS` tuple) on every screen except the last, so a newcomer
+can page straight through *memory → privacy → groups → check-ins → commands* in order. The
+whole tour stays in one message, and a stale or unknown screen key safely falls back to the
+home menu.
+
+```python
+# app/handlers/commands.py (registration)
+router.callback_query(F.data.startswith(GUIDE_PREFIX))(on_guide_nav)
+```
+
+The handler receives the injected `db` like any other, because both middlewares are
+registered on the **update** pipeline (`dp.update.outer_middleware(...)`), which covers
+callback queries as well as messages.
+
+### Buttons on `/start` and `/onboard`
+
+The guide navigation is surfaced from the entry-point commands so users discover it
+naturally:
+
+- **`/start`** attaches a 📖 *How I work* button and a 📋 *Commands* button (plus a 🚀 *Quick
+  start* button for users who haven't onboarded yet). The `gd:onboard` button doubles as a real
+  onboarding action — it seeds the profile and flips the `onboarded` flag, mirroring `/onboard`.
+- **`/onboard`** keeps its static, plain-text intro and adds *What I can do* / *Commands*
+  buttons. The buttons live in the `reply_markup`, **outside** the message text, so the
+  intro stays plain (no markdown).
+
+The grouped command list shown by the *Commands* button is rendered by the shared
+`_build_help_text(is_admin)` builder (admin-only commands are hidden from non-admins).
+
+### Renaming-safe copy
+
+All user-facing copy references commands through the `_trigger(key)` helper, which returns
+the **resolved** trigger from `config.COMMANDS`. So if `CMD_RESET_NAME=forget` is set, the
+guide says `/forget`, not `/reset`.
+
+---
+
+## ⌨️ Published command menu (`set_my_commands`)
+
+Telegram's native **"/" command menu** is intentionally kept minimal: at startup `main.py` calls
+[`setup_bot_commands(bot)`](../../app/handlers/commands.py) (once the router is wired but before
+polling begins), which publishes **only the entry-point command** (`CMD_START_NAME`, e.g.
+`/chatbot`) in the default scope (`BotCommandScopeDefault`). Every other command is discoverable
+through the in-chat guide opened from `/start`, so the menu stays clean and uncluttered.
+
+The single entry is built by `_menu_for(_MENU_DM_KEYS)` (`_MENU_DM_KEYS == ("start",)`), which
+honors the command's **resolved trigger and enabled flag** from `config.COMMANDS` (a renamed
+`/start` → `/chatbot` shows as `chatbot`). The whole call is best-effort: a failure is logged at
+`WARNING` and never blocks startup.
 
 ---
 

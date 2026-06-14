@@ -256,13 +256,13 @@ tasks also reference their design property number for traceability.
     - For any snapshot, assert the rendered report has exactly one "LLM calls by task" line per canonical LLM_Task_Type showing its count (rendering `0` when absent) and includes success/failure/latency aggregates when present, never raising for an absent task type
     - **Validates: Requirements 6.4, 6.5, 6.8**
 
-- [ ] 13. DM-unchanged regression and wiring tests
-  - [ ]* 13.1 Write DM-unchanged regression suite
+- [x] 13. DM-unchanged regression and wiring tests
+  - [x]* 13.1 Write DM-unchanged regression suite
     - Assert the DM `handle_message` path produces the same system prompt (no per-user block), same buffer writes, and same return contract as before
     - Assert the DM path performs no identity capture, no per-user/group combination, and no Logs_Channel forwarding
     - _Requirements: 5.2, 5.3_
 
-  - [ ]* 13.2 Write Log_Forwarder, Error_Log_Sink, and command wiring tests
+  - [x]* 13.2 Write Log_Forwarder, Error_Log_Sink, and command wiring tests
     - With a mock bot, assert `log_forwarder.send` is invoked at the three explicit points — identity, extraction-saved, extraction-skipped — and that a send failure at any point is swallowed and does not interrupt processing (Req 4.2, 4.3, 4.4, 4.8)
     - With a mock bot and a loop double whose `call_soon_threadsafe` runs the callback inline, assert Error_Log_Sink dispatch: a `WARNING`+ log yields exactly one `bot.send_message`, a sub-`WARNING` log yields none, a `no_forward`-bound log yields none, and a raising `bot.send_message` does not propagate (Req 4.5, 4.6, 4.7, 4.9)
     - Assert `resolve_command_config` env cases: unset → all-defaults/all-enabled; `CMD_HELP_ENABLED=false` disables `help`; `CMD_START_NAME=hello` remaps `start`; invalid `CMD_START_NAME=" bad/name"` and duplicate `CMD_PROFILE_NAME=help` each fall back to defaults; a malformed env yields all-defaults (Req 7.1, 7.2, 7.3, 7.4, 7.5, 7.7)

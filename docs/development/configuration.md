@@ -58,11 +58,13 @@ The variables are grouped by the subsystem they govern, in the order they appear
 | Parameter | Type | Default | Description & How to Adjust |
 | :--- | :--- | :--- | :--- |
 | **`CHAT_BUFFER_MAX_CHARS`** | Integer | `10000` | **Purpose**: The character threshold of the active conversation buffer before extraction runs.<br>**How to Tune**: Lowering this (e.g., `4000`) triggers extraction sooner, saving smaller chunks to memory. Raising this keeps a longer history in active context before background trim runs. |
+| **`NEW_USER_EXTRACTION_CHARS`** | Integer | `1000` | **Purpose**: A lower buffer-char trigger used only for new/sparse users (see `NEW_USER_MEMORY_THRESHOLD`) so a fresh profile starts capturing memories quickly instead of waiting for the full `CHAT_BUFFER_MAX_CHARS`. Effective value is capped at `CHAT_BUFFER_MAX_CHARS`.<br>**How to Tune**: Lower for even faster first-profile building; raise toward `CHAT_BUFFER_MAX_CHARS` to reduce early extraction calls. |
+| **`NEW_USER_MEMORY_THRESHOLD`** | Integer | `5` | **Purpose**: Defines "new/sparse": a user whose stored memory items (facts + beliefs + events) number fewer than this uses `NEW_USER_EXTRACTION_CHARS` as the extraction trigger; at or above it, the normal `CHAT_BUFFER_MAX_CHARS` applies.<br>**How to Tune**: Raise to keep the faster cadence for longer; set to `0` to disable the new-user fast path entirely. |
 | **`CHAT_BUFFER_TRIM`** | Integer | `10` | **Purpose**: The count of latest messages preserved in active history when a buffer trim is executed.<br>**How to Tune**: Lower to keep prompts concise, or increase to retain a longer dialogue tail right after extraction. |
 | **`CHAT_BUFFER_HARD_CAP`** | Integer | `200` | **Purpose**: Absolute maximum number of messages retained in the buffer array, enforced via `$slice`. A safety net so a stalled extractor (e.g. LLM outage) can never let the array grow without bound.<br>**How to Tune**: Keep comfortably above `CHAT_BUFFER_TRIM` and normal buffer sizes. |
 | **`USER_MEMORY_BUDGET_CHARS`** | Integer | `4000` | **Purpose**: Caps the compiled memory profile text length. Exceeding this budget triggers compression.<br>**How to Tune**: Lowering forces high-level profiles earlier; raising retains more concrete detail. Keep **≥ ~600** — the empty section-header template alone is ~380 chars, so a budget near/below that can never be satisfied. |
 | **`COMPRESSION_COOLDOWN_SECS`** | Float | `300` | **Purpose**: Minimum seconds between compression runs for a given user.<br>**How to Tune**: Prevents repeated compression if a run can't immediately fit the budget. Works alongside deterministic post-compression trimming. |
-| **`CHARS_PER_TOKEN`** | Integer | `4` | **Purpose**: Character-to-token ratio used to derive output limits.<br>**How to Tune**: Default is `4`. Increase if you converse in languages that require higher token sizes (e.g. Cyrillic or East Asian). |
+| **`CHARS_PER_TOKEN`** | Integer | `4` | **Purpose**: Character-to-token ratio. **No longer used to derive output limits** (the `max_tokens` cap was removed); retained for config compatibility.<br>**How to Tune**: Changing it no longer affects generation. |
 
 ---
 
@@ -84,7 +86,7 @@ The variables are grouped by the subsystem they govern, in the order they appear
 | **`RATE_LIMIT_WINDOW_SECS`** | Float | `10.0` | **Purpose**: Rate-limit cooling window duration in seconds.<br>**How to Tune**: Increase (e.g. `20.0` or `30.0`) to restrict flooding users further. |
 | **`MAX_QUEUED_MESSAGES`** | Integer | `10` | **Purpose**: Caps the batch queue size. Incoming messages beyond this are ignored.<br>**How to Tune**: Restricting this protects your server from memory/concurrency exhaustion under spam attacks. |
 | **`MAX_INPUT_CHARS`** | Integer | `2500` | **Purpose**: Inbound messages longer than this are ignored (anti-abuse — blocks pasted logs/essays), **not** a normal chat cap.<br>**How to Tune**: Keep high enough to allow a genuine long share (a story, an experience ≈ 500 words) but low enough to block copy-paste dumps. |
-| **`MAX_RESPONSE_CHARS`** | Integer | `2000` | **Purpose**: A generous safety ceiling for reply length (drives `max_tokens`). It is **not** a per-message target — actual length is matched to the user's message (see the system-prompt "Length" rule).<br>**How to Tune**: Raise if long replies get truncated; lower only if you want a firmer ceiling. |
+| **`MAX_RESPONSE_CHARS`** | Integer | `2000` | **Purpose**: Legacy soft reference for reply length. **No longer drives a `max_tokens` cap** — reply length is governed by the system-prompt "Length" rule. Retained for config compatibility.<br>**How to Tune**: Changing it no longer affects generation; length is matched to the user's message by the persona. |
 
 ---
 
@@ -93,7 +95,7 @@ The variables are grouped by the subsystem they govern, in the order they appear
 | Parameter | Type | Default | Description & How to Adjust |
 | :--- | :--- | :--- | :--- |
 | **`PERSONA_FILE`** | Path | `persona.md` | **Purpose**: Path to the Markdown file defining the bot's tone and traits.<br>**How to Tune**: Default is `persona.md`. Tune if you are hosting multiple bot instances with distinct personalities. |
-| **`BOT_NAME`** | String | *(blank → uses Telegram first name)* | **Purpose**: The display name the bot answers to in group chats, matched as a standalone, case-insensitive, word-boundary token (in addition to its auto-detected `@username` mention and reply-to-bot).<br>**How to Tune**: Set to the name you want members to call the bot (e.g. `Mate`). Leave blank to fall back to the bot's Telegram first name resolved via `get_me()`. The `@username` mention is always auto-detected regardless of this value. |
+| **`BOT_NAME`** | String | *(blank → `ThinkMate`)* | **Purpose**: The bot's **universal display name**. It is (a) the name the bot answers to in group chats, matched as a standalone, case-insensitive, word-boundary token (in addition to its auto-detected `@username` mention and reply-to-bot), and (b) the user-facing name shown everywhere else — greetings (`/start`), onboarding (`/onboard`), admin `/health` and `/metrics` headers, and the assistant's attribution in group transcripts. Resolved via `config.bot_display_name` (`BOT_NAME` if set, else `ThinkMate`).<br>**How to Tune**: Set to your bot's name (e.g. `Nova`) to rebrand it everywhere at once. For group **addressing only**, a blank value falls back to the Telegram first name from `get_me()`; the universal display name falls back to `ThinkMate`. The `@username` mention is always auto-detected regardless of this value. |
 | **`ENABLE_MESSAGE_REACTIONS`** | Bool | `True` | **Purpose**: Master switch for Telegram emoji reactions on user messages. When `False`, the reaction field of the combined reply call is ignored.<br>**How to Tune**: Disable if a deployment's chats forbid reactions or to save nothing extra (reactions ride the existing reply call, so there is no LLM-cost saving — this is purely behavioral). |
 
 ---
@@ -142,6 +144,7 @@ metric catalog and runbook.
 | :--- | :--- | :--- | :--- |
 | **`ADMIN_USER_IDS`** | String (CSV) | *(blank → DM-only)* | **Purpose**: Comma-separated list of Telegram user ids allowed to use the `/health` and `/metrics` admin commands. Blanks are ignored and each id is coerced to `int`.<br>**How to Tune**: Leave empty to apply the safe default — the commands answer **only in private chats (DMs)** so a status report is never broadcast to a group. Set to specific ids (e.g. `123456789,987654321`) to restrict the commands to those operators in any chat. |
 | **`METRICS_LOG_INTERVAL_SECS`** | Float | `0.0` | **Purpose**: Interval, in seconds, for the optional background task that logs the metrics-snapshot summary (no DB/LLM call).<br>**How to Tune**: Keep `0` (or any value ≤ 0) to disable the periodic logger entirely. Set a positive value (e.g. `60`) to emit one summary log line per interval for a lightweight time series in the logs. |
+| **`METRICS_PERSIST_INTERVAL_SECS`** | Float | `300.0` | **Purpose**: Interval, in seconds, for flushing the metrics registry to the `metrics_state` MongoDB document so `/health` and `/metrics` survive restarts/crashes (a cheap single-document upsert).<br>**How to Tune**: Keep the default `300` for a 5-minute crash window. Lower it for tighter durability at the cost of more writes; set `0` to disable the *periodic* flush — the startup-load and shutdown-flush still run, so a graceful restart keeps its totals regardless. See [observability.md](observability.md#metrics-persistence-surviving-restarts). |
 
 ---
 
@@ -149,25 +152,30 @@ metric catalog and runbook.
 
 Every built-in slash command can be **renamed** to a custom trigger or **disabled** entirely, all
 from the environment — no code change. This is useful for white-labeling the bot (e.g. mapping
-`/help` to `/chatbot`), avoiding command clashes with other bots in a group, or hiding capabilities
+`/start` to `/chatbot`), avoiding command clashes with other bots in a group, or hiding capabilities
 you don't want exposed. Both settings have safe defaults (the trigger equals the command key and the
 command is enabled), so you only set the ones you want to change.
 
 The live `/help` message is generated from this configuration, so a renamed command appears under its
-new trigger and a disabled command is hidden and unregistered (it draws no response at all).
+new trigger and a disabled command is hidden and unregistered (it draws no response at all). The same
+configuration drives the native Telegram **"/" command menu**, which is published at startup via
+`set_my_commands` (see [telegram_bot.md](telegram_bot.md#️-published-command-menu-set_my_commands)):
+personal commands are scoped to DMs and group moderation toggles to group chats, while admin-only
+`/health` and `/metrics` are omitted from the public menu.
 
-**The built-in command keys** (in help-display order) are: `start`, `onboard`, `pause`, `resume`,
-`help`, `profile`, `reset`, `quiet`, `chatty`, `groupon`, `groupoff`, `health`, `metrics`.
+**The built-in command keys** (in help-display order) are: `start`, `onboard`, `guide`, `pause`,
+`resume`, `help`, `profile`, `reset`, `quiet`, `chatty`, `groupon`, `groupoff`, `groupquiet`,
+`groupchatty`, `groupnormal`, `health`, `metrics`.
 
 | Parameter | Type | Default | Description & How to Adjust |
 | :--- | :--- | :--- | :--- |
-| **`CMD_<KEY>_NAME`** | String | *(the key)* | **Purpose**: The trigger the command is bound under. `<KEY>` is the upper-cased command key (e.g. `CMD_HELP_NAME`). A leading `/` is stripped; the name must be 1–32 characters of letters, digits, or underscores (Telegram's command rule).<br>**How to Tune**: Set e.g. `CMD_HELP_NAME=chatbot` to expose `/help` as `/chatbot`. An invalid name, or one that **duplicates** another enabled command's trigger, safely falls back to the default key with a logged warning (startup never crashes). |
-| **`CMD_<KEY>_ENABLED`** | Boolean | `True` | **Purpose**: Whether the command is registered at all.<br>**How to Tune**: Set e.g. `CMD_RESET_ENABLED=False` to remove `/reset` — it is left unregistered and omitted from `/help`. Admin-only commands (`/health`, `/metrics`) remain admin-gated regardless of any rename. |
+| **`CMD_<KEY>_NAME`** | String | *(the key)* | **Purpose**: The trigger the command is bound under. `<KEY>` is the upper-cased command key (e.g. `CMD_START_NAME`). A leading `/` is stripped; the name must be 1–32 characters of letters, digits, or underscores (Telegram's command rule).<br>**How to Tune**: Set e.g. `CMD_START_NAME=chatbot` to expose `/start` as `/chatbot`. An invalid name, or one that **duplicates** another enabled command's trigger, safely falls back to the default key with a logged warning (startup never crashes). |
+| **`CMD_<KEY>_ENABLED`** | Boolean | `True` | **Purpose**: Whether the command is registered at all.<br>**How to Tune**: Set e.g. `CMD_RESET_ENABLED=False` to remove `/reset` — it is left unregistered and omitted from `/help` and the "/" menu. Admin-only commands (`/health`, `/metrics`) remain admin-gated regardless of any rename. |
 
 **Examples**
 
 ```dotenv
-CMD_HELP_NAME=chatbot       # /help is now /chatbot
+CMD_START_NAME=chatbot      # /start is now /chatbot (the bot's main entry point)
 CMD_PROFILE_NAME=memories   # /profile is now /memories
 CMD_RESET_ENABLED=False     # /reset is removed entirely
 ```

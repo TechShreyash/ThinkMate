@@ -146,6 +146,47 @@ class MetricsRegistry:
             logger.debug(f"metrics.snapshot() failed: {exc}")
             return {"counters": {}, "gauges": {}, "timers": {}}
 
+    def load_state(self, state: dict) -> None:
+        """Seed/merge the registry from a previously persisted ``snapshot()``-shaped dict.
+
+        Used at startup to restore cumulative counters and timer aggregates so they keep
+        accumulating across process restarts instead of resetting to zero. Counters and
+        timer ``count``/``sum`` are *added* to whatever is already in memory (so calling
+        this on a fresh registry simply restores the saved totals, and a double-load can
+        never silently drop data); timer ``max`` takes the larger of the two; gauges are
+        replaced (they are point-in-time). The derived timer ``avg`` field is ignored —
+        it is recomputed in :meth:`snapshot`. Malformed entries are skipped, and the whole
+        body is guarded so a bad persisted document can never break startup (Req 2.8).
+        """
+        if not isinstance(state, dict):
+            return
+        try:
+            with self._lock:
+                for name, value in (state.get("counters") or {}).items():
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        continue
+                    self._counters[name] = self._counters.get(name, 0) + int(value)
+                for name, value in (state.get("gauges") or {}).items():
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        continue
+                    self._gauges[name] = value
+                for name, agg in (state.get("timers") or {}).items():
+                    if not isinstance(agg, dict):
+                        continue
+                    count = int(agg.get("count", 0) or 0)
+                    total = float(agg.get("sum", 0) or 0)
+                    mx = float(agg.get("max", 0) or 0)
+                    existing = self._timers.get(name)
+                    if existing is None:
+                        self._timers[name] = {"count": count, "sum": total, "max": mx}
+                    else:
+                        existing["count"] += count
+                        existing["sum"] += total
+                        if mx > existing["max"]:
+                            existing["max"] = mx
+        except Exception as exc:  # a bad persisted doc must never break startup (Req 2.8)
+            logger.debug(f"metrics.load_state() failed: {exc}")
+
     def reset(self) -> None:
         """Clear all counters, gauges, and timers (used for test isolation)."""
         try:

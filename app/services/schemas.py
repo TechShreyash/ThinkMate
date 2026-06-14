@@ -43,14 +43,29 @@ class BeliefRemoval(BaseModel):
 # --- EVENT SCHEMAS ---
 class EventExtract(BaseModel):
     description: str = Field(description="Short summary of the event.")
-    date: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD) or string representation ('last week').")
+    date: Optional[str] = Field(
+        None,
+        description=(
+            "Absolute calendar date of the event in ISO form: 'YYYY-MM-DD' when the day is "
+            "known, or 'YYYY-MM' / 'YYYY' when only the month or year is known. Resolve "
+            "relative references ('today', 'yesterday', 'last week') into an actual date "
+            "using the per-message timestamps and the CURRENT DATE provided. NEVER store "
+            "vague words like 'today' or 'recent'. Use null when no time info is available."
+        ),
+    )
     significance: Literal["major", "minor", "routine"]
     emotion: Optional[str] = Field(None, description="Dominant emotion linked to this event.")
 
 class EventUpdate(BaseModel):
     old_description: str = Field(description="The exact description text of the event to update.")
     new_description: str = Field(description="The replacement description.")
-    date: Optional[str] = Field(None, description="Updated date, or None to keep the original.")
+    date: Optional[str] = Field(
+        None,
+        description=(
+            "Updated absolute ISO date ('YYYY-MM-DD', 'YYYY-MM', or 'YYYY'), or None to keep "
+            "the original. Never a vague/relative word like 'today' or 'last week'."
+        ),
+    )
     significance: Optional[Literal["major", "minor", "routine"]] = Field(None, description="Updated significance, or None to keep the original.")
 
 class EventRemoval(BaseModel):

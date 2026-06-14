@@ -142,6 +142,73 @@ def start_metrics_logger() -> "asyncio.Task | None":
         return None
 
 
+# --- Metrics persistence (survive restarts/crashes) ---
+
+
+async def load_persisted_metrics() -> None:
+    """Restore the metrics registry from MongoDB at startup. Best-effort, never raises.
+
+    Seeds the in-memory registry from the last saved snapshot so counters and timer
+    aggregates keep accumulating across restarts instead of resetting to zero. A missing
+    or unreadable document simply leaves the registry empty.
+    """
+    try:
+        from app.database.connection import db_session
+        from app.database import models
+
+        async with db_session() as db:
+            state = await models.load_metrics_state(db)
+        if state:
+            metrics.load_state(state)
+            logger.info("Restored persisted metrics from MongoDB.")
+    except Exception as exc:  # never block startup on metrics restore
+        logger.debug(f"load_persisted_metrics failed: {exc}")
+
+
+async def flush_metrics() -> None:
+    """Write the current metrics snapshot to MongoDB. Best-effort, never raises."""
+    try:
+        from app.database.connection import db_session
+        from app.database import models
+
+        async with db_session() as db:
+            await models.save_metrics_state(db, metrics.snapshot())
+    except Exception as exc:  # a flush failure must never crash a loop or shutdown
+        logger.debug(f"flush_metrics failed: {exc}")
+
+
+async def _metrics_persist_loop(interval: float) -> None:
+    """Flush the metrics snapshot to MongoDB every ``interval`` seconds until cancelled.
+
+    On cancellation (shutdown) it performs one final flush so the latest counters are not
+    lost between the last periodic write and process exit. Self-heals on transient errors.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await flush_metrics()
+        except asyncio.CancelledError:
+            await flush_metrics()  # final flush on graceful shutdown
+            break
+        except Exception as e:  # never crash the loop
+            logger.debug(f"metrics persist iteration failed: {e}")
+
+
+def start_metrics_persister() -> "asyncio.Task | None":
+    """Start the periodic metrics persister when enabled; no-op (None) when disabled.
+
+    Enabled when config.METRICS_PERSIST_INTERVAL_SECS > 0. When disabled, callers should
+    still invoke :func:`flush_metrics` once on shutdown to capture the session's totals.
+    """
+    interval = config.METRICS_PERSIST_INTERVAL_SECS
+    if interval <= 0:
+        return None
+    try:
+        return asyncio.get_running_loop().create_task(_metrics_persist_loop(interval))
+    except RuntimeError:
+        return None
+
+
 # --- Periodic consolidation scheduler (Phase 11, Requirement 1) ---
 
 
@@ -237,7 +304,10 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
             await models.set_proactive_enabled(db, user_id, False)
             return "failed"
         # Record the assistant message in the buffer so a reply flows normally.
-        await models.add_message_to_buffer(db, user_id, "assistant", text, sender_id=0, sender_name="ThinkMate")
+        await models.add_message_to_buffer(db, user_id, "assistant", text, sender_id=0, sender_name=config.bot_display_name)
+        # Count this delivered check-in toward the unanswered streak; if the user keeps
+        # ignoring us they'll be auto-paused once it reaches PROACTIVE_MAX_UNANSWERED.
+        await models.increment_proactive_unanswered(db, user_id)
         return "sent"
 
 
@@ -257,6 +327,7 @@ async def _run_proactive_scan(bot) -> None:
             inactivity_secs=config.PROACTIVE_INACTIVITY_SECS,
             min_interval_secs=config.PROACTIVE_MIN_INTERVAL_SECS,
             limit=config.PROACTIVE_MAX_PER_SCAN,
+            max_unanswered=config.PROACTIVE_MAX_UNANSWERED,
             now=now,
         )
     sent = skipped = failed = 0

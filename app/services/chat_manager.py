@@ -15,7 +15,7 @@ from app.database import models
 from app.services.affinity import affinity_cache
 from app.services.group_gate import scan_negative_signal
 from app.services.llm_service import llm_service
-from app.services.memory_loader import build_memory_block
+from app.services.memory_loader import build_memory_block, load_profile_doc, compile_memory_block
 from app.prompts.system_prompt import build_system_prompt
 
 
@@ -40,7 +40,7 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
     return "\n".join(lines)
 
 
-_DEFAULT_PERSONA = "You are ThinkMate, a warm, witty AI companion."
+_DEFAULT_PERSONA = f"You are {config.bot_display_name}, a warm, witty AI companion."
 _persona_cache: dict = {"path": None, "mtime": None, "content": _DEFAULT_PERSONA}
 
 # Affinity-down step applied to the speaker when a cheap "back off" keyword
@@ -122,23 +122,46 @@ async def handle_message(
     # 2. Buffer overflow -> non-blocking background extraction. Keyed by chat_id; the
     #    known group flag is passed through to the extractor so extraction dispatch is
     #    authoritative rather than relying on a sender-count heuristic.
-    if buffer_chars >= config.CHAT_BUFFER_MAX_CHARS:
+    #    New/sparse users extract sooner (NEW_USER_EXTRACTION_CHARS) so their profile
+    #    builds quickly; established users use the normal CHAT_BUFFER_MAX_CHARS threshold.
+    extraction_threshold = config.CHAT_BUFFER_MAX_CHARS
+    try:
+        if await models.count_memory_items(db, chat_id) < config.NEW_USER_MEMORY_THRESHOLD:
+            extraction_threshold = min(
+                config.NEW_USER_EXTRACTION_CHARS, config.CHAT_BUFFER_MAX_CHARS
+            )
+    except Exception as e:  # noqa: BLE001 - never let the threshold check break the hot path
+        logger.debug(f"new-user extraction threshold check failed for chat {chat_id}: {e}")
+
+    if buffer_chars >= extraction_threshold:
         from app.services.user_task_manager import user_task_manager
-        logger.info(f"Buffer overflow for chat {chat_id} ({buffer_chars} chars); launching extraction.")
+        logger.info(
+            f"Buffer overflow for chat {chat_id} ({buffer_chars} chars >= "
+            f"{extraction_threshold}); launching extraction."
+        )
         asyncio.create_task(user_task_manager.run_extractor(chat_id, is_group=is_group))
 
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()
+
+    # Whether the bot may add an emoji reaction to THIS sender's message (/reactions
+    # opt-out, default enabled). Read for free from the sender's profile doc that the
+    # memory-block load below already fetches — no extra round-trip. Degrades to enabled
+    # if that doc is unavailable, so a read failure never silently suppresses reactions.
+    sender_reactions_enabled = True
 
     if is_group:
         # Group block keyed by chat_id (existing behavior); needs_compression continues to
         # track the GROUP block (Req 3.2).
         group_block, needs_compression = await build_memory_block(db, chat_id)
         # Per-user block for the TRIGGERING sender only (Req 3.1, 3.4). Degrade to
-        # group-only on failure without raising (Req 3.7).
+        # group-only on failure without raising (Req 3.7). Reuse the sender's profile doc
+        # to read the per-user reaction preference in the same read.
         user_block = ""
         try:
-            user_block, _ = await build_memory_block(db, sender_id)
+            sender_doc = await load_profile_doc(db, sender_id)
+            user_block, _ = compile_memory_block(sender_doc)
+            sender_reactions_enabled = sender_doc.get("reactions_enabled", True)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"per-user memory load failed for sender {sender_id}: {e}")
             user_block = ""
@@ -148,8 +171,11 @@ async def handle_message(
             persona, group_block, time_context="", user_memory_text=user_block
         )
     else:
-        # DM path: byte-for-byte unchanged (Req 3.6, 5.2).
-        memory_block, needs_compression = await build_memory_block(db, chat_id)
+        # DM path: byte-for-byte unchanged (Req 3.6, 5.2). The single profile read here
+        # also carries the sender's reaction preference (chat_id == sender_id in a DM).
+        dm_doc = await load_profile_doc(db, chat_id)
+        memory_block, needs_compression = compile_memory_block(dm_doc)
+        sender_reactions_enabled = dm_doc.get("reactions_enabled", True)
         # Temporal context: DM path only. Record the user's last-interaction time and
         # compute a concise "now + last talked" string in a single combined round-trip
         # (no extra LLM call, no upsert).
@@ -195,12 +221,18 @@ async def handle_message(
 
     # 5. Persist the assistant reply with sender attribution (DM: just adds two fields).
     await models.add_message_to_buffer(
-        db, chat_id, "assistant", reply_text, sender_id=0, sender_name="ThinkMate"
+        db, chat_id, "assistant", reply_text, sender_id=0, sender_name=config.bot_display_name
     )
 
     # 6. Memory over budget -> rate-limited background compression.
     if needs_compression:
         from app.services.user_task_manager import user_task_manager
         asyncio.create_task(user_task_manager.run_compressor(chat_id))
+
+    # Per-user reaction opt-out (/reactions off): drop the reaction here so the sender
+    # delivery path never needs a second profile read. The flag was folded into the
+    # memory-block load above.
+    if reaction and not sender_reactions_enabled:
+        reaction = None
 
     return reply_text, reaction

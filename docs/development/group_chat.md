@@ -78,6 +78,34 @@ reply with a short notice when used outside a group or by a non-admin. Both comm
 env-mappable/disable-able like every other command (see
 [configuration.md](configuration.md#️-commands-rename--disable), keys `groupon` / `groupoff`).
 
+## Group-wide chattiness (`/groupquiet`, `/groupchatty`, `/groupnormal`)
+
+The per-user `/quiet` and `/chatty` commands only change the bot's behavior toward the **one person
+who ran them**, in that group. To control chattiness for the **whole group at once**, a group admin
+(or an `ADMIN_USER_IDS` operator) uses the group-wide commands, which take **priority over every
+member's personal setting**:
+
+* **`/groupquiet`** — sets the group mode to `quiet`. The bot stops chiming in on its own for
+  everyone here (it still replies when addressed or replied-to). This overrides any member's
+  personal `/chatty`.
+* **`/groupchatty`** — sets the group mode to `chatty`. The bot joins in more for everyone here,
+  overriding any member's personal `/quiet`.
+* **`/groupnormal`** — clears the override (mode `auto`), so each member's own `/quiet` / `/chatty`
+  applies again.
+
+The effective mode used by the ambient gate is resolved in `_maybe_ambient_chime` as:
+
+```text
+effective_mode = group_mode if group_mode in ("quiet", "chatty") else member_mode
+```
+
+So a group-level override always wins when set; `auto` defers to the member. The group mode is
+stored as `group_mode` in `group_settings` via `models.set_group_mode` and read on the ambient path
+via `models.get_group_mode` (defaulting to `auto`, and degrading to `auto` on any read error). The
+override only affects the **ambient chime-in** path (the same path `/quiet` / `/chatty` affect) — it
+does not change explicit-address or implicit-follow-up replies. All three commands are
+env-mappable/disable-able (keys `groupquiet` / `groupchatty` / `groupnormal`).
+
 ## Data model
 
 The group features rest on three storage decisions: where messages are buffered, where extracted
@@ -92,8 +120,9 @@ group-aware path serve DMs unchanged.
   back to each `sender_id` (using the segment's own name→id map) and saved to each profile.
 * **Affinity** lives in `chat_members` (`_id = "{chat_id}:{user_id}"`): `affinity` (0–1,
   default 0.5), `mode` (`auto` / `quiet` / `chatty`). Cached in memory, written through on change.
-* **Group on/off** lives in `group_settings` (`_id = chat_id`, `enabled: bool`) — the
-  `/groupon` / `/groupoff` kill switch above.
+* **Group on/off + group-wide mode** live in `group_settings` (`_id = chat_id`, `enabled: bool`,
+  `group_mode: str`) — the `/groupon` / `/groupoff` kill switch and the `/groupquiet` /
+  `/groupchatty` / `/groupnormal` chattiness override above.
 
 ## Implicit addressing (replying without being tagged)
 
@@ -159,25 +188,35 @@ classification bug can never suppress a legitimate reply (Req 9.6).
 **Greeting-burst spam (over time).** A userbot can also tag members one-by-one in rapid succession
 with near-identical low-content greetings ("hi @a", "hi @b", "hi @c"…) — no single message trips the
 mention-count threshold. `SpamBurstDetector` (singleton `spam_burst_detector`) is a **stateful**
-no-LLM detector that catches this. Per chat it keeps a `deque` of recent
+no-LLM detector that catches this. It keeps, **per `(chat_id, user_id)` sender**, a `deque` of recent
 `(arrival_time, mention_stripped_content)` pairs, bounded by both the time window
-`GROUP_SPAM_BURST_WINDOW_SECS` and a hard cap `GROUP_SPAM_BURST_TRACK_MAX`. Its single entry point,
-`observe(chat_id, text, entities, now)`:
+`GROUP_SPAM_BURST_WINDOW_SECS` and a hard cap `GROUP_SPAM_BURST_TRACK_MAX`. Keying by sender means a
+burst is only flagged when the **same person** repeats near-identical messages — one member's
+repetition can never cause another member's message to be classified as spam, which also matches the
+real threat (a single userbot flooding). Its single entry point,
+`observe(chat_id, text, entities, now, user_id=None)`:
 
 1. strips `@mention`/`text_mention` entity slices from the text (regex `@\w+` fallback when entities
    are absent or malformed), then case-folds and whitespace-collapses the remainder — so "hi @alice"
    and "hi @bob" both reduce to "hi" and compare as identical (Req 10.1);
-2. evicts this chat's history entries older than the window;
+2. evicts this sender's history entries older than the window;
 3. counts retained entries that are *near-identical* — `difflib.SequenceMatcher(None, a, b).ratio()
    >= GROUP_SPAM_BURST_SIMILARITY` (standard library, deterministic, dependency-free);
 4. appends `(now, content)` (hard-capped at `GROUP_SPAM_BURST_TRACK_MAX`);
 5. including the just-added message, returns `True` when the near-identical count reaches
    `GROUP_SPAM_BURST_COUNT`, else `False`.
 
-A lone or sub-threshold greeting is never flagged (Req 10.8). `observe` must run on **every** group
-message so its time-windowed history is complete regardless of which path the message takes; it is
-fully defensive (errors degrade to "not burst", Req 10.14) and is deterministic given `now`, so it
-unit- and property-tests with a fresh instance and an injected clock.
+`user_id` is optional (defaults to `None`) so callers/tests that don't track a sender share a single
+per-chat bucket; the router passes the real `message.from_user.id`. A lone or sub-threshold greeting
+is never flagged (Req 10.8). `observe` must run on **every** group message so its time-windowed
+history is complete regardless of which path the message takes; it is fully defensive (errors degrade
+to "not burst", Req 10.14) and is deterministic given `now`, so it unit- and property-tests with a
+fresh instance and an injected clock.
+
+> **Trade-off.** Because burst history is per-sender, a *coordinated* raid using many distinct
+> accounts that each post only once or twice is not caught by the burst detector (the single-message
+> `GROUP_MASS_TAG_SPAM_THRESHOLD` still catches one message that tags a crowd). This is a deliberate
+> choice so an innocent member is never penalized for another member's repetition.
 
 **Spam-aware explicit address.** Spam-awareness is layered in the router rather than folded into the
 pure `is_addressed` (which several tests pin), so the explicit decision reads:

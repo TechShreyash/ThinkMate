@@ -1,9 +1,11 @@
 """Best-effort operational event forwarding to the configured Telegram logs channel.
 
-Forwards exactly three explicit events (identity captured/refreshed, extraction-saved,
-extraction-skipped). Every send is wrapped so a forwarding failure can never raise on a hot
-path. Events whose SOURCE chat is the logs channel are dropped (Req 4.10). Forwarder logs are
-bound with extra={"no_forward": True} so the Error_Log_Sink will not re-forward them (Req 4.9).
+Forwards a small set of explicit operational events: the three memory events (identity
+captured/refreshed, extraction-saved, extraction-skipped) plus the process lifecycle
+notices (startup / shutdown) emitted from ``main.py``. Every send is wrapped so a
+forwarding failure can never raise on a hot path. Events whose SOURCE chat is the logs
+channel are dropped (Req 4.10). Forwarder logs are bound with extra={"no_forward": True}
+so the Error_Log_Sink will not re-forward them (Req 4.9).
 """
 from loguru import logger
 
@@ -37,3 +39,40 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
         await b.send_message(chat_id=target, text=text)
     except Exception as e:  # noqa: BLE001 - discard failures (Req 4.8)
         _log.debug(f"log_forwarder send failed (discarded): {e}")
+
+
+async def send_document(
+    bot,
+    source_chat_id: int | None,
+    filename: str,
+    content: bytes,
+    caption: str | None = None,
+) -> bool:
+    """Upload ``content`` as a file named ``filename`` to LOGS_CHANNEL_ID.
+
+    Used to archive backups (e.g. a user's exported profile before a destructive
+    ``/reset``) to the logs channel. Mirrors :func:`send`'s safety contract: a no-op when
+    the channel is unset, recursive, or no bot is available, and any delivery failure is
+    swallowed. Returns ``True`` only when the upload was actually attempted and succeeded,
+    so callers can warn an admin if the backup did not land.
+    """
+    try:
+        from aiogram.types import BufferedInputFile
+
+        target = config.LOGS_CHANNEL_ID
+        if not target:
+            return False
+        if source_chat_id is not None and source_chat_id == target:
+            return False
+        b = bot or _bot
+        if b is None:
+            return False
+        await b.send_document(
+            chat_id=target,
+            document=BufferedInputFile(content, filename=filename),
+            caption=caption,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 - discard failures (Req 4.8)
+        _log.debug(f"log_forwarder send_document failed (discarded): {e}")
+        return False

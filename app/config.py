@@ -51,8 +51,10 @@ def _env_int_set(key: str, default: set[int] | None = None) -> set[int]:
 # Canonical built-in command keys, in help-display order. The key is also the DEFAULT
 # trigger name for that command.
 _BUILTIN_COMMANDS: tuple[str, ...] = (
-    "start", "onboard", "pause", "resume", "help",
-    "profile", "reset", "quiet", "chatty", "groupon", "groupoff", "health", "metrics",
+    "start", "onboard", "checkins",
+    "profile", "reset", "reactions", "quiet", "chatty",
+    "groupbot", "groupquiet", "groupchatty", "groupnormal",
+    "health", "metrics",
 )
 
 # Telegram command name rule: 1-32 chars, letters/digits/underscore. Used to reject
@@ -118,6 +120,13 @@ class Config(BaseModel):
     LLM_STRUCTURED_MODE: str = Field(default_factory=lambda: _env_str("LLM_STRUCTURED_MODE", "json_object"))
     LLM_MAX_RETRIES: int = Field(default_factory=lambda: _env_int("LLM_MAX_RETRIES", 2))
     LLM_RETRY_BASE_DELAY_SECS: float = Field(default_factory=lambda: _env_float("LLM_RETRY_BASE_DELAY_SECS", 0.5))
+    # Per-request client timeout. Must sit ABOVE the proxy's own request ceiling
+    # (currently 600s for non-streaming) so the proxy is always the first to give
+    # up: the client then receives a definitive error instead of abandoning a
+    # still-running generation and re-spawning it on retry (duplicate upstream
+    # work). Generous by design — reasoning models can legitimately run for
+    # minutes. See docs/development/llm_integration.md.
+    LLM_REQUEST_TIMEOUT_SECS: float = Field(default_factory=lambda: _env_float("LLM_REQUEST_TIMEOUT_SECS", 610.0))
 
     # --- MongoDB ---
     MONGODB_URI: str = Field(default_factory=lambda: _env_str("MONGODB_URI", "mongodb://localhost:27017"))
@@ -126,6 +135,11 @@ class Config(BaseModel):
 
     # --- Memory tuning ---
     CHAT_BUFFER_MAX_CHARS: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_MAX_CHARS", 10000))
+    # New/sparse users (few stored memory items) extract sooner so their profile builds
+    # quickly: when a user's stored memory-item count is below NEW_USER_MEMORY_THRESHOLD,
+    # extraction triggers at NEW_USER_EXTRACTION_CHARS instead of CHAT_BUFFER_MAX_CHARS.
+    NEW_USER_EXTRACTION_CHARS: int = Field(default_factory=lambda: _env_int("NEW_USER_EXTRACTION_CHARS", 1000))
+    NEW_USER_MEMORY_THRESHOLD: int = Field(default_factory=lambda: _env_int("NEW_USER_MEMORY_THRESHOLD", 5))
     CHAT_BUFFER_TRIM: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_TRIM", 10))
     CHAT_BUFFER_HARD_CAP: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_HARD_CAP", 200))
     USER_MEMORY_BUDGET_CHARS: int = Field(default_factory=lambda: _env_int("USER_MEMORY_BUDGET_CHARS", 4000))
@@ -170,6 +184,10 @@ class Config(BaseModel):
     # --- Observability / ops ---
     ADMIN_USER_IDS: set[int] = Field(default_factory=lambda: _env_int_set("ADMIN_USER_IDS"))
     METRICS_LOG_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_LOG_INTERVAL_SECS", 0.0))
+    # Persist the metrics registry to MongoDB every N seconds so counters/timers survive a
+    # restart or crash. <= 0 disables the periodic flush (startup-load and shutdown-flush
+    # still run). Cheap single-document upsert, so on by default.
+    METRICS_PERSIST_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_PERSIST_INTERVAL_SECS", 300.0))
     LOGS_CHANNEL_ID: int = Field(default_factory=lambda: _env_int("LOGS_CHANNEL_ID", -1003933328659))
 
     # --- Configurable commands (trigger name + enabled state per built-in command) ---
@@ -192,8 +210,23 @@ class Config(BaseModel):
     PROACTIVE_MIN_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_MIN_INTERVAL_SECS", 259200.0))
     PROACTIVE_MAX_PER_SCAN: int = Field(default_factory=lambda: _env_int("PROACTIVE_MAX_PER_SCAN", 20))
     PROACTIVE_MIN_ITEMS: int = Field(default_factory=lambda: _env_int("PROACTIVE_MIN_ITEMS", 3))
+    # Auto-pause proactive DMs for an unresponsive user: after this many consecutive
+    # delivered check-ins with no reply (no chat message or command in between), the user
+    # is skipped by the scan until they engage again, which resets the streak. 0 disables
+    # the auto-pause (check-ins keep going regardless of silence).
+    PROACTIVE_MAX_UNANSWERED: int = Field(default_factory=lambda: _env_int("PROACTIVE_MAX_UNANSWERED", 3))
     PROACTIVE_QUIET_START_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_START_HOUR", 22))
     PROACTIVE_QUIET_END_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 7))
+
+    @property
+    def bot_display_name(self) -> str:
+        """The bot's user-facing name: ``BOT_NAME`` when set, else ``"ThinkMate"``.
+
+        Single source of truth for the name shown to users (greetings, onboarding,
+        admin reports, and the assistant's attribution in group transcripts), so the
+        bot can be rebranded entirely by setting ``BOT_NAME`` in the environment.
+        """
+        return self.BOT_NAME.strip() or "ThinkMate"
 
 
 config = Config()

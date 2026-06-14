@@ -141,6 +141,27 @@ async def _ensure_memory_skeleton(db: AsyncIOMotorDatabase, user_id: int):
     )
 
 
+async def export_user_data(db: AsyncIOMotorDatabase, user_id: int) -> dict | None:
+    """Return a JSON-serializable snapshot of everything stored for ``user_id``.
+
+    Bundles the full ``user_profiles`` document and the ``chat_buffers`` document so the
+    snapshot can be archived (e.g. forwarded to the Logs_Channel as a backup before a
+    destructive ``/reset``) and, if ever needed, restored by an admin. Returns ``None``
+    when no profile exists, so callers can skip backing up a user with nothing to lose.
+    ``ObjectId``/``datetime`` values are left as-is; serialize with ``default=str``.
+    """
+    profile = await db["user_profiles"].find_one({"_id": user_id})
+    if profile is None:
+        return None
+    chat_buffer = await db["chat_buffers"].find_one({"_id": user_id})
+    return {
+        "user_id": user_id,
+        "exported_at": _utcnow(),
+        "user_profiles": profile,
+        "chat_buffers": chat_buffer,
+    }
+
+
 async def reset_user(db: AsyncIOMotorDatabase, user_id: int):
     """Hard-delete all stored state for a user (profile + chat buffer)."""
     await db["user_profiles"].delete_one({"_id": user_id})
@@ -216,6 +237,25 @@ async def get_buffer_char_count(db: AsyncIOMotorDatabase, user_id: int) -> int:
     if doc and "messages" in doc:
         return sum(len(m["content"]) for m in doc["messages"])
     return 0
+
+
+async def count_memory_items(db: AsyncIOMotorDatabase, user_id: int) -> int:
+    """Return the total count of stored memory items (facts + beliefs + events).
+
+    Used to decide whether a user is "new"/sparse so the extraction trigger can fire
+    sooner for them. Reads only the three array fields via projection (cheap). Returns 0
+    when the profile is absent.
+    """
+    doc = await db["user_profiles"].find_one(
+        {"_id": user_id}, {"facts": 1, "beliefs": 1, "events": 1}
+    )
+    if not doc:
+        return 0
+    return (
+        len(doc.get("facts") or [])
+        + len(doc.get("beliefs") or [])
+        + len(doc.get("events") or [])
+    )
 
 
 async def delete_oldest_buffer_messages(db: AsyncIOMotorDatabase, user_id: int, count: int):
@@ -519,11 +559,15 @@ async def touch_and_get_last_interaction(
     A single ``find_one_and_update`` with ``ReturnDocument.BEFORE`` reads the prior
     timestamp (for the temporal "last talked" gap) and writes the new one atomically.
     Does **not** upsert (Req 2.3): a user without a profile is a no-op returning ``None``.
+
+    Engaging in a DM also clears ``proactive_unanswered`` (the consecutive-unanswered
+    check-in streak), so a user who replies becomes eligible for proactive check-ins
+    again after they had been auto-paused for going silent.
     """
     now = now or _utcnow()
     doc = await db["user_profiles"].find_one_and_update(
         {"_id": user_id},
-        {"$set": {"last_interaction_at": now}},
+        {"$set": {"last_interaction_at": now, "proactive_unanswered": 0}},
         projection={"last_interaction_at": 1},
         return_document=ReturnDocument.BEFORE,
         upsert=False,
@@ -537,6 +581,82 @@ async def set_proactive_enabled(db: AsyncIOMotorDatabase, user_id: int, enabled:
         {"_id": user_id},
         {"$set": {"proactive_enabled": enabled, "updated_at": _utcnow()}},
     )
+
+
+async def get_proactive_enabled(db: AsyncIOMotorDatabase, user_id: int) -> bool:
+    """Return whether proactive check-ins are enabled for ``user_id`` (default: enabled).
+
+    Mirrors the due-user query's ``proactive_enabled != False`` rule: an absent profile or
+    absent flag means the user never opted out, so check-ins are allowed.
+    """
+    doc = await db["user_profiles"].find_one(
+        {"_id": user_id}, {"proactive_enabled": 1}
+    )
+    if not doc:
+        return True
+    return doc.get("proactive_enabled", True)
+
+
+async def get_reactions_enabled(db: AsyncIOMotorDatabase, user_id: int) -> bool:
+    """Return whether the bot may add emoji reactions to ``user_id``'s messages.
+
+    Per-user opt-out (default: enabled). An absent profile or absent flag means the user
+    never opted out, so reactions are allowed. The reply hot path does NOT call this — it
+    reads the flag straight off the profile doc it already fetches for the memory block
+    (see ``chat_manager.handle_message``) to avoid a second round-trip. Kept as a small,
+    correct accessor for callers/tests that only need the flag.
+    """
+    doc = await db["user_profiles"].find_one(
+        {"_id": user_id}, {"reactions_enabled": 1}
+    )
+    if not doc:
+        return True
+    return doc.get("reactions_enabled", True)
+
+
+async def set_reactions_enabled(db: AsyncIOMotorDatabase, user_id: int, enabled: bool):
+    """Single-``$set`` toggle of the per-user emoji-reaction opt-out flag."""
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$set": {"reactions_enabled": enabled, "updated_at": _utcnow()}},
+    )
+
+
+# Fixed _id for the single document holding the persisted observability metrics state.
+_METRICS_STATE_ID = "metrics:singleton"
+
+
+async def save_metrics_state(db: AsyncIOMotorDatabase, state: dict) -> None:
+    """Upsert the process-wide metrics snapshot into the ``metrics_state`` collection.
+
+    A single document keyed on :data:`_METRICS_STATE_ID` holds the latest
+    ``metrics.snapshot()`` so counters/gauges/timers survive a restart. Best-effort:
+    metrics are observability data, never worth raising into the caller, so failures are
+    logged at debug and swallowed.
+    """
+    try:
+        await db["metrics_state"].update_one(
+            {"_id": _METRICS_STATE_ID},
+            {"$set": {"state": state, "updated_at": _utcnow()}},
+            upsert=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+        logger.debug(f"save_metrics_state failed: {exc}")
+
+
+async def load_metrics_state(db: AsyncIOMotorDatabase) -> dict:
+    """Return the persisted metrics state dict, or ``{}`` when none/unreadable.
+
+    Mirrors :func:`save_metrics_state`; never raises so a missing or malformed document
+    can't block startup.
+    """
+    try:
+        doc = await db["metrics_state"].find_one({"_id": _METRICS_STATE_ID})
+        state = (doc or {}).get("state")
+        return state if isinstance(state, dict) else {}
+    except Exception as exc:  # noqa: BLE001 - load is best-effort
+        logger.debug(f"load_metrics_state failed: {exc}")
+        return {}
 
 
 async def set_onboarded(db: AsyncIOMotorDatabase, user_id: int, value: bool = True):
@@ -556,12 +676,38 @@ async def set_last_proactive(db: AsyncIOMotorDatabase, user_id: int, *, now=None
     )
 
 
+async def increment_proactive_unanswered(db: AsyncIOMotorDatabase, user_id: int):
+    """Bump the consecutive-unanswered proactive check-in counter by one.
+
+    Called only when a check-in is actually delivered. Once the counter reaches
+    ``config.PROACTIVE_MAX_UNANSWERED`` the user is skipped by the scan until they engage
+    (a DM message or any command), which resets it to 0.
+    """
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$inc": {"proactive_unanswered": 1}, "$set": {"updated_at": _utcnow()}},
+    )
+
+
+async def reset_proactive_unanswered(db: AsyncIOMotorDatabase, user_id: int):
+    """Clear the consecutive-unanswered proactive streak (user engaged).
+
+    Best-effort, no upsert: a user without a profile is a no-op. Used by the command
+    path; the DM chat path clears it inline via ``touch_and_get_last_interaction``.
+    """
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$set": {"proactive_unanswered": 0, "updated_at": _utcnow()}},
+    )
+
+
 async def find_users_due_for_proactive(
     db: AsyncIOMotorDatabase,
     *,
     inactivity_secs: float,
     min_interval_secs: float,
     limit: int,
+    max_unanswered: int = 0,
     now=None,
 ) -> list[int]:
     """Return up to ``limit`` user ids due for a proactive check-in.
@@ -571,8 +717,11 @@ async def find_users_due_for_proactive(
     interacted is never due), AND (``last_proactive_at`` null/absent OR older than
     ``now - min_interval_secs``), AND ``proactive_enabled != False`` (absent/true is
     eligible). The grounding threshold (``>= config.PROACTIVE_MIN_ITEMS`` total
-    facts+beliefs+events) is applied in Python so it stays mongomock-friendly. Collection
-    stops once ``limit`` qualifying users are found, bounding the helper's own work.
+    facts+beliefs+events) is applied in Python so it stays mongomock-friendly. When
+    ``max_unanswered > 0``, a user whose ``proactive_unanswered`` streak has reached that
+    cap is skipped (auto-paused for going silent) until they engage and reset it.
+    Collection stops once ``limit`` qualifying users are found, bounding the helper's own
+    work.
     """
     now = now or _utcnow()
     inactive_cutoff = now - timedelta(seconds=inactivity_secs)
@@ -587,7 +736,13 @@ async def find_users_due_for_proactive(
         ],
     }
     due: list[int] = []
-    async for doc in db["user_profiles"].find(query, {"facts": 1, "beliefs": 1, "events": 1}):
+    async for doc in db["user_profiles"].find(
+        query, {"facts": 1, "beliefs": 1, "events": 1, "proactive_unanswered": 1}
+    ):
+        # Auto-pause: a user who hasn't engaged after `max_unanswered` delivered
+        # check-ins is skipped until they reset the streak by talking to the bot.
+        if max_unanswered > 0 and (doc.get("proactive_unanswered") or 0) >= max_unanswered:
+            continue
         count = (
             len(doc.get("facts") or [])
             + len(doc.get("beliefs") or [])
@@ -688,6 +843,44 @@ async def set_group_enabled(db: AsyncIOMotorDatabase, chat_id: int, enabled: boo
     await db["group_settings"].update_one(
         {"_id": chat_id},
         {"$set": {"enabled": enabled, "updated_at": now},
+         "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+
+# Valid group-wide ambient modes. "auto" = no group override (defer to each member's
+# own /quiet|/chatty); "quiet"/"chatty" are admin-set overrides applied group-wide.
+VALID_GROUP_MODES: tuple[str, ...] = ("auto", "quiet", "chatty")
+
+
+async def get_group_mode(db: AsyncIOMotorDatabase, chat_id: int) -> str:
+    """Return the group-wide ambient mode for ``chat_id`` (default: ``"auto"``).
+
+    ``"auto"`` means there is no group-level override, so each member's own mode applies.
+    ``"quiet"`` / ``"chatty"`` are admin-set overrides that take priority over any user's
+    personal ``/quiet`` / ``/chatty`` preference in this group. Read on the ambient hot
+    path, so it must be cheap and never raise — the caller treats any failure as
+    ``"auto"`` (no override) so a transient DB hiccup never changes behavior. An unknown
+    stored value also degrades to ``"auto"``.
+    """
+    doc = await db["group_settings"].find_one({"_id": chat_id}, {"group_mode": 1})
+    if not doc:
+        return "auto"
+    mode = doc.get("group_mode", "auto")
+    return mode if mode in VALID_GROUP_MODES else "auto"
+
+
+async def set_group_mode(db: AsyncIOMotorDatabase, chat_id: int, mode: str):
+    """Upsert the per-chat group-wide ambient mode (the ``/groupquiet`` etc. commands).
+
+    An invalid ``mode`` is coerced to ``"auto"`` so the stored value is always valid.
+    """
+    if mode not in VALID_GROUP_MODES:
+        mode = "auto"
+    now = _utcnow()
+    await db["group_settings"].update_one(
+        {"_id": chat_id},
+        {"$set": {"group_mode": mode, "updated_at": now},
          "$setOnInsert": {"created_at": now}},
         upsert=True,
     )

@@ -67,6 +67,12 @@ Tracks biographical profiles, communication preferences, direct emotional states
 }
 ```
 
+> **Additive preference flags.** A few optional fields toggle per-user behavior and are read
+> defensively (absent → default), so no migration is needed: `onboarded` (bool), `proactive_enabled`
+> (bool — set by `/pause`/`/resume`), and `reactions_enabled` (bool — set by `/reactions`; absent or
+> `true` means the bot may add emoji reactions to that user's messages). See
+> [telegram_bot.md](telegram_bot.md#reactions--per-user-emoji-reaction-opt-out).
+
 ---
 
 ### 2. `chat_buffers` Collection
@@ -164,12 +170,17 @@ the DB on the hot path.
 
 ---
 
-### 5. `group_settings` Collection *(group on/off kill switch)*
+### 5. `group_settings` Collection *(group on/off kill switch + group-wide chattiness)*
 
-Stores a single per-group flag that lets a group admin turn the bot completely on or off in a chat
-via the `/groupoff` and `/groupon` commands. When a group is disabled, `_handle_group_message`
-returns at the top — no reply, no ambient/implicit reply, no identity capture, no memory
-extraction, and no buffer write.
+Stores per-group settings controlled by group admins:
+
+1. **On/off kill switch** (`enabled`) — `/groupoff` / `/groupon`. When a group is disabled,
+   `_handle_group_message` returns at the top — no reply, no ambient/implicit reply, no identity
+   capture, no memory extraction, and no buffer write.
+2. **Group-wide ambient mode** (`group_mode`) — `/groupquiet`, `/groupchatty`, `/groupnormal`. This
+   sets how chatty the bot is for **everyone** in the group and takes **priority over each member's
+   personal `/quiet` / `/chatty`** preference. Values: `auto` (default — no override, defer to the
+   per-user mode), `quiet`, `chatty`.
 
 * **Primary Key (`_id`)**: the Telegram `chat_id` (integer).
 
@@ -179,18 +190,54 @@ extraction, and no buffer write.
 {
   "_id": -1001234567890,
   "enabled": false,
+  "group_mode": "quiet",
   "created_at": "2026-06-14T12:00:00Z",
   "updated_at": "2026-06-14T12:34:00Z"
 }
 ```
 
-> **Default is enabled.** A group with no document is active, and `models.is_group_enabled`
-> degrades to `True` on any read error, so a transient DB hiccup can never silently mute the bot.
+> **Defaults are enabled + auto.** A group with no document is active with no chattiness override.
+> `models.is_group_enabled` degrades to `True` and `models.get_group_mode` degrades to `"auto"` on
+> any read error, so a transient DB hiccup can never silently mute the bot or change its chattiness.
 
-The collection is read on every group message through `models.is_group_enabled(db, chat_id)` and
-written by `models.set_group_enabled(db, chat_id, enabled)` (a single upsert). Authorization for the
-toggle commands is enforced in [`commands.py`](../../app/handlers/commands.py) via
-`bot.get_chat_member` (administrator/creator) or a configured `ADMIN_USER_IDS` operator.
+The `enabled` flag is read on every group message via `models.is_group_enabled(db, chat_id)` and
+written by `models.set_group_enabled(db, chat_id, enabled)`. The `group_mode` is read on the ambient
+path via `models.get_group_mode(db, chat_id)` and written by `models.set_group_mode(db, chat_id,
+mode)` (a single upsert; invalid modes are coerced to `auto`). Authorization for all of these
+commands is enforced in [`commands.py`](../../app/handlers/commands.py) via `bot.get_chat_member`
+(administrator/creator) or a configured `ADMIN_USER_IDS` operator.
+
+---
+
+### 6. `metrics_state` Collection *(observability checkpoint)*
+
+Persists the process-wide observability metrics so the `/health` and `/metrics` reports survive a
+restart or crash instead of resetting to zero. The in-memory
+[`MetricsRegistry`](../../app/services/metrics.py) is checkpointed into a **single** document here.
+See [observability.md](observability.md#metrics-persistence-surviving-restarts) for the full
+load/flush lifecycle.
+
+* **Primary Key (`_id`)**: the fixed string `"metrics:singleton"` (one document for the whole process).
+
+#### Example Document Schema:
+
+```json
+{
+  "_id": "metrics:singleton",
+  "state": {
+    "counters": { "llm.reply.calls": 42, "throttle.drops": 0 },
+    "gauges":   { "conversations.active": 2 },
+    "timers":   { "llm.reply.latency": { "count": 42, "sum": 64.2, "max": 3.1, "avg": 1.53 } }
+  },
+  "updated_at": "2026-06-14T12:34:00Z"
+}
+```
+
+> **`state` mirrors `metrics.snapshot()`.** On startup `models.load_metrics_state(db)` returns this
+> dict and `metrics.load_state(...)` merges it back in (counters/timer totals are *added*, gauges
+> replaced, timer `max` kept as the larger). `models.save_metrics_state(db, snapshot)` is a single
+> upsert. Both helpers are best-effort and never raise, so a missing or malformed document can't
+> block startup or break a flush.
 
 ---
 
@@ -357,6 +404,22 @@ async def save_extracted_memories(db, user_id: int, extraction: MemoryExtraction
 > `replace_user_memory` (used by the compressor) follows the same single-write shape, replacing
 > the arrays with the compressed layout. **It is skipped when compression fails** (the LLM
 > returns `None`), so a failed compression never wipes a user's memory.
+
+### Export & reset (backup-before-delete)
+
+`/reset` is irreversible for the user, so two helpers cooperate to make it recoverable for an
+admin:
+
+- `export_user_data(db, user_id)` reads the **whole** `user_profiles` document plus the
+  `chat_buffers` document and returns a single JSON-serializable snapshot
+  (`{user_id, exported_at, user_profiles, chat_buffers}`), or `None` when the user has no
+  profile. `datetime`/`ObjectId` values are left intact — serialize with `json.dumps(..., default=str)`.
+- `reset_user(db, user_id)` hard-deletes both documents.
+
+The `/reset confirm` handler calls `export_user_data` **first** and uploads the snapshot to the
+Telegram Logs_Channel as a `backup_<user_id>.json` file (via
+[`log_forwarder.send_document`](../../app/services/log_forwarder.py)) before calling
+`reset_user`. The backup is best-effort and never blocks the delete the user requested.
 
 ---
 

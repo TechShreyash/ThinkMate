@@ -46,7 +46,12 @@ _MAX_LOG_FIELD = 4000
 
 class LLMService:
     def __init__(self):
-        self.client = AsyncOpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+        # max_retries=0: our _with_retries is the single, intentional retry policy.
+        # The SDK's default (2) would stack a second hidden layer that also retries
+        # timeouts, multiplying in-flight generations on the proxy under load.
+        self.client = AsyncOpenAI(
+            base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY, max_retries=0
+        )
         self._bg_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ #
@@ -190,8 +195,10 @@ class LLMService:
                 "Output the raw JSON object only — no preamble, no code fences around it."
             )
         messages = [{"role": "system", "content": system_prompt + format_clause}] + chat_history
-        # Budget tokens for the reply text plus the small JSON envelope.
-        max_tokens = (config.MAX_RESPONSE_CHARS // config.CHARS_PER_TOKEN) + 80
+        # No max_tokens cap: response length is governed by the persona/style rules in
+        # the system prompt, not a hard token ceiling. Capping here risked truncating the
+        # JSON envelope mid-string (invalid JSON -> raw-text fallback). See
+        # docs/development/llm_integration.md.
         inputs = {"system_prompt": system_prompt, "messages": messages}
 
         try:
@@ -200,8 +207,7 @@ class LLMService:
                 lambda: self.client.chat.completions.create(
                     model=config.LLM_MODEL,
                     messages=messages,
-                    max_tokens=max_tokens,
-                    timeout=30.0,
+                    timeout=config.LLM_REQUEST_TIMEOUT_SECS,
                     response_format={"type": "json_object"},
                 ),
                 what=f"reply_bundle u{user_id}",
@@ -244,7 +250,8 @@ class LLMService:
             {"role": "system", "content": system_prompt + "\n\n" + SYSTEM_CHECKIN_PROMPT},
             {"role": "user", "content": "Write the check-in opener now (or reply with NOTHING)."},
         ]
-        max_tokens = (config.MAX_RESPONSE_CHARS // config.CHARS_PER_TOKEN) + 40
+        # No max_tokens cap: the check-in length is governed by the persona/check-in
+        # prompt, not a hard token ceiling.
         inputs = {"system_prompt": system_prompt, "messages": messages}
         start = time.perf_counter()
         try:
@@ -252,8 +259,7 @@ class LLMService:
                 lambda: self.client.chat.completions.create(
                     model=config.LLM_MODEL,
                     messages=messages,
-                    max_tokens=max_tokens,
-                    timeout=30.0,
+                    timeout=config.LLM_REQUEST_TIMEOUT_SECS,
                 ),
                 what=f"proactive_checkin u{user_id}",
             )
@@ -385,7 +391,7 @@ class LLMService:
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
             user_id=user_id, call_type="memory_extraction", model=model, messages=messages,
-            schema=MemoryExtraction, timeout=45.0,
+            schema=MemoryExtraction, timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
     async def extract_group_memory(
@@ -394,7 +400,7 @@ class LLMService:
         """Multi-party memory extraction over a rendered group segment (one LLM call).
 
         Mirrors :meth:`extract_memory` exactly — same model selection, retry/json_object/
-        native_parse handling via ``_structured_call``, same 45s timeout, and the same ``None``-on-failure contract — but validates against
+        native_parse handling via ``_structured_call``, same request timeout, and the same ``None``-on-failure contract — but validates against
         :class:`GroupMemoryExtraction` so the result carries per-participant, name-tagged
         updates. ``user_history_text`` is the multi-party segment rendered as
         ``"SenderName: content"`` lines. The first argument is used only for audit logging
@@ -412,7 +418,7 @@ class LLMService:
         return await self._structured_call(
             user_id=user_id_or_chat_id, call_type="group_memory_extraction", model=model,
             messages=messages, schema=GroupMemoryExtraction,
-            timeout=45.0,
+            timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
     async def compress_memory(
@@ -431,7 +437,7 @@ class LLMService:
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
             user_id=user_id, call_type="memory_compression", model=model, messages=messages,
-            schema=MemoryCompression, timeout=60.0,
+            schema=MemoryCompression, timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
     async def consolidate_memory(
@@ -449,7 +455,7 @@ class LLMService:
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
             user_id=user_id, call_type="memory_consolidation", model=model, messages=messages,
-            schema=MemoryConsolidation, timeout=60.0,
+            schema=MemoryConsolidation, timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
 

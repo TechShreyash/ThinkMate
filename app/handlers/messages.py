@@ -119,6 +119,18 @@ async def _maybe_ambient_chime(
         # only forbids it in DMs). The cache serves warm members from memory.
         member = await affinity_cache.get(db, message.chat.id, message.from_user.id)
 
+        # Group-wide admin override takes PRIORITY over the member's personal mode: when an
+        # admin has set the group to "quiet" or "chatty" (/groupquiet|/groupchatty), that
+        # wins for everyone here; "auto" (the default, /groupnormal) defers to each user's
+        # own /quiet|/chatty. Read defensively so a DB hiccup degrades to "auto" (no
+        # override) rather than dropping the message off the ambient path.
+        try:
+            group_mode = await models.get_group_mode(db, message.chat.id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"group-mode read failed; treating as auto: {e}")
+            group_mode = "auto"
+        effective_mode = group_mode if group_mode in ("quiet", "chatty") else member["mode"]
+
         # Cheap, no-LLM trigger scan (birthdays, congrats, questions, greetings, ...).
         # Spam-aware: when the message is Mass_Tag_Spam or Greeting_Burst_Spam, force the
         # trigger off so greeting/laughter/etc. keywords can never fire the ambient gate
@@ -130,7 +142,7 @@ async def _maybe_ambient_chime(
         should, stage = ambient_gate.decide(
             message.chat.id,
             affinity=member["affinity"],
-            mode=member["mode"],
+            mode=effective_mode,
             triggered=triggered,
             now=now,
         )
@@ -303,7 +315,7 @@ async def _handle_group_message(
     # (Req 10.14 — error degrades to "not burst").
     try:
         is_burst = spam_burst_detector.observe(
-            message.chat.id, user_text, message.entities, now
+            message.chat.id, user_text, message.entities, now, user_id=message.from_user.id
         )
     except Exception as e:  # noqa: BLE001
         logger.debug(f"spam burst detector failed; treating as not-burst: {e}")

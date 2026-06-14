@@ -56,6 +56,33 @@ The *mechanism* used to get JSON from the model is controlled by `LLM_STRUCTURED
 5xx) with exponential backoff (`LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECS`). Client errors
 like `400` are not retried, because a malformed request will fail the same way on every attempt.
 
+`_with_retries` is the **only** retry layer: the `AsyncOpenAI` client is constructed with
+`max_retries=0` so the SDK's own (default 2) retries don't stack a second, hidden layer on top
+of ours. Two independent layers would each retry timeouts and multiply concurrent generations
+on the backend.
+
+### Request timeout and the proxy-ordering rule
+Every call passes a per-request timeout sourced from a single setting,
+`LLM_REQUEST_TIMEOUT_SECS` (default `610`). It is deliberately generous — reasoning ("thinking")
+models can legitimately run for minutes, and a short ceiling would abort healthy in-flight
+generations.
+
+The critical rule: **keep the client timeout ABOVE the proxy/server's own request ceiling.**
+The two timeouts are ordered, and the order decides what a timeout *means*:
+
+- **Client < proxy** (the old `30/45/60s` vs a `180s` proxy): the client always gives up first
+  while the proxy keeps generating. Every slow-but-healthy request looks like a failure, gets
+  retried, and the retry spawns a *fresh* upstream generation while the abandoned one is still
+  running — duplicate work that compounds under load.
+- **Client > proxy** (today's `610s` vs the proxy's `600s` non-streaming cap): the proxy is
+  always the first to give up and returns a definitive error. The client never abandons work
+  that's still in flight, so a client-side timeout now only fires when something is genuinely
+  hung past the proxy's ceiling.
+
+If you change the proxy's `REQUEST_TIMEOUT`, raise `LLM_REQUEST_TIMEOUT_SECS` to stay above it.
+(ThinkMate's calls are all non-streaming, so the proxy's non-streaming cap is the one that
+matters; streaming idle-timeouts don't apply here.)
+
 ---
 
 ## 💬 Single combined reply call (`generate_reply_bundle`)
@@ -74,7 +101,17 @@ the `reaction` is a separate Telegram reaction applied to the *user's* message. 
 normalized against Telegram's accepted emoji set (`app/services/reactions.py`, tolerant of
 variation selectors like `❤️` → `❤`) and dropped if invalid or if `ENABLE_MESSAGE_REACTIONS=False`.
 If the model returns non-JSON, the raw text is used as the reply and no reaction is sent — the
-user always gets an answer.
+user always gets an answer. If that raw fallback is itself empty/blank, the batch processor
+substitutes a short graceful line so Telegram never rejects an empty send (see
+[telegram_bot.md](telegram_bot.md)).
+
+> **No `max_tokens` cap.** Reply length is governed entirely by the persona/system-prompt
+> "Length" rule ("there is no fixed length limit; mirror the user"), not by a hard token
+> ceiling. An earlier build derived `max_tokens` from `MAX_RESPONSE_CHARS / CHARS_PER_TOKEN`;
+> that risked cutting the JSON envelope off mid-string (invalid JSON → raw-text fallback, and
+> occasionally an empty send), so the cap was removed from both `generate_reply_bundle` and
+> `generate_checkin`. `MAX_RESPONSE_CHARS` and `CHARS_PER_TOKEN` no longer drive any output
+> limit.
 
 > **Group chats (Phase 9, implemented):** calling `generate_reply_bundle(..., with_affinity=True)`
 > (the group path) switches the return contract to `(reply, reaction, affinity_delta)` and asks the

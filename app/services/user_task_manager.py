@@ -261,9 +261,9 @@ class UserTaskManager:
                             # chime-in may yield an empty/declined reply. In that case
                             # send nothing at all — skip BOTH the reaction and the
                             # answer. The cooldown was already reset at dispatch time,
-                            # so a decline still holds the window. Non-ambient
-                            # (reply/DM) paths keep always answering.
-                            if reason == "ambient" and (not reply_text or not reply_text.strip()):
+                            # so a decline still holds the window.
+                            reply_is_empty = not reply_text or not reply_text.strip()
+                            if reason == "ambient" and reply_is_empty:
                                 logger.debug(f"Ambient reply empty for chat {chat_id}; sending nothing.")
                             else:
                                 if reaction:
@@ -271,6 +271,19 @@ class UserTaskManager:
                                         await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
                                     except Exception as react_err:  # noqa: BLE001
                                         logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
+
+                                # A non-ambient (reply/DM) path must always answer, but
+                                # the LLM can occasionally yield an empty/blank reply
+                                # (e.g. an unparseable bundle that degraded to empty raw
+                                # text). Sending that verbatim makes Telegram reject the
+                                # call with "message text is empty"; fall back to a short
+                                # graceful line so the user always gets a response.
+                                if reply_is_empty:
+                                    logger.warning(
+                                        f"Empty reply for chat {chat_id} (sender {sender_id}); "
+                                        "sending graceful fallback."
+                                    )
+                                    reply_text = "Sorry, I lost my train of thought there — could you say that again?"
 
                                 await last_message.answer(reply_text)
 

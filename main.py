@@ -3,19 +3,41 @@ and start long-polling the Telegram bot.
 """
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher
 from loguru import logger
 from app.config import config
 from app.handlers import main_router
+from app.handlers.commands import setup_bot_commands
 from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db, ping_db
 from app.services import log_forwarder
 from app.services.error_log_sink import make_error_log_sink
 from app.services.health import (
     start_metrics_logger,
+    start_metrics_persister,
+    load_persisted_metrics,
+    flush_metrics,
     start_consolidation_scheduler,
     start_proactive_scheduler,
 )
+
+
+def _fmt_timedelta(delta) -> str:
+    """Render a timedelta as a compact ``2d 3h 4m 5s`` string (zero units trimmed)."""
+    total = max(0, int(delta.total_seconds()))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 async def main():
@@ -29,6 +51,10 @@ async def main():
     logger.info("Initializing MongoDB indexes...")
     await init_db()
 
+    # Restore persisted metrics so counters/timers continue across restarts (the
+    # registry is otherwise in-memory and resets to zero on every boot).
+    await load_persisted_metrics()
+
     # Optional periodic metrics logger (Phase 10). No-op unless
     # config.METRICS_LOG_INTERVAL_SECS > 0; runs under this asyncio loop.
     background_tasks: list[asyncio.Task] = []
@@ -38,6 +64,15 @@ async def main():
         background_tasks.append(metrics_task)
         logger.info(
             f"Periodic metrics logger started (every {config.METRICS_LOG_INTERVAL_SECS}s)."
+        )
+
+    # Periodic metrics persister: flush the snapshot to MongoDB so it survives a crash,
+    # not just a graceful shutdown. No-op unless config.METRICS_PERSIST_INTERVAL_SECS > 0.
+    persist_task = start_metrics_persister()
+    if persist_task is not None:
+        background_tasks.append(persist_task)
+        logger.info(
+            f"Metrics persister started (flush every {config.METRICS_PERSIST_INTERVAL_SECS}s)."
         )
 
     # Optional periodic consolidation scheduler (Phase 11). No-op unless
@@ -87,6 +122,24 @@ async def main():
 
     dp.include_router(main_router)
 
+    # Publish the "/" command menu so every command is discoverable in the Telegram UI
+    # (DM-scoped personal commands + group-scoped moderation toggles). Best-effort.
+    await setup_bot_commands(bot)
+
+    # Announce startup on the logs channel (best-effort; never blocks polling).
+    started_at = datetime.now(timezone.utc)
+    try:
+        me = await bot.get_me()
+        who = f"@{me.username}" if me.username else "ThinkMate"
+    except Exception:  # noqa: BLE001 - identity lookup is cosmetic
+        who = "ThinkMate"
+    await log_forwarder.send(
+        bot,
+        None,
+        f"🚀 {who} started — polling Telegram.\n"
+        f"🕐 {started_at:%Y-%m-%d %H:%M:%S} UTC",
+    )
+
     logger.info("Polling Telegram Bot...")
     try:
         # drop_pending_updates: on (re)start, discard any backlog Telegram queued
@@ -103,11 +156,22 @@ async def main():
         # session. aiogram handles SIGINT/SIGTERM (handle_signals=True by default),
         # so this runs on Ctrl+C and on container stop/redeploy alike.
         logger.info("Shutting down: cancelling background tasks...")
+        # Announce shutdown on the logs channel before the HTTP session is closed
+        # (best-effort; the send is guarded and never raises).
+        uptime = datetime.now(timezone.utc) - started_at
+        await log_forwarder.send(
+            bot,
+            None,
+            f"🛑 {who} shutting down.\n"
+            f"⏱ uptime {_fmt_timedelta(uptime)}",
+        )
         for task in background_tasks:
             task.cancel()
         for task in background_tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Capture this session's metrics even when the periodic persister is disabled.
+        await flush_metrics()
         await bot.session.close()
         logger.info("Shutdown complete.")
 

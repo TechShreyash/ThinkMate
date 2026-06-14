@@ -80,3 +80,30 @@ class DbSessionMiddleware(BaseMiddleware):
         async with db_session() as db:
             data["db"] = db
             return await handler(event, data)
+
+
+class ProactiveResetMiddleware(BaseMiddleware):
+    """Reset a user's unanswered-proactive streak whenever they issue a command.
+
+    Using any command counts as the user engaging with the bot, so the streak that
+    auto-pauses proactive check-ins after ``PROACTIVE_MAX_UNANSWERED`` ignored DMs is
+    cleared, making the user eligible for check-ins again. The DM chat path clears the
+    same streak inline via ``touch_and_get_last_interaction``; this covers the command
+    path. Best-effort: a failure never blocks command handling.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        message = event if isinstance(event, Message) else None
+        db = data.get("db")
+        if message is not None and message.from_user and db is not None:
+            try:
+                from app.database import models
+                await models.reset_proactive_unanswered(db, message.from_user.id)
+            except Exception:  # noqa: BLE001 - never block command handling
+                pass
+        return await handler(event, data)

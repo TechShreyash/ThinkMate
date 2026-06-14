@@ -1,8 +1,8 @@
 """Tests for the Phase 12 engagement slash-command handlers (Feature C: commands).
 
 Covers ``cmd_onboard`` (static plain-text intro + persisted ``onboarded`` flag, no LLM),
-the ``/start`` ``/onboard``-nudge logic gated on the onboarded flag, the ``/pause`` and
-``/resume`` proactive toggles, and the ``/help`` listing.
+the ``/start`` ``/onboard``-nudge logic gated on the onboarded flag, and the ``/checkins``
+proactive on/off/status toggle.
 
 mongomock + pytest-asyncio per ``tests/conftest.py``: the autouse ``mock_mongodb``
 fixture provides the mongomock-backed db, which is passed directly to the command
@@ -13,12 +13,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.database import models
 from app.handlers.commands import (
-    cmd_help,
+    cmd_checkins,
     cmd_onboard,
-    cmd_pause,
-    cmd_resume,
     cmd_start,
 )
+
+
+def _cmd(args: str | None = None) -> MagicMock:
+    """Build a stand-in aiogram CommandObject exposing only ``.args`` (what handlers read)."""
+    command = MagicMock()
+    command.args = args
+    return command
 
 
 def _make_command_message(
@@ -108,33 +113,34 @@ async def test_start_does_not_nudge_onboard_once_onboarded(mock_mongodb):
     assert "/onboard" not in _answered_text(message)
 
 
-# --- 3. /pause then /resume -------------------------------------------------------------
+# --- 3. /checkins on / off / status -----------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_pause_then_resume_toggles_proactive_enabled(mock_mongodb):
+async def test_checkins_on_off_toggles_proactive_enabled(mock_mongodb):
     db = mock_mongodb
     message = _make_command_message(user_id=5104)
     await models.ensure_user(db, 5104, "tester", "Tester")
 
-    await cmd_pause(message, db)
+    await cmd_checkins(message, _cmd("off"), db)
     doc = await db["user_profiles"].find_one({"_id": 5104})
     assert doc["proactive_enabled"] is False
 
-    await cmd_resume(message, db)
+    await cmd_checkins(message, _cmd("on"), db)
     doc = await db["user_profiles"].find_one({"_id": 5104})
     assert doc["proactive_enabled"] is True
 
 
-# --- 4. /help ---------------------------------------------------------------------------
-
 @pytest.mark.asyncio
-async def test_help_lists_engagement_commands():
-    message = _make_command_message()
+async def test_checkins_bare_reports_status_without_changing_it(mock_mongodb):
+    db = mock_mongodb
+    message = _make_command_message(user_id=5105)
+    await models.ensure_user(db, 5105, "tester", "Tester")
+    await models.set_proactive_enabled(db, 5105, False)
 
-    await cmd_help(message)
+    await cmd_checkins(message, _cmd(None), db)
 
     message.answer.assert_called_once()
-    text = _answered_text(message)
-    assert "/onboard" in text
-    assert "/pause" in text
-    assert "/resume" in text
+    assert "off" in _answered_text(message).lower()
+    # The bare command must not flip the stored preference.
+    doc = await db["user_profiles"].find_one({"_id": 5105})
+    assert doc["proactive_enabled"] is False

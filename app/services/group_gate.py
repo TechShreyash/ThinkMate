@@ -786,19 +786,22 @@ class SpamBurstDetector:
     """Per-chat, no-LLM, **stateful** detector for time-distributed greeting bursts.
 
     It remembers a short, bounded, time-windowed history of recent
-    mention-stripped message contents per chat and flags a message as
-    Greeting_Burst_Spam once enough near-identical messages have arrived within
-    the window. It mirrors :class:`AmbientGate`'s shape: per-chat ``dict`` state
-    keyed by ``chat_id``, injectable ``now``, a :meth:`prune` method for the idle
-    sweep, and a fully defensive contract.
+    mention-stripped message contents **per sender within a chat** and flags a
+    message as Greeting_Burst_Spam once enough near-identical messages from the
+    *same* sender have arrived within the window. Keying by ``(chat_id,
+    user_id)`` means one member's repetition can never cause another member's
+    message to be classified as spam — which also matches the real threat: a
+    single userbot tagging members one-by-one. It mirrors :class:`AmbientGate`'s
+    shape: per-key ``dict`` state, injectable ``now``, a :meth:`prune` method for
+    the idle sweep, and a fully defensive contract.
 
-    State (keyed by ``chat_id``):
+    State (keyed by the ``(chat_id, user_id)`` pair):
 
     - ``_recent``: a :class:`collections.deque` of
       ``(arrival_time, mention_stripped_content)`` pairs, evicted when older than
       ``GROUP_SPAM_BURST_WINDOW_SECS`` and hard-capped at
       ``GROUP_SPAM_BURST_TRACK_MAX`` entries.
-    - ``_last_seen``: most recent ``now`` observed for the chat; used by
+    - ``_last_seen``: most recent ``now`` observed for the sender; used by
       :meth:`prune`.
 
     Similarity uses the standard-library
@@ -809,8 +812,8 @@ class SpamBurstDetector:
     """
 
     def __init__(self) -> None:
-        self._recent: dict[int, deque[tuple[float, str]]] = {}
-        self._last_seen: dict[int, float] = {}
+        self._recent: dict[tuple[int, int | None], deque[tuple[float, str]]] = {}
+        self._last_seen: dict[tuple[int, int | None], float] = {}
         self._last_prune: float = 0.0
 
     @staticmethod
@@ -859,13 +862,19 @@ class SpamBurstDetector:
         # Casefold + collapse whitespace.
         return " ".join(stripped.casefold().split())
 
-    def observe(self, chat_id: int, text, entities, now: float) -> bool:
+    def observe(self, chat_id: int, text, entities, now: float, user_id: int | None = None) -> bool:
         """Record a message and classify it as Greeting_Burst_Spam (True) or not.
+
+        History is tracked per ``(chat_id, user_id)`` so a burst is only flagged
+        when the **same sender** repeats near-identical messages; one member's
+        repetition never suppresses another member's message. ``user_id`` is
+        optional (defaults to ``None``) for callers/tests that don't track a
+        sender — those share a single per-chat bucket as before.
 
         Steps (no LLM — Requirement 10.10):
 
         1. Strip @mention tokens and normalize → ``content`` (Req 10.1).
-        2. Evict this chat's history entries older than
+        2. Evict this sender's history entries older than
            ``GROUP_SPAM_BURST_WINDOW_SECS`` (now-anchored).
         3. Count retained entries near-identical to ``content`` (ratio ≥
            ``GROUP_SPAM_BURST_SIMILARITY`` — Req 10.2).
@@ -880,7 +889,8 @@ class SpamBurstDetector:
         (Requirement 10.14). Updates ``_last_seen``.
         """
         try:
-            self._last_seen[chat_id] = now
+            key = (chat_id, user_id)
+            self._last_seen[key] = now
             content = self._strip_and_normalize(text, entities)
 
             window = config.GROUP_SPAM_BURST_WINDOW_SECS
@@ -889,10 +899,10 @@ class SpamBurstDetector:
             burst_count = config.GROUP_SPAM_BURST_COUNT
 
             maxlen = track_max if isinstance(track_max, int) and track_max > 0 else None
-            history = self._recent.get(chat_id)
+            history = self._recent.get(key)
             if history is None:
                 history = deque(maxlen=maxlen)
-                self._recent[chat_id] = history
+                self._recent[key] = history
 
             # 2. Evict entries older than the window (now-anchored).
             cutoff = now - window
@@ -907,7 +917,7 @@ class SpamBurstDetector:
 
             # 4. Append the current message and re-bound the history.
             retained.append((now, content))
-            self._recent[chat_id] = deque(retained, maxlen=maxlen)
+            self._recent[key] = deque(retained, maxlen=maxlen)
 
             # 5. Including the just-added message, threshold the burst count.
             return (near + 1) >= burst_count
@@ -915,17 +925,17 @@ class SpamBurstDetector:
             return False
 
     def prune(self, now: float, max_idle: float | None = None) -> int:
-        """Drop per-chat history idle beyond ``max_idle``; return count pruned (Req 10.13).
+        """Drop per-sender history idle beyond ``max_idle``; return count pruned (Req 10.13).
 
         Defaults to ``10 × GROUP_SPAM_BURST_WINDOW_SECS``.
         """
         if max_idle is None:
             max_idle = 10.0 * config.GROUP_SPAM_BURST_WINDOW_SECS
         cutoff = now - max_idle
-        stale = [cid for cid, seen in self._last_seen.items() if seen <= cutoff]
-        for cid in stale:
-            self._last_seen.pop(cid, None)
-            self._recent.pop(cid, None)
+        stale = [key for key, seen in self._last_seen.items() if seen <= cutoff]
+        for key in stale:
+            self._last_seen.pop(key, None)
+            self._recent.pop(key, None)
         self._last_prune = now
         return len(stale)
 

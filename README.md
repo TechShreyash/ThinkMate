@@ -24,6 +24,7 @@ Each feature below links to the guide that explains it in depth, so you can skim
 *   **Observability & ops** *(Phase 10)*: A dependency-free, in-process metrics registry tracks LLM volume/latency, throttle and queue drops, active conversations, and background-job runs. An admin `/health` command reports liveness, readiness, and a metrics summary, with an optional periodic metrics logger — all explained in the [Observability & Ops Runbook](docs/development/observability.md).
 *   **Memory Consolidation ("dreaming" pass)** *(Phase 11)*: An optional periodic background pass reviews each user's whole profile to refresh the summary/style, merge duplicates, and synthesize a small bounded set of durable **behavioral insights** that localized extraction can't see. It runs entirely off the hot path under the shared memory lock, never wipes memory on failure, and is **disabled by default** — see [memory_engine.md](docs/development/memory_engine.md#-phase-11--periodic-consolidation-the-dreaming-pass-implemented).
 *   **Engagement & UX** *(Phase 12)*: Small, additive touches that make the bot feel more present — **temporal context** ("now" and a coarse "last talked" gap in the prompt), **emotional continuity** (a bounded mood-history trend rather than just the latest mood), a static no-LLM **`/onboard`** intro, and optional **proactive check-ins** that occasionally send a memory-grounded nudge to inactive users (opt-out via `/pause`, quiet-hours aware, **disabled by default**). See [memory_engine.md](docs/development/memory_engine.md#-phase-12--temporal-context--emotional-continuity-implemented), [telegram_bot.md](docs/development/telegram_bot.md#-engagement-commands-phase-12-implemented), and [configuration.md](docs/development/configuration.md#-proactive-check-ins-phase-12).
+*   **Interactive onboarding guide**: A beginner-friendly **`/guide`** command opens a tap-through tour built on Telegram **inline buttons** — memory, privacy, group chats, check-ins, and the full command list — so first-time users understand what the bot does without reading docs. The same buttons are surfaced from `/start`, `/onboard`, and `/help`. All copy is rename-safe (it follows the configured command triggers). See [telegram_bot.md](docs/development/telegram_bot.md#-interactive-guide-guide--inline-buttons).
 *   **Pure Python & Async**: Powered by `aiogram 3.x` and `motor` (MongoDB async driver) for high performance and standard async workflow.
 
 ---
@@ -64,7 +65,7 @@ ThinkMate/
 │   │
 │   ├── handlers/                   # Telegram event handlers (aiogram)
 │   │   ├── __init__.py
-│   │   ├── commands.py             # Slash commands (/start, /help, /profile, /reset, /quiet, /chatty, /health, /metrics, /onboard, /pause, /resume)
+│   │   ├── commands.py             # Slash commands (/start, /help, /guide, /profile, /reset, /quiet, /chatty, /health, /metrics, /onboard, /pause, /resume) + inline-button guide
 │   │   └── messages.py             # Default message router, chat-type routing & ambient gate handoff
 │   │
 │   ├── services/                   # Core business logic

@@ -446,3 +446,86 @@ above), following the
 - [project_plan.md](../project_plan.md) — phase-by-phase plan (Phase 10 = observability & ops).
 
 [Back to top](#table-of-contents)
+
+[Back to top](#table-of-contents)
+
+---
+
+## Metrics persistence (surviving restarts)
+
+The [`MetricsRegistry`](../../app/services/metrics.py) is an **in-memory** registry, so without
+persistence every counter, gauge, and timer aggregate resets to zero on each restart — and because
+`/health` and `/metrics` both read from that registry, their reports would lose all history on a
+redeploy or crash. To avoid that, the registry is checkpointed to MongoDB.
+
+**Storage.** A single document in the `metrics_state` collection (fixed `_id`
+`"metrics:singleton"`) holds the latest `metrics.snapshot()`. See the
+[`metrics_state` collection](database.md) for the schema and the
+`save_metrics_state` / `load_metrics_state` accessors.
+
+**Lifecycle** (wired in [`main.py`](../../main.py)):
+
+1. **Startup** — after `init_db()`, `load_persisted_metrics()` reads the saved snapshot and calls
+   `metrics.load_state(...)`. Counters and timer `count`/`sum` are *added* to the (empty) registry
+   so totals are restored and keep accumulating; timer `max` takes the larger value; gauges are
+   replaced (they are point-in-time). A missing or malformed document simply leaves the registry
+   empty — it never blocks startup.
+2. **Periodically** — `start_metrics_persister()` flushes the snapshot every
+   **`METRICS_PERSIST_INTERVAL_SECS`** seconds (default `300`; `0` disables the periodic flush) so
+   the data survives an unclean crash, not just a graceful shutdown.
+3. **Shutdown** — `flush_metrics()` runs once in `main.py`'s `finally` block (and the persister loop
+   also flushes on cancellation), so the session's final totals are always captured.
+
+Every step is best-effort: persistence is observability data and must never raise into a caller or
+crash a loop, so all failures are logged at debug and swallowed.
+
+[Back to top](#table-of-contents)
+
+---
+
+## `/health` and `/metrics` message formatting
+
+Both reports are rendered as Telegram **HTML** (`parse_mode="HTML"`) by helpers in
+[`app/handlers/commands.py`](../../app/handlers/commands.py):
+
+- Section titles use `<b>…</b>` with emoji markers (🩺 health, 📊 metrics, 🤖 LLM-by-task,
+  🔢 counters, 📈 gauges, ⏱ timers).
+- Tabular data is wrapped in `<pre>` blocks and column-aligned by the `_mono_table(...)` helper, so
+  numbers line up in a monospace font on the client.
+- `_fmt_uptime(secs)` renders uptime as `2d 3h 4m 5s` (zero units trimmed); `_fmt_secs(v)` renders
+  latencies as `120ms` / `0.84s`, and `—` for zero/absent values.
+- Status and MongoDB readiness show 🟢/🟠 and ✅/⚠️ indicators.
+- All interpolated content is escaped with `html.quote(...)` so a metric name can never break the
+  HTML, and empty sections render a plain `<i>none</i>`.
+
+[Back to top](#table-of-contents)
+
+[Back to top](#table-of-contents)
+
+---
+
+## Startup / shutdown notices on the logs channel
+
+[`main.py`](../../main.py) posts two best-effort lifecycle notices to the Telegram **logs
+channel** (`LOGS_CHANNEL_ID`) via [`log_forwarder.send`](../../app/services/log_forwarder.py):
+
+- **Startup** — sent just before long-polling begins, after the bot identity is resolved:
+
+  ```
+  🚀 @yourbot started — polling Telegram.
+  🕐 2026-06-14 23:00:00 UTC
+  ```
+
+- **Shutdown** — sent in the `finally` block (so it fires on Ctrl+C and on container
+  stop/redeploy alike) before the HTTP session closes, including the session uptime:
+
+  ```
+  🛑 @yourbot shutting down.
+  ⏱ uptime 2h 15m 25s
+  ```
+
+Both go through `log_forwarder.send`, which is a no-op when `LOGS_CHANNEL_ID` is unset and
+swallows any delivery error, so a missing or unreachable channel never blocks startup or a clean
+shutdown. The bot-identity lookup (`get_me`) is also guarded and falls back to `"ThinkMate"`.
+
+[Back to top](#table-of-contents)

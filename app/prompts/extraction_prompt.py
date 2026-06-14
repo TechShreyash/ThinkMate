@@ -16,6 +16,15 @@ Your job is to keep memory **optimized and compact**. You can perform CRUD opera
 
 ---
 
+## DATE NORMALIZATION (always apply to event dates)
+- Every event `date` MUST be an **absolute calendar date** in ISO form: `YYYY-MM-DD` when the day is known, `YYYY-MM` when only the month is known, or `YYYY` when only the year is known.
+- **NEVER store vague or relative words** as the date — no "today", "yesterday", "recent", "last week", "a few days ago". Always convert them into an actual date.
+- Each message in the transcript is prefixed with the date it was sent, like `[2026-06-07]`. Resolve every relative reference against the date of the message it appears in: "today" = that message's date, "yesterday" = one day earlier, "last week" / "a week ago" = about seven days earlier, "last month" = the previous month, and so on. The CURRENT DATE is also provided below for reference.
+- If an event clearly happened in the **past** relative to the message (e.g. "I went to a movie last week"), date it in the past accordingly — do NOT date it to the day the message was sent.
+- If an event has no usable time information, set `date` to **null** rather than guessing the current day.
+
+---
+
 ## FACT OPERATIONS (Objective details)
 
 ### new_facts — Add a brand-new fact not in current memory.
@@ -53,7 +62,7 @@ Use `content` (exact match).
 ## EVENT OPERATIONS ( episodic timeline milestones)
 
 ### new_events — Add a new life event.
-Example: `{"description": "Adopted a cat named Miso", "date": "2025-12", "significance": "minor", "emotion": "happy"}`
+Example: `{"description": "Adopted a cat named Miso", "date": "2025-12-20", "significance": "minor", "emotion": "happy"}`
 
 ### updated_events — Update an existing event's description, date, or significance.
 Use `old_description` (exact match) and `new_description`. Optionally update `date` and `significance`.

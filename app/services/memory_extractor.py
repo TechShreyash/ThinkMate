@@ -10,6 +10,8 @@ folded into the next attempt instead of being missed. If every attempt fails (e.
 outage), the processed segment is trimmed anyway so the buffer can't grow without bound —
 a deliberate trade of a bounded amount of un-extracted memory for a healthy buffer.
 """
+from datetime import datetime, timezone
+
 from loguru import logger
 from app.config import config
 from app.database.connection import db_session
@@ -24,18 +26,38 @@ from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 MAX_EXTRACTION_ATTEMPTS = 3
 
 
+def _msg_date(m: dict) -> str:
+    """Render a message's ``created_at`` as a ``[YYYY-MM-DD]`` prefix, or '' if absent.
+
+    The transcript carries each message's date so the model can resolve relative time
+    references ("yesterday", "last week") into absolute dates anchored to when the message
+    was actually sent — not when this (possibly much later) extraction run executes.
+    """
+    ts = m.get("created_at")
+    if isinstance(ts, datetime):
+        return f"[{ts.strftime('%Y-%m-%d')}] "
+    return ""
+
+
+def _date_context() -> str:
+    """A ``=== CURRENT DATE ===`` block giving the model an absolute reference point."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"=== CURRENT DATE ===\n{today}\n"
+
+
 def _format_segment(segment: list[dict]) -> str:
-    """Render a buffer slice as a readable ``User:``/``Assistant:`` transcript."""
+    """Render a buffer slice as a readable, date-stamped ``User:``/``Assistant:`` transcript."""
     return "".join(
-        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}\n"
+        f"{_msg_date(m)}{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}\n"
         for m in segment
     )
 
 
 # --- Multi-party (group) extraction helpers ---------------------------------- #
 
-# Name used for the bot's own (assistant) turns; never a memory participant.
-_BOT_NAME = "ThinkMate"
+# Name used for the bot's own (assistant) turns; never a memory participant. Sourced from
+# the configured display name so renaming the bot keeps assistant turns correctly skipped.
+_BOT_NAME = config.bot_display_name
 
 
 def _normalize_name(name: str | None) -> str:
@@ -89,7 +111,7 @@ def _format_group_segment(segment: list[dict]) -> str:
             name = m.get("sender_name") or _BOT_NAME
         else:
             name = m.get("sender_name") or "Unknown"
-        lines.append(f"{name}: {m['content']}\n")
+        lines.append(f"{_msg_date(m)}{name}: {m['content']}\n")
     return "".join(lines)
 
 
@@ -124,7 +146,7 @@ _GROUP_EXTRACTION_NOTE = (
     "you have something worth remembering about, output one entry tagging that participant "
     "by the EXACT name shown, paired with their own memory extraction. Attribute every "
     "fact, belief, and event to the correct speaker — never mix people, and ignore "
-    "ThinkMate's own turns.\n"
+    f"{_BOT_NAME}'s own turns.\n"
     "Store each participant's memory in ENGLISH (translate non-English content to natural "
     "English, never transliterate), while keeping every person's name and other proper nouns "
     "in their original form.\n"
@@ -184,7 +206,9 @@ async def _extract_and_trim_single(user_id: int):
     try:
         for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
             async with db_session() as db:
-                buffer_messages = await models.get_chat_buffer(db, user_id)
+                # Read the raw buffer (with per-message ``created_at``) so the transcript can
+                # be date-stamped for accurate event dating.
+                buffer_messages = await _read_raw_buffer(db, user_id)
                 if len(buffer_messages) <= keep_count:
                     # Nothing left to process (e.g. a concurrent run already trimmed it).
                     return
@@ -192,10 +216,12 @@ async def _extract_and_trim_single(user_id: int):
                 trim_size = len(buffer_messages) - keep_count
                 segment = buffer_messages[:trim_size]
 
-                # Give the model current memories so it can de-dupe / merge / correct.
+                # Give the model current memories so it can de-dupe / merge / correct, plus
+                # the current date so it can resolve relative event dates absolutely.
                 current_memory_text, _ = await build_memory_block(db, user_id)
                 instruction_prompt = (
                     f"{SYSTEM_EXTRACTION_PROMPT}\n\n"
+                    f"{_date_context()}\n"
                     f"=== CURRENT MEMORIES ===\n{current_memory_text}\n"
                 )
 
@@ -272,7 +298,7 @@ async def extract_and_trim_group(chat_id: int):
                 name_to_id = _build_name_id_map(segment)
 
                 instruction_prompt = (
-                    f"{SYSTEM_EXTRACTION_PROMPT}\n\n{_GROUP_EXTRACTION_NOTE}"
+                    f"{SYSTEM_EXTRACTION_PROMPT}\n\n{_date_context()}\n{_GROUP_EXTRACTION_NOTE}"
                 )
 
                 result = await llm_service.extract_group_memory(

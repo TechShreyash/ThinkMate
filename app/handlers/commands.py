@@ -1,11 +1,33 @@
-"""Slash-command handlers: /start, /help, /profile, /reset."""
-from aiogram import Router, html
+"""Slash-command handlers: /start, /onboard, /profile, /reset, etc.
+
+Beyond the plain slash commands, this module also powers an interactive, button-driven
+**guide**. The guide is a small set of screens — memory, privacy, groups, check-ins, and
+the full command list — that users page through with Telegram inline buttons
+(``InlineKeyboardMarkup``). There is no longer a dedicated ``/guide`` or ``/help`` slash
+command: the single ``/start`` command is the entry point, and its inline buttons open
+the guide and the command list. A single ``callback_query`` handler
+(:func:`on_guide_nav`) edits the message in place as the user taps between screens, so
+newcomers can learn what the bot does without leaving the chat. See
+``docs/development/telegram_bot.md`` for the design overview.
+"""
+import json
+from datetime import datetime, timezone
+
+from aiogram import F, Router, html
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
 from app.database import models
+from app.services import log_forwarder
 from app.services.affinity import affinity_cache
 from app.services.health import liveness, readiness
 from app.services.memory_loader import build_memory_block
@@ -14,98 +36,451 @@ from app.services.metrics import metrics, LLM_TASK_TYPES
 router = Router(name="commands")
 
 
-def _admin_allowed(message: Message) -> bool:
-    """Authorization gate for the ops commands (Req 4.3, 4.4).
+def _trigger(key: str) -> str:
+    """Return the configured trigger name for a built-in command key.
 
-    When ``ADMIN_USER_IDS`` is non-empty, only those user ids are honored.
-    When it is empty, fall back to the safe DM-only default so a status report
-    is never broadcast into a group.
+    Commands can be renamed via ``CMD_<KEY>_NAME`` (see ``config.resolve_command_config``),
+    so user-facing copy must reference the *resolved* trigger rather than hard-coding the
+    default. Falls back to the key itself when unknown.
     """
-    if not message.from_user:
+    name, _enabled = config.COMMANDS.get(key, (key, True))
+    return name
+
+
+def _parse_toggle(arg: str | None) -> bool | None:
+    """Map an ``on``/``off``-style argument to a bool; ``None`` if absent/unrecognized.
+
+    Shared by the toggle commands (``/reactions``, ``/checkins``, ``/groupbot``) so that a
+    bare command (no/unknown arg) reports the current state while ``on``/``off`` set it.
+    """
+    a = (arg or "").strip().lower()
+    if a in ("on", "enable", "enabled", "yes"):
+        return True
+    if a in ("off", "disable", "disabled", "no"):
+        return False
+    return None
+
+
+def _is_admin(user_id: int | None, chat_type: str | None) -> bool:
+    """Core authorization rule shared by messages and callback queries.
+
+    When ``ADMIN_USER_IDS`` is non-empty, only those user ids are honored. When it is
+    empty, fall back to the safe DM-only default so a status report is never broadcast
+    into a group.
+    """
+    if user_id is None:
         return False
     if config.ADMIN_USER_IDS:
-        return message.from_user.id in config.ADMIN_USER_IDS
-    return message.chat.type == "private"
+        return user_id in config.ADMIN_USER_IDS
+    return chat_type == "private"
+
+
+def _admin_allowed(message: Message) -> bool:
+    """Authorization gate for the ops commands (Req 4.3, 4.4)."""
+    if not message.from_user:
+        return False
+    return _is_admin(message.from_user.id, message.chat.type)
+
+
+def _fmt_uptime(secs) -> str:
+    """Render a seconds count as a compact ``2d 3h 4m 5s`` string (zero units trimmed)."""
+    try:
+        total = int(float(secs))
+    except (TypeError, ValueError):
+        return str(secs)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, sec = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    parts.append(f"{sec}s")
+    return " ".join(parts)
+
+
+def _fmt_secs(v) -> str:
+    """Render a latency value (seconds) as ``0.84s`` / ``120ms``; pass through non-numbers."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f <= 0:
+        return "—"
+    if f < 1:
+        return f"{f * 1000:.0f}ms"
+    return f"{f:.2f}s"
+
+
+def _mono_table(headers: list[str], rows: list[list], aligns: list[str] | None = None) -> str:
+    """Build a space-aligned monospace table body (no surrounding ``<pre>``).
+
+    ``aligns`` is a per-column ``"l"``/``"r"`` list; defaults to left for all. Column
+    widths are sized to the widest cell (header included) so columns line up inside a
+    Telegram ``<pre>`` block. Trailing padding is stripped per line.
+    """
+    aligns = aligns or ["l"] * len(headers)
+    all_rows = [headers] + [[str(c) for c in r] for r in rows]
+    widths = [max(len(r[i]) for r in all_rows) for i in range(len(headers))]
+
+    def render(row: list[str]) -> str:
+        cells = [
+            row[i].rjust(widths[i]) if aligns[i] == "r" else row[i].ljust(widths[i])
+            for i in range(len(headers))
+        ]
+        return "  ".join(cells).rstrip()
+
+    # Skip the header line entirely when every header is blank (label/value tables).
+    display_rows = all_rows if any(h.strip() for h in headers) else all_rows[1:]
+    return "\n".join(render(r) for r in display_rows)
 
 
 def _render_health(live: dict, ready: dict) -> str:
-    """Render a readable plain-text /health report (no parse_mode needed)."""
+    """Render a readable HTML /health report (sent with parse_mode='HTML')."""
     summary = live.get("summary", {}) or {}
+    status = live.get("status", "unknown")
+    status_icon = "🟢" if status == "ok" else "🟠"
     if ready.get("ready"):
-        mongo_line = f"mongo: ok ({ready.get('mongo', 'ok')})"
+        mongo_line = "✅ ok"
     else:
-        mongo_line = f"mongo: degraded ({ready.get('reason', ready.get('mongo', 'error'))})"
-    lines = [
-        "🩺 ThinkMate health",
-        f"status: {live.get('status', 'unknown')}",
-        f"uptime_secs: {live.get('uptime_secs', 0)}",
-        f"readiness: {mongo_line}",
-        "",
-        "metrics summary:",
-        f"  llm_calls_total: {summary.get('llm_calls_total', 0)}",
-        f"  reply_latency_avg: {summary.get('reply_latency_avg', 0)}",
-        f"  reply_latency_max: {summary.get('reply_latency_max', 0)}",
-        f"  throttle_drops: {summary.get('throttle_drops', 0)}",
-        f"  queue_drops: {summary.get('queue_drops', 0)}",
-        f"  conversations_active: {summary.get('conversations_active', 0)}",
-        f"  extraction_runs: {summary.get('extraction_runs', 0)}",
-        f"  compression_runs: {summary.get('compression_runs', 0)}",
-    ]
-    return "\n".join(lines)
+        mongo_line = f"⚠️ degraded ({ready.get('reason', ready.get('mongo', 'error'))})"
+
+    overview = _mono_table(
+        ["", ""],
+        [
+            ["Status", f"{status_icon} {status}"],
+            ["Uptime", _fmt_uptime(live.get("uptime_secs", 0))],
+            ["MongoDB", mongo_line],
+        ],
+    )
+    stats = _mono_table(
+        ["", ""],
+        [
+            ["LLM calls", str(summary.get("llm_calls_total", 0))],
+            ["Reply latency", f"avg {_fmt_secs(summary.get('reply_latency_avg', 0))} · "
+                              f"max {_fmt_secs(summary.get('reply_latency_max', 0))}"],
+            ["Throttle drops", str(summary.get("throttle_drops", 0))],
+            ["Queue drops", str(summary.get("queue_drops", 0))],
+            ["Active convos", str(summary.get("conversations_active", 0))],
+            ["Extraction runs", str(summary.get("extraction_runs", 0))],
+            ["Compression runs", str(summary.get("compression_runs", 0))],
+        ],
+    )
+    return (
+        f"🩺 {html.bold(f'{config.bot_display_name} · Health')}\n"
+        f"<pre>{html.quote(overview)}</pre>\n"
+        f"{html.bold('Metrics summary')}\n"
+        f"<pre>{html.quote(stats)}</pre>"
+    )
 
 
-def _render_llm_by_task(snap: dict) -> list[str]:
-    """Render one line per canonical LLM_Task_Type (Req 6.4, 6.5, 6.8).
+def _render_llm_by_task(snap: dict) -> str:
+    """Render the per-task LLM table body (Req 6.4, 6.5, 6.8) as a monospace block.
 
-    Driven by ``LLM_TASK_TYPES`` so every task type appears in a stable order even
-    with zero recorded calls; ``.get(..., 0)`` defaults ensure an absent task type
-    never raises and renders as zero figures.
+    Driven by ``LLM_TASK_TYPES`` so every task type appears in a stable order even with
+    zero recorded calls; ``.get(..., 0)`` defaults ensure an absent task type never raises.
     """
     counters = snap.get("counters", {}) or {}
     timers = snap.get("timers", {}) or {}
-    lines = ["LLM calls by task:"]
+    rows = []
     for task_type, prefix in LLM_TASK_TYPES:
-        calls = counters.get(f"llm.{prefix}.calls", 0)
-        success = counters.get(f"llm.{prefix}.success", 0)
-        failure = counters.get(f"llm.{prefix}.failure", 0)
         lat = timers.get(f"llm.{prefix}.latency", {}) or {}
-        avg = lat.get("avg", 0)
-        mx = lat.get("max", 0)
-        lines.append(
-            f"  {task_type}: calls={calls} ok={success} fail={failure} "
-            f"avg={avg} max={mx}"
-        )
-    return lines
+        rows.append([
+            task_type,
+            counters.get(f"llm.{prefix}.calls", 0),
+            counters.get(f"llm.{prefix}.success", 0),
+            counters.get(f"llm.{prefix}.failure", 0),
+            _fmt_secs(lat.get("avg", 0)),
+            _fmt_secs(lat.get("max", 0)),
+        ])
+    return _mono_table(
+        ["task", "calls", "ok", "fail", "avg", "max"],
+        rows,
+        aligns=["l", "r", "r", "r", "r", "r"],
+    )
 
 
 def _render_metrics(snap: dict) -> str:
-    """Render a compact plain-text dump of ``metrics.snapshot()``."""
+    """Render an HTML /metrics report (sent with parse_mode='HTML')."""
     counters = snap.get("counters", {}) or {}
     gauges = snap.get("gauges", {}) or {}
     timers = snap.get("timers", {}) or {}
-    lines = ["📊 ThinkMate metrics", ""]
-    # Prepend the per-task LLM section above the raw counters/gauges/timers dump.
-    lines += _render_llm_by_task(snap)
-    lines += ["", "counters:"]
-    if counters:
-        lines += [f"  {name}: {value}" for name, value in sorted(counters.items())]
+
+    sections = [
+        f"📊 {html.bold(f'{config.bot_display_name} · Metrics')}",
+        f"🤖 {html.bold('LLM calls by task')}",
+        f"<pre>{html.quote(_render_llm_by_task(snap))}</pre>",
+    ]
+
+    # Raw counters that are not part of the per-task LLM breakdown (those are shown above).
+    other_counters = {
+        name: value for name, value in counters.items()
+        if not (name.startswith("llm.") and name.split(".")[-1] in ("calls", "success", "failure"))
+    }
+    sections.append(f"🔢 {html.bold('Counters')}")
+    if other_counters:
+        body = _mono_table(["", ""], [[n, v] for n, v in sorted(other_counters.items())], ["l", "r"])
+        sections.append(f"<pre>{html.quote(body)}</pre>")
     else:
-        lines.append("  (none)")
-    lines.append("gauges:")
+        sections.append("<i>none</i>")
+
+    sections.append(f"📈 {html.bold('Gauges')}")
     if gauges:
-        lines += [f"  {name}: {value}" for name, value in sorted(gauges.items())]
+        body = _mono_table(["", ""], [[n, v] for n, v in sorted(gauges.items())], ["l", "r"])
+        sections.append(f"<pre>{html.quote(body)}</pre>")
     else:
-        lines.append("  (none)")
-    lines.append("timers:")
-    if timers:
-        for name, agg in sorted(timers.items()):
-            lines.append(
-                f"  {name}: count={agg.get('count', 0)} "
-                f"avg={agg.get('avg', 0)} max={agg.get('max', 0)}"
-            )
+        sections.append("<i>none</i>")
+
+    sections.append(f"⏱ {html.bold('Timers')}")
+    non_llm_timers = {n: a for n, a in timers.items() if not n.startswith("llm.")}
+    if non_llm_timers:
+        rows = [
+            [n, agg.get("count", 0), _fmt_secs(agg.get("avg", 0)), _fmt_secs(agg.get("max", 0))]
+            for n, agg in sorted(non_llm_timers.items())
+        ]
+        body = _mono_table(["timer", "count", "avg", "max"], rows, ["l", "r", "r", "r"])
+        sections.append(f"<pre>{html.quote(body)}</pre>")
     else:
-        lines.append("  (none)")
+        sections.append("<i>none</i>")
+
+    return "\n".join(sections)
+
+
+# ===========================================================================
+# Interactive guide (inline-button navigation)
+# ===========================================================================
+# A small, friendly "how this bot works" walkthrough that newcomers can page
+# through with Telegram inline buttons. Each screen is identified by a short
+# "gd:<screen>" callback key; on_guide_nav() edits the message in place so the
+# whole tour happens inside one message. Keep callback_data well under
+# Telegram's 64-byte limit.
+
+GUIDE_PREFIX = "gd:"  # callback_data namespace for all guide buttons
+
+
+def _btn(text: str, screen: str) -> InlineKeyboardButton:
+    """Build a guide inline button targeting ``screen`` (e.g. ``home``)."""
+    return InlineKeyboardButton(text=text, callback_data=f"{GUIDE_PREFIX}{screen}")
+
+
+# Ordered guide topics: drives both the home menu and the sequential "Next ▶️"
+# navigation so a newcomer can page straight through in a sensible reading order.
+_GUIDE_TOPICS: tuple[tuple[str, str], ...] = (
+    ("memory", "🧠 Memory"),
+    ("privacy", "🔒 Privacy"),
+    ("groups", "👥 Groups"),
+    ("checkins", "🔔 Check-ins"),
+    ("commands", "📋 Commands"),
+)
+
+
+def _kb_guide_home() -> InlineKeyboardMarkup:
+    """The guide menu: one button per topic, in reading order."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("🧠 How my memory works", "memory")],
+        [_btn("🔒 Your privacy & control", "privacy")],
+        [_btn("👥 Using me in groups", "groups")],
+        [_btn("🔔 Staying in touch", "checkins")],
+        [_btn("📋 All commands", "commands")],
+    ])
+
+
+def _kb_topic(screen: str) -> InlineKeyboardMarkup:
+    """Footer navigation for a topic screen.
+
+    Every topic gets a consistent ``⬅️ Menu`` button so there is never a dead-end, plus a
+    ``Next ▶️`` button (labelled with the next topic) on all but the last screen so the
+    whole tour can be paged through in order without bouncing back to the menu each time.
+    """
+    keys = [k for k, _ in _GUIDE_TOPICS]
+    idx = keys.index(screen) if screen in keys else -1
+    nav = [_btn("⬅️ Menu", "home")]
+    if 0 <= idx < len(keys) - 1:
+        next_key, next_label = _GUIDE_TOPICS[idx + 1]
+        nav.append(_btn(f"Next: {next_label} ▶️", next_key))
+    return InlineKeyboardMarkup(inline_keyboard=[nav])
+
+
+def _kb_welcome(onboarded: bool) -> InlineKeyboardMarkup:
+    """Buttons attached to /start: quick-start (new users), the guide, then commands."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if not onboarded:
+        rows.append([_btn("🚀 Quick start", "onboard")])
+    rows.append([_btn("📖 How I work", "home")])
+    rows.append([_btn("📋 Commands", "commands")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_onboard() -> InlineKeyboardMarkup:
+    """Buttons attached to the /onboard intro (kept separate from its plain text)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("📖 What I can do", "home")],
+        [_btn("📋 Commands", "commands")],
+    ])
+
+
+def _build_help_text(is_admin: bool) -> str:
+    """Render the grouped command list (shared by /help and the guide)."""
+    resolved = config.COMMANDS
+
+    def section(title: str, keys: tuple[str, ...]) -> list[str]:
+        rows: list[str] = []
+        for key in keys:
+            trigger, enabled = resolved.get(key, (key, True))
+            if not enabled:
+                continue
+            # Admin-only commands are hidden from non-admins.
+            if key in ("health", "metrics") and not is_admin:
+                continue
+            _handler, desc = _COMMANDS[key]
+            rows.append(f"/{trigger} — {desc}")
+        if not rows:
+            return []
+        return [html.bold(title), *rows, ""]
+
+    lines = [f"{html.bold('Here is what I can do:')}", ""]
+    lines += section("The basics", ("start", "onboard", "profile"))
+    lines += section("Check-ins & memory", ("checkins", "reset", "reactions"))
+    lines += section("In group chats", ("quiet", "chatty", "groupbot",
+                                        "groupquiet", "groupchatty", "groupnormal"))
+    if is_admin:
+        lines += section("Admin", ("health", "metrics"))
+    lines += ["Mostly though, just talk to me. 🙂"]
     return "\n".join(lines)
+
+
+def _guide_home_text() -> str:
+    return (
+        f"📖 {html.bold(f'{config.bot_display_name} — Quick Guide')}\n\n"
+        "I'm not your usual bot. I'm an AI companion who actually "
+        f"{html.bold('remembers')} you — our chats, the things you care about, how "
+        "you've been doing — and picks up right where we left off.\n\n"
+        "Pick a topic to see how I work 👇"
+    )
+
+
+def _guide_screen(screen: str, is_admin: bool) -> tuple[str, InlineKeyboardMarkup]:
+    """Return the (HTML text, keyboard) for a guide ``screen`` key.
+
+    Command names are resolved through :func:`_trigger` so the copy stays correct even
+    when a command has been renamed in the environment. Unknown screens fall back to the
+    home menu, so a stale button can never dead-end.
+    """
+    if screen == "memory":
+        text = (
+            f"🧠 {html.bold('How my memory works')}\n\n"
+            "Most bots forget everything the moment you close the chat. I don't.\n\n"
+            "As we talk, I quietly pick out the things worth keeping — facts about you, "
+            "what's going on in your life, what you're into — and tuck them away. Next "
+            "time, I already know them, so you never have to repeat yourself.\n\n"
+            "There's nothing to set up and no special format. Just talk to me normally "
+            "and my memory builds itself over time. The more we chat, the better I get.\n\n"
+            f"• See what I've remembered → /{_trigger('profile')}\n"
+            f"• Start completely fresh → /{_trigger('reset')}"
+        )
+        return text, _kb_topic(screen)
+
+    if screen == "privacy":
+        text = (
+            f"🔒 {html.bold('Your privacy & control')}\n\n"
+            "Your memories are yours, and you're always in charge of them.\n\n"
+            f"• /{_trigger('profile')} — see everything I've saved about you, in plain text.\n"
+            f"• /{_trigger('reset')} — wipe it all and start over. I'll ask you to confirm "
+            "first, since there's no undo.\n\n"
+            "Everyone's memories are kept completely separate — what you tell me stays "
+            "between us."
+        )
+        return text, _kb_topic(screen)
+
+    if screen == "groups":
+        text = (
+            f"👥 {html.bold('Using me in groups')}\n\n"
+            "Add me to a group and I'll join in like another member.\n\n"
+            "• I always reply when you @mention me, call me by name, or reply to one of "
+            "my messages.\n"
+            "• Otherwise I only chime in now and then, so I never spam the chat.\n\n"
+            f"{html.bold('Fine-tune how chatty I am with you')} (just your own setting — it "
+            "won't affect anyone else here):\n"
+            f"• /{_trigger('quiet')} — I'll hang back.\n"
+            f"• /{_trigger('chatty')} — I'll join in more.\n\n"
+            f"{html.bold('Group admins can also:')}\n"
+            f"• /{_trigger('groupbot')} on — turn me on for the group.\n"
+            f"• /{_trigger('groupbot')} off — turn me off here completely.\n"
+            f"• /{_trigger('groupquiet')} — keep me low-key for everyone here.\n"
+            f"• /{_trigger('groupchatty')} — let me join in more for everyone here.\n"
+            f"• /{_trigger('groupnormal')} — clear that; each person's own setting applies.\n\n"
+            "A group admin's choice takes priority over personal "
+            f"/{_trigger('quiet')} or /{_trigger('chatty')} settings."
+        )
+        return text, _kb_topic(screen)
+
+    if screen == "checkins":
+        text = (
+            f"🔔 {html.bold('Staying in touch')}\n\n"
+            "Every so often, if it's been a while, I might send you a little check-in — "
+            "a friendly nudge based on something we talked about. No spam, and never in "
+            "the middle of the night.\n\n"
+            f"{html.bold('Prefer I wait for you instead?')}\n"
+            f"• /{_trigger('checkins')} off — I'll stop reaching out first.\n"
+            f"• /{_trigger('checkins')} on — turn check-ins back on.\n"
+            f"• /{_trigger('checkins')} — see your current setting."
+        )
+        return text, _kb_topic(screen)
+
+    if screen == "commands":
+        return _build_help_text(is_admin), _kb_topic(screen)
+
+    # Default / "home": the topic menu.
+    return _guide_home_text(), _kb_guide_home()
+
+
+async def on_guide_nav(callback: CallbackQuery, db: AsyncIOMotorDatabase):
+    """Handle every guide inline-button tap by editing the message in place.
+
+    The ``gd:onboard`` button doubles as a real onboarding action (it seeds the profile
+    and flips the ``onboarded`` flag), mirroring the /onboard command; all other screens
+    are read-only. Edits are best-effort: Telegram rejects a no-op edit (same content),
+    and the message may be too old to edit, so failures are swallowed after the spinner
+    is dismissed.
+    """
+    data = (callback.data or "")[len(GUIDE_PREFIX):]
+    user = callback.from_user
+    msg = callback.message
+    if msg is None:
+        await callback.answer()
+        return
+
+    is_admin = _is_admin(user.id if user else None, msg.chat.type if msg.chat else None)
+
+    if data == "onboard":
+        if user:
+            await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
+            await models.set_onboarded(db, user.id, True)
+        text, kb = _onboard_text(), _kb_onboard()
+    else:
+        text, kb = _guide_screen(data, is_admin)
+
+    try:
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as exc:  # noqa: BLE001 — no-op edit / too-old message / etc.
+        logger.debug(f"guide edit_text failed for {data!r}: {exc}")
+    await callback.answer()
+
+
+def _onboard_text() -> str:
+    """The static, persona-consistent onboarding intro (plain text, no LLM, no markdown)."""
+    return (
+        f"hey, glad you're here. i'm {config.bot_display_name} — think of me less like an "
+        "app and more like a friend who actually remembers your stuff. the more we talk, "
+        "the better i get at it.\n\n"
+        "to kick things off, tell me a little about you whenever you feel like it. what "
+        "should i call you? what do your days usually look like? and what's something "
+        "you've been into lately that you could talk about for hours?\n\n"
+        "no rush and no forms. just talk to me like you would anyone else."
+    )
 
 
 async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
@@ -113,20 +488,27 @@ async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
     if not user:
         return
     await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
-    base = (
-        f"Hi {html.bold(user.first_name or 'there')}! 👋\n\n"
-        "I'm ThinkMate, an AI companion who remembers our past chats.\n"
-    )
-    # Nudge /onboard only when the profile is not yet onboarded (Req 4.5).
+    name = html.bold(user.first_name or "there")
     doc = await db["user_profiles"].find_one({"_id": user.id})
-    if doc and doc.get("onboarded"):
-        msg = base + "Use /profile to see what I remember, or /help for everything I can do."
-    else:
-        msg = base + (
-            "New here? Try /onboard and I'll get to know you faster. "
-            "Or use /profile and /help anytime."
+    onboarded = bool(doc and doc.get("onboarded"))
+
+    if onboarded:
+        # Returning user: no /onboard nudge (Req 4.5). Keep it warm and short.
+        msg = (
+            f"Hey {name}! 👋 Good to see you again.\n\n"
+            "Want a refresher on what I can do, or to peek at what I remember about you? "
+            "Tap below — or just pick up right where we left off."
         )
-    await message.answer(msg, parse_mode="HTML")
+    else:
+        msg = (
+            f"Hey {name}! 👋\n\n"
+            f"I'm {html.bold(config.bot_display_name)}, an AI companion who actually "
+            "remembers you — our chats, what you care about, how things are going. The "
+            "more we talk, the better I get to know you.\n\n"
+            "New here? Tap 📖 below to see how I work, or just say hi and start chatting. "
+            f"To help me learn about you faster, try /{_trigger('onboard')}."
+        )
+    await message.answer(msg, parse_mode="HTML", reply_markup=_kb_welcome(onboarded))
 
 
 async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
@@ -136,50 +518,84 @@ async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
     await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
     await models.set_onboarded(db, user.id, True)
     # Static, persona-consistent, plain-text intro (no markdown/bullets, no LLM call).
-    # Does not gate or alter normal chat handling (Req 4.1, 4.2, 4.3).
-    await message.answer(
-        "hey, glad you're here. i'm ThinkMate — think of me less like an app and more "
-        "like a friend who actually remembers your stuff. the more we talk, the better i "
-        "get at it.\n\n"
-        "to kick things off, tell me a little about you whenever you feel like it. what "
-        "should i call you? what do your days usually look like? and what's something "
-        "you've been into lately that you could talk about for hours?\n\n"
-        "no rush and no forms. just talk to me like you would anyone else."
-    )
+    # Does not gate or alter normal chat handling (Req 4.1, 4.2, 4.3). The inline
+    # buttons are navigation only and live outside the (plain) message text.
+    await message.answer(_onboard_text(), reply_markup=_kb_onboard())
 
 
-async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
+async def cmd_checkins(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
+    """Turn my occasional proactive check-ins on/off, or report the setting when used alone.
+
+    Replaces the old ``/pause`` + ``/resume`` pair: ``/checkins`` reports the current state,
+    ``/checkins on`` re-enables nudges, ``/checkins off`` stops me from messaging first.
+    """
     if not message.from_user:
         return
-    await models.set_proactive_enabled(db, message.from_user.id, False)
-    await message.answer(
-        "okay, i won't reach out first anymore — i'll be here whenever you want to talk. "
-        "send /resume if you want me to check in again."
-    )
+    user = message.from_user
+    await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
+
+    trig = _trigger("checkins")
+    desired = _parse_toggle(command.args)
+    if desired is None:
+        current = await models.get_proactive_enabled(db, user.id)
+        if current:
+            status = (
+                f"My check-ins are {html.bold('on')} — I'll occasionally reach out if it's "
+                "been a while."
+            )
+        else:
+            status = f"My check-ins are {html.bold('off')} — I won't message you first."
+        await message.answer(
+            f"{status}\n\nUse /{trig} on or /{trig} off to change it.",
+            parse_mode="HTML",
+        )
+        return
+
+    await models.set_proactive_enabled(db, user.id, desired)
+    if desired:
+        await message.answer(
+            "Got it — I'll check in now and then if it's been a while. Good to have you back. 🌱"
+        )
+    else:
+        await message.answer(
+            "Okay, I won't message you first anymore — I'll be right here whenever you want "
+            f"to talk. Send /{trig} on if you'd like me to check in again now and then."
+        )
 
 
-async def cmd_resume(message: Message, db: AsyncIOMotorDatabase):
+async def cmd_reactions(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
+    """Turn emoji reactions on the user's messages on/off, or report the setting when alone.
+
+    Per-user opt-out for people who find the little 👍/❤️ reactions on their messages
+    annoying. Used alone, ``/reactions`` reports the current state; ``on``/``off`` set it.
+    The preference is keyed on the user, so it follows them everywhere (the reaction is
+    applied to *their* message regardless of chat).
+    """
     if not message.from_user:
         return
-    await models.set_proactive_enabled(db, message.from_user.id, True)
-    await message.answer(
-        "got it — i'll check in now and then if it's been a while. good to have you back. 🌱"
-    )
+    user = message.from_user
+    await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
 
+    trig = _trigger("reactions")
+    desired = _parse_toggle(command.args)
+    if desired is None:
+        current = await models.get_reactions_enabled(db, user.id)
+        state = html.bold("on") if current else html.bold("off")
+        await message.answer(
+            f"Emoji reactions on your messages are currently {state}.\n\n"
+            f"Use /{trig} on or /{trig} off to change it.",
+            parse_mode="HTML",
+        )
+        return
 
-async def cmd_help(message: Message):
-    resolved = config.COMMANDS
-    lines = [f"{html.bold('Here is what I can do:')}", ""]
-    for key, (_handler, desc) in _COMMANDS.items():
-        trigger, enabled = resolved.get(key, (key, True))
-        if not enabled:
-            continue
-        # Admin-only commands are omitted from the public help in non-admin contexts.
-        if key in ("health", "metrics") and not _admin_allowed(message):
-            continue
-        lines.append(f"/{trigger} — {desc}")
-    lines += ["", "Mostly though, just talk to me. 🙂"]
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await models.set_reactions_enabled(db, user.id, desired)
+    if desired:
+        await message.answer("Okay, I'll add little emoji reactions to your messages again. 👍")
+    else:
+        await message.answer(
+            "Got it — no more emoji reactions on your messages. Send "
+            f"/{trig} on if you change your mind. 🙂"
+        )
 
 
 async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
@@ -195,12 +611,17 @@ async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
         )
     )
     if not has_memories:
-        await message.answer("I don't have any saved memories for you yet. Let's chat more first!")
+        await message.answer(
+            "I don't have any memories saved for you yet — we just need to chat a bit "
+            f"first! Say hi, or try /{_trigger('onboard')} for a quick intro. 🌱"
+        )
         return
 
     profile_data, _ = await build_memory_block(db, user_id)
     await message.answer(
-        f"📋 {html.bold('My Memories of You:')}\n\n{html.code(profile_data)}",
+        f"📋 {html.bold('Here is what I remember about you:')}\n\n"
+        f"{html.code(profile_data)}\n\n"
+        f"Want me to forget all of it? Send /{_trigger('reset')}.",
         parse_mode="HTML",
     )
 
@@ -210,12 +631,44 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
         return
     if (command.args or "").strip().lower() != "confirm":
         await message.answer(
-            "⚠️ This will erase everything I remember about you and our chats.\n"
-            "If you're sure, send: /reset confirm"
+            "⚠️ This will erase everything I remember about you and our chats — there's "
+            "no undo.\n\n"
+            f"If you're sure, send: /{_trigger('reset')} confirm"
         )
         return
-    await models.reset_user(db, message.from_user.id)
-    await message.answer("Done — I've cleared everything. We're starting fresh. 🌱")
+
+    user = message.from_user
+    # Back up the full profile to the Logs_Channel BEFORE deleting, so an admin can
+    # restore it later if the user changes their mind. Best-effort: a backup failure is
+    # logged (and surfaces on the channel via the error sink) but never blocks the reset
+    # the user explicitly asked for.
+    try:
+        snapshot = await models.export_user_data(db, user.id)
+        if snapshot is not None:
+            payload = json.dumps(snapshot, default=str, ensure_ascii=False, indent=2)
+            uname = f"@{user.username}" if user.username else "—"
+            caption = (
+                f"🗂 Profile backup before /{_trigger('reset')}\n"
+                f"👤 {user.first_name or 'user'} ({uname})\n"
+                f"🆔 {user.id}\n"
+                f"🕐 {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC"
+            )
+            await log_forwarder.send_document(
+                message.bot,
+                message.chat.id,
+                filename=f"backup_{user.id}.json",
+                content=payload.encode("utf-8"),
+                caption=caption,
+            )
+    except Exception as exc:  # noqa: BLE001 - never block the reset on a backup failure
+        logger.warning(f"reset backup failed for user {user.id}: {exc}")
+
+    await models.reset_user(db, user.id)
+    await message.answer(
+        "Done — I've cleared everything and we're starting fresh. 🌱\n\n"
+        "Changed your mind later? A backup was just saved, so reach out to an admin and "
+        "they can help bring your memories back."
+    )
 
 
 async def cmd_quiet(message: Message, db: AsyncIOMotorDatabase):
@@ -223,12 +676,17 @@ async def cmd_quiet(message: Message, db: AsyncIOMotorDatabase):
         return
     if message.chat.type == "private":
         await message.answer(
-            "/quiet and /chatty control how much I chime in within a group. "
-            "In our DM I always reply to you, so there's nothing to quiet here. 🙂"
+            f"/{_trigger('quiet')} and /{_trigger('chatty')} control how much I chime in "
+            "inside a group. Here in our DM I always reply to you, so there's nothing to "
+            "quiet. 🙂"
         )
         return
     await affinity_cache.set_mode(db, message.chat.id, message.from_user.id, "quiet")
-    await message.answer("Okay, I'll stay quiet around you here. Mention me if you need me. 🤫")
+    await message.answer(
+        "Okay, I'll hang back around you here — this is just your own personal setting, it "
+        "won't change how I act with anyone else in the group. Mention me anytime you need "
+        "me. 🤫"
+    )
 
 
 async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
@@ -236,12 +694,16 @@ async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
         return
     if message.chat.type == "private":
         await message.answer(
-            "/quiet and /chatty control how much I chime in within a group. "
-            "In our DM I always reply to you, so there's nothing to boost here. 🙂"
+            f"/{_trigger('quiet')} and /{_trigger('chatty')} control how much I chime in "
+            "inside a group. Here in our DM I always reply to you, so there's nothing to "
+            "boost. 🙂"
         )
         return
     await affinity_cache.set_mode(db, message.chat.id, message.from_user.id, "chatty")
-    await message.answer("You got it — I'll chime in more with you here! 😄")
+    await message.answer(
+        "You got it — I'll chime in more with you here! This is just your own personal "
+        "setting and won't change how I act with anyone else in the group. 😄"
+    )
 
 
 async def _is_group_admin(message: Message) -> bool:
@@ -265,33 +727,90 @@ async def _is_group_admin(message: Message) -> bool:
         return False
 
 
-async def _set_group_bot(message: Message, db: AsyncIOMotorDatabase, *, enabled: bool):
-    """Shared body for /groupon and /groupoff: group-only, admin-gated, persisted toggle."""
+async def cmd_groupbot(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
+    """Turn me on/off for the whole group, or report the current state when used alone.
+
+    Replaces the old ``/groupon`` + ``/groupoff`` pair. Group-only. Viewing the state is
+    open to anyone in the chat; changing it is admin-gated (same authorization as before).
+    """
     if message.chat.type not in ("group", "supergroup"):
         await message.answer(
             "This only works inside a group — it turns me on or off for everyone here. "
             "In our DM I'm always around. 🙂"
         )
         return
+
+    trig = _trigger("groupbot")
+    desired = _parse_toggle(command.args)
+    if desired is None:
+        current = await models.is_group_enabled(db, message.chat.id)
+        state = html.bold("on") if current else html.bold("off")
+        await message.answer(
+            f"I'm currently {state} in this group.\n\n"
+            f"A group admin can use /{trig} on or /{trig} off to change it.",
+            parse_mode="HTML",
+        )
+        return
+
     if not await _is_group_admin(message):
         await message.answer("Only a group admin can do that. 🙂")
         return
-    await models.set_group_enabled(db, message.chat.id, enabled)
-    if enabled:
+    await models.set_group_enabled(db, message.chat.id, desired)
+    if desired:
         await message.answer("I'm back on in this group — talk to me anytime. 👋")
     else:
         await message.answer(
             "Okay, I'll go quiet in this group — I won't reply or remember anything here "
-            "until an admin sends /groupon. 🤐"
+            f"until an admin turns me back on with /{trig} on. 🤐"
+        )
+    """Shared body for /groupquiet, /groupchatty, /groupnormal.
+
+    Group-only and admin-gated (same authorization as the kill switch). Sets the
+    group-wide ambient mode, which takes PRIORITY over each member's personal
+    /quiet|/chatty: when an admin sets the group to quiet or chatty, that wins for
+    everyone here regardless of their own setting. ``/groupnormal`` (mode ``auto``)
+    clears the override so personal settings apply again.
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer(
+            "This only works inside a group — it sets how chatty I am for everyone here. "
+            "In our DM I'm always around. 🙂"
+        )
+        return
+    if not await _is_group_admin(message):
+        await message.answer("Only a group admin can do that. 🙂")
+        return
+    await models.set_group_mode(db, message.chat.id, mode)
+    if mode == "quiet":
+        await message.answer(
+            "Okay, I'll hang back for the whole group — I'll still reply when someone "
+            "@mentions me or replies to me, just no chiming in on my own. This overrides "
+            f"everyone's personal /{_trigger('chatty')} here until an admin runs "
+            f"/{_trigger('groupnormal')}. 🤫"
+        )
+    elif mode == "chatty":
+        await message.answer(
+            "You got it — I'll join in more across the whole group! This overrides "
+            f"everyone's personal /{_trigger('quiet')} here until an admin runs "
+            f"/{_trigger('groupnormal')}. 😄"
+        )
+    else:  # auto
+        await message.answer(
+            "Back to normal for the group — everyone's own "
+            f"/{_trigger('quiet')} or /{_trigger('chatty')} setting applies again. 🙂"
         )
 
 
-async def cmd_groupon(message: Message, db: AsyncIOMotorDatabase):
-    await _set_group_bot(message, db, enabled=True)
+async def cmd_groupquiet(message: Message, db: AsyncIOMotorDatabase):
+    await _set_group_mode(message, db, mode="quiet")
 
 
-async def cmd_groupoff(message: Message, db: AsyncIOMotorDatabase):
-    await _set_group_bot(message, db, enabled=False)
+async def cmd_groupchatty(message: Message, db: AsyncIOMotorDatabase):
+    await _set_group_mode(message, db, mode="chatty")
+
+
+async def cmd_groupnormal(message: Message, db: AsyncIOMotorDatabase):
+    await _set_group_mode(message, db, mode="auto")
 
 
 async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
@@ -299,31 +818,68 @@ async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
         return  # fail closed; never leak a report (Req 4.3, 4.4)
     live = liveness()
     ready = await readiness(db)
-    await message.answer(_render_health(live, ready))
+    await message.answer(_render_health(live, ready), parse_mode="HTML")
 
 
 async def cmd_metrics(message: Message, db: AsyncIOMotorDatabase):
     if not _admin_allowed(message):
         return  # same authorization rule as /health (Req 4.5)
-    await message.answer(_render_metrics(metrics.snapshot()))
+    await message.answer(_render_metrics(metrics.snapshot()), parse_mode="HTML")
 
 
 # Static map: command_key -> (handler, help description). Order follows _BUILTIN_COMMANDS.
 _COMMANDS: dict[str, tuple] = {
-    "start":   (cmd_start,   "say hi and set up your profile"),
+    "start":   (cmd_start,   "Open the menu — a quick guide to what I do, your saved memories, and your settings"),
     "onboard": (cmd_onboard, "a quick intro so I can get to know you faster"),
-    "pause":   (cmd_pause,   "stop me from messaging you first (proactive check-ins off)"),
-    "resume":  (cmd_resume,  "let me check in with you again now and then"),
-    "help":    (cmd_help,    "show this list of everything I can do"),
+    "checkins": (cmd_checkins, "turn my occasional check-ins on or off — /checkins on|off"),
     "profile": (cmd_profile, "see the memories I've saved about you"),
     "reset":   (cmd_reset,   "make me forget everything about you — needs /reset confirm"),
-    "quiet":   (cmd_quiet,   "tell me to chime in less in this group (group-only)"),
-    "chatty":  (cmd_chatty,  "tell me to chime in more in this group (group-only)"),
-    "groupon": (cmd_groupon, "turn me back on in this group (group admin only)"),
-    "groupoff":(cmd_groupoff,"turn me completely off in this group (group admin only)"),
+    "reactions": (cmd_reactions, "turn the emoji reactions on your messages on or off — /reactions on|off"),
+    "quiet":   (cmd_quiet,   "your personal setting: I'll chime in less with you in this group (group-only)"),
+    "chatty":  (cmd_chatty,  "your personal setting: I'll chime in more with you in this group (group-only)"),
+    "groupbot": (cmd_groupbot, "turn me on or off for this whole group — /groupbot on|off (group admin only)"),
+    "groupquiet":  (cmd_groupquiet,  "make me quieter for the whole group (group admin only)"),
+    "groupchatty": (cmd_groupchatty, "make me chattier for the whole group (group admin only)"),
+    "groupnormal": (cmd_groupnormal, "clear the group-wide setting; personal modes apply (group admin only)"),
     "health":  (cmd_health,  "ops health + readiness report (admin-only)"),
     "metrics": (cmd_metrics, "ops metrics snapshot, incl. LLM-by-task (admin-only)"),
 }
+
+
+# Public command menu surfaced in Telegram's "/" menu (published via set_my_commands at
+# startup). Only the entry-point command (CMD_START_NAME) is published: every other
+# command is discoverable through the in-chat guide opened from /start, keeping the native
+# menu clean and uncluttered.
+_MENU_DM_KEYS: tuple[str, ...] = (
+    "start",
+)
+
+
+def _menu_for(keys: tuple[str, ...]) -> list[BotCommand]:
+    """Build the ``BotCommand`` list for ``keys``, honoring renames/disables from config."""
+    resolved = config.COMMANDS
+    out: list[BotCommand] = []
+    for key in keys:
+        trigger, enabled = resolved.get(key, (key, True))
+        if not enabled:
+            continue
+        _handler, desc = _COMMANDS[key]
+        out.append(BotCommand(command=trigger, description=desc[:256]))  # Telegram caps at 256
+    return out
+
+
+async def setup_bot_commands(bot) -> None:
+    """Publish only the entry-point command (CMD_START_NAME) to Telegram's "/" menu.
+
+    Every other command is intentionally kept out of the published menu — users discover
+    the rest through the in-chat guide opened from /start. Best-effort: a failure is
+    logged and never blocks startup.
+    """
+    try:
+        await bot.set_my_commands(_menu_for(_MENU_DM_KEYS), scope=BotCommandScopeDefault())
+        logger.info("Published Telegram command menu (start only).")
+    except Exception as exc:  # noqa: BLE001 - cosmetic; never block startup
+        logger.warning(f"set_my_commands failed (command menu not published): {exc}")
 
 
 def register_commands(router: Router) -> None:
@@ -346,3 +902,8 @@ def register_commands(router: Router) -> None:
 
 # Bind at import time so handlers/__init__.py picks up a fully-wired router.
 register_commands(router)
+
+# Guide navigation is event-driven (inline buttons), not a slash command, so it is
+# registered directly rather than through register_commands. It matches any callback
+# whose data starts with the "gd:" namespace.
+router.callback_query(F.data.startswith(GUIDE_PREFIX))(on_guide_nav)

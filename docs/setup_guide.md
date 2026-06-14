@@ -146,13 +146,15 @@ The table below lists the core settings you are most likely to touch, along with
 | `MONGODB_URI` | String | `mongodb://localhost:27017` | Connection URI for the MongoDB database instance. |
 | `MONGODB_DB` | String | `thinkmate_db` | Target MongoDB database name. |
 | `CHAT_BUFFER_MAX_CHARS` | Integer | `10000` | Max character count allowed in the buffer before extraction triggers. |
+| `NEW_USER_EXTRACTION_CHARS` | Integer | `1000` | Lower buffer-char trigger applied to new/sparse users so their memory profile builds quickly. Capped at `CHAT_BUFFER_MAX_CHARS`. |
+| `NEW_USER_MEMORY_THRESHOLD` | Integer | `5` | A user with fewer than this many stored memory items (facts + beliefs + events) is treated as "new" and uses `NEW_USER_EXTRACTION_CHARS`. |
 | `CHAT_BUFFER_TRIM` | Integer | `10` | The count of oldest messages kept/trimmed from active buffer and summarized. |
 | `USER_MEMORY_BUDGET_CHARS` | Integer | `4000` | Character-budget limit for the compiled memory profile. Exceeding this triggers compression. |
-| `CHARS_PER_TOKEN` | Integer | `4` | Character-to-token ratio for deriving token limits. |
+| `CHARS_PER_TOKEN` | Integer | `4` | Legacy char-to-token ratio; no longer drives output limits (the `max_tokens` cap was removed). |
 | `MESSAGE_BATCH_DELAY_SECS` | Float | `1.5` | Delay in seconds the bot waits after receiving a message to batch rapid messages. |
 | `MAX_BATCH_DELAY_SECS` | Float | `5.0` | Max seconds from first message in a batch before processing is forced. |
 | `MAX_INPUT_CHARS` | Integer | `2500` | Inbound messages longer than this are ignored (anti-abuse — blocks pasted logs/essays), not a normal chat cap. |
-| `MAX_RESPONSE_CHARS` | Integer | `2000` | Generous ceiling for reply length (drives `max_tokens`); actual length is matched to the user's message. |
+| `MAX_RESPONSE_CHARS` | Integer | `2000` | Legacy soft reference; no longer drives a `max_tokens` cap. Reply length is governed by the system-prompt "Length" rule. |
 | `PERSONA_FILE` | Path | `persona.md` | Location of the Markdown configuration defining the bot's tone. |
 
 This reference covers the everyday settings; the full list, including group-chat, observability, and consolidation tuning, lives in [`.env.example`](../.env.example) and is explained in the [configuration guide](development/configuration.md).

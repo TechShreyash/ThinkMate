@@ -4,6 +4,38 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Command UX Consolidation (single entry point + on/off/status toggles)
+
+### Changed
+- **Single published command** (`app/handlers/commands.py`) — `setup_bot_commands` now publishes **only** the entry-point command (`CMD_START_NAME`, e.g. `/chatbot`) to Telegram's "/" menu via `set_my_commands`; the group-scoped menu was dropped. `_MENU_DM_KEYS` is now just `("start",)` and the unused `BotCommandScopeAllGroupChats` import was removed. Every other command stays discoverable through the in-chat guide opened from `/start`. The `/start` menu description was rewritten from "say hi and see how I work" to "Open the menu — a quick guide to what I do, your saved memories, and your settings".
+- **Removed `/help` and the standalone `/guide` command** — both were dropped from `_BUILTIN_COMMANDS` (`app/config.py`) and `_COMMANDS`; the guide screens (memory / privacy / groups / check-ins / commands) and inline-button navigation (`on_guide_nav`) remain, reachable from `/start`'s buttons.
+- **Toggle commands now report status when used alone, and set with `on`/`off`** — a shared `_parse_toggle(arg)` helper backs three commands:
+  - `/reactions` alone reports whether emoji reactions are on/off (no longer silently flips); `/reactions on|off` set it.
+  - **Merged `/pause` + `/resume` into `/checkins`** — `/checkins` reports the current proactive-check-in setting, `/checkins on|off` toggles it. New `models.get_proactive_enabled(db, user_id)` getter (default-enabled, mirroring the due-user query's `proactive_enabled != False` rule) backs the status read.
+  - **Merged `/groupon` + `/groupoff` into `/groupbot`** — `/groupbot` reports the group's on/off state (open to anyone in the chat), `/groupbot on|off` changes it (still admin-gated). Replaces the old `_set_group_bot` helper.
+- **`/quiet` & `/chatty` messaging** clarified that they are the user's *own personal* setting and don't affect anyone else in the group (also reflected in the guide's groups screen).
+- Tests updated (`tests/test_engagement_commands.py`): `/pause`+`/resume` test replaced with `/checkins` on/off and bare-status tests; `tests/test_observability_command_wiring.py` retargeted to the new command set.
+
+## [2026-06-15] - /chatbot Entry Point, Reset Backups & Guide Navigation Polish
+
+### Added
+- **Published Telegram "/" command menu** (`app/handlers/commands.py`, `main.py`) — every enabled command is now registered with Telegram via `set_my_commands` at startup so users can discover commands without typing `/help`. New `setup_bot_commands(bot)` publishes two **scoped** menus built by `_menu_for(keys)`: a default/DM scope (`chatbot`, `onboard`, `guide`, `help`, `profile`, `reset`, `reactions`, `pause`, `resume`) and a group scope (`help`, `guide`, `quiet`, `chatty`, and the admin `group*` toggles). Triggers and enabled state are read from `config.COMMANDS`, so a rename like `/start` → `/chatbot` shows correctly and disabled commands are omitted; admin-only `/health` and `/metrics` are kept out of the public menu. The call is best-effort and never blocks startup. Wired into `main.py` after router registration.
+- **`/reset` now backs up the profile before deleting** — `models.export_user_data(db, user_id)` bundles the full `user_profiles` document plus the `chat_buffers` document into a JSON-serializable snapshot, and `log_forwarder.send_document(bot, source_chat_id, filename, content, caption)` uploads it to the Logs_Channel (`LOGS_CHANNEL_ID`) as a `backup_<user_id>.json` file before `reset_user` wipes the state. The backup is best-effort (a failure is logged but never blocks the user's erase), and the confirmation message now tells the user a backup was saved and an admin can help restore it. `send_document` mirrors `send`'s safety contract (no-op when the channel is unset/recursive/bot-less; failures swallowed).
+
+### Changed
+- **`/start` mapped to `/chatbot`** (`.env`, `.env.example`) — replaced `CMD_HELP_NAME=chatbot` with `CMD_START_NAME=chatbot`, so the bot's main entry point is `/chatbot` (and the published menu/`/help` reflect it automatically through `_trigger`).
+- **Guide navigation polish** (`app/handlers/commands.py`) — replaced the single "⬅️ Back to guide" footer with a consistent `_kb_topic(screen)` footer driven by an ordered `_GUIDE_TOPICS` tuple: every topic screen gets a **⬅️ Menu** button plus a **Next: … ▶️** button (except the last), so a newcomer can page through *memory → privacy → groups → check-ins → commands* in order without dead-ends. `/start` welcome buttons were reordered (quick-start first for new users) for a cleaner flow.
+- Docs updated: `docs/development/telegram_bot.md` (reset backup, guide nav, new published-command-menu section), `docs/development/configuration.md` (start→chatbot example + menu note), `docs/development/database.md` (export-and-reset backup helper), and `.env.example` (refreshed command examples + menu note).
+
+## [2026-06-15] - Per-User Reaction Opt-Out (/reactions)
+
+### Added
+- **`/reactions` — per-user emoji-reaction opt-out** — users who find the bot's emoji reactions on their messages annoying can now turn them off just for themselves:
+  - New built-in command `cmd_reactions` (`app/handlers/commands.py`): no argument flips the current preference, `on`/`off` (and synonyms) set it explicitly. Works the same in DMs and groups since it only touches the caller's own per-user flag; it is env-mappable/disable-able (`CMD_REACTIONS_NAME` / `CMD_REACTIONS_ENABLED`) like every other command and is registered in `_BUILTIN_COMMANDS` and the live `/help` list.
+  - New `reactions_enabled` flag on the `user_profiles` document with `models.set_reactions_enabled` (single `$set`) and `models.get_reactions_enabled` (used by the toggle to read the current value). The flag is additive and read defensively — no migration.
+  - On the reply hot path the flag is read with **no extra round-trip**: `chat_manager.handle_message` pulls `reactions_enabled` from the sender's profile document it already fetches for the memory block. `memory_loader` was refactored into `load_profile_doc` + `compile_memory_block` (with `build_memory_block` kept as a thin wrapper) so the read and compile can share one `find_one`. `handle_message` drops the reaction (returns `None`) before delivery when the sender opted out; this is independent of and downstream from the global `ENABLE_MESSAGE_REACTIONS` master switch. A missing profile/flag defaults to "enabled".
+- Docs updated: `docs/development/telegram_bot.md` (new `/reactions` section), `docs/development/database.md` (additive preference-flags note on `user_profiles`), and `.env.example` (refreshed built-in command KEYS list).
+
 ## [2026-06-14] - Gender Inference + Group Per-User Memory Composition
 
 ### Added
