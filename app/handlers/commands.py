@@ -244,6 +244,56 @@ async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
     await message.answer("You got it — I'll chime in more with you here! 😄")
 
 
+async def _is_group_admin(message: Message) -> bool:
+    """Authorize the group kill-switch commands.
+
+    Allowed when the issuer is a configured global admin (``ADMIN_USER_IDS``) OR an
+    administrator/creator of this group. The chat-member lookup is a network round-trip,
+    so any failure degrades to "not allowed" — the command simply does nothing rather
+    than raising. DMs are rejected by the caller before this is consulted.
+    """
+    user = message.from_user
+    if not user:
+        return False
+    if config.ADMIN_USER_IDS and user.id in config.ADMIN_USER_IDS:
+        return True
+    try:
+        member = await message.bot.get_chat_member(message.chat.id, user.id)
+        return getattr(member, "status", None) in ("administrator", "creator")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"get_chat_member failed for {user.id} in {message.chat.id}: {e}")
+        return False
+
+
+async def _set_group_bot(message: Message, db: AsyncIOMotorDatabase, *, enabled: bool):
+    """Shared body for /groupon and /groupoff: group-only, admin-gated, persisted toggle."""
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer(
+            "This only works inside a group — it turns me on or off for everyone here. "
+            "In our DM I'm always around. 🙂"
+        )
+        return
+    if not await _is_group_admin(message):
+        await message.answer("Only a group admin can do that. 🙂")
+        return
+    await models.set_group_enabled(db, message.chat.id, enabled)
+    if enabled:
+        await message.answer("I'm back on in this group — talk to me anytime. 👋")
+    else:
+        await message.answer(
+            "Okay, I'll go quiet in this group — I won't reply or remember anything here "
+            "until an admin sends /groupon. 🤐"
+        )
+
+
+async def cmd_groupon(message: Message, db: AsyncIOMotorDatabase):
+    await _set_group_bot(message, db, enabled=True)
+
+
+async def cmd_groupoff(message: Message, db: AsyncIOMotorDatabase):
+    await _set_group_bot(message, db, enabled=False)
+
+
 async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
     if not _admin_allowed(message):
         return  # fail closed; never leak a report (Req 4.3, 4.4)
@@ -269,6 +319,8 @@ _COMMANDS: dict[str, tuple] = {
     "reset":   (cmd_reset,   "make me forget everything about you — needs /reset confirm"),
     "quiet":   (cmd_quiet,   "tell me to chime in less in this group (group-only)"),
     "chatty":  (cmd_chatty,  "tell me to chime in more in this group (group-only)"),
+    "groupon": (cmd_groupon, "turn me back on in this group (group admin only)"),
+    "groupoff":(cmd_groupoff,"turn me completely off in this group (group admin only)"),
     "health":  (cmd_health,  "ops health + readiness report (admin-only)"),
     "metrics": (cmd_metrics, "ops metrics snapshot, incl. LLM-by-task (admin-only)"),
 }

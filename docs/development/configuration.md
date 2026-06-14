@@ -157,7 +157,7 @@ The live `/help` message is generated from this configuration, so a renamed comm
 new trigger and a disabled command is hidden and unregistered (it draws no response at all).
 
 **The built-in command keys** (in help-display order) are: `start`, `onboard`, `pause`, `resume`,
-`help`, `profile`, `reset`, `quiet`, `chatty`, `health`, `metrics`.
+`help`, `profile`, `reset`, `quiet`, `chatty`, `groupon`, `groupoff`, `health`, `metrics`.
 
 | Parameter | Type | Default | Description & How to Adjust |
 | :--- | :--- | :--- | :--- |

@@ -52,7 +52,7 @@ def _env_int_set(key: str, default: set[int] | None = None) -> set[int]:
 # trigger name for that command.
 _BUILTIN_COMMANDS: tuple[str, ...] = (
     "start", "onboard", "pause", "resume", "help",
-    "profile", "reset", "quiet", "chatty", "health", "metrics",
+    "profile", "reset", "quiet", "chatty", "groupon", "groupoff", "health", "metrics",
 )
 
 # Telegram command name rule: 1-32 chars, letters/digits/underscore. Used to reject

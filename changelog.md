@@ -15,15 +15,26 @@ Entries are listed newest first. Each one is headed by its date and a short titl
 ### Changed
 - Docs updated: `docs/development/database.md` (new `gender` profile field) and `docs/development/memory_engine.md` (gender-inference section: extraction, persistence, and prompt surfacing).
 
-## [2026-06-14] - Configurable Commands: Docs + Detailed Help
+## [2026-06-14] - Group Kill Switch (/groupon, /groupoff)
 
 ### Added
-- **Documentation for env-driven command remapping** — the existing `CMD_<KEY>_NAME` (rename a command's trigger, e.g. `CMD_HELP_NAME=chatbot` maps `/help` to `/chatbot`) and `CMD_<KEY>_ENABLED` (disable a command, e.g. `CMD_RESET_ENABLED=False`) settings are now documented:
+- **Per-chat bot on/off kill switch** — a group admin (or a configured `ADMIN_USER_IDS` operator) can turn the bot fully on or off in a chat:
+  - `/groupoff` makes the bot go silent in that group; `_handle_group_message` checks the per-chat flag at the very top and returns immediately — no reply, no ambient chime, no implicit reply, no identity capture, no memory extraction, and no buffer write. `/groupon` re-enables it (slash commands are handled in `commands.py`, so `/groupon` works even while the group is disabled).
+  - New `group_settings` collection (`_id = chat_id`, `enabled: bool`, `created_at`/`updated_at`) with `models.is_group_enabled` (read on every group message; defaults to enabled and degrades to enabled on any DB error so a transient hiccup can never silently mute the bot) and `models.set_group_enabled` (single upsert).
+  - Command handlers are group-only and admin-gated (via `bot.get_chat_member` administrator/creator check, or an `ADMIN_USER_IDS` operator), replying with a short notice when used outside a group or by a non-admin. `groupon`/`groupoff` are env-mappable/disable-able like every other command.
+- Docs: `database.md` (new `group_settings` collection) and `group_chat.md` (kill-switch behavior) updated.
+
+## [2026-06-14] - Configurable Commands: Wiring, Docs + Detailed Help
+
+### Added
+- **Env-driven command registry wired into registration** (`app/handlers/commands.py`) — commands are now bound via `register_commands(router)` driven by `config.COMMANDS` (the `resolve_command_config` mapping shipped earlier), replacing the hardcoded `@router.message(Command(...))` decorators. This is what makes the `CMD_<KEY>_NAME` / `CMD_<KEY>_ENABLED` settings take effect: a renamed command binds under its custom trigger and a disabled command is left unregistered.
+- **Documentation for env-driven command remapping** — `CMD_<KEY>_NAME` (rename a command's trigger, e.g. `CMD_HELP_NAME=chatbot` maps `/help` to `/chatbot`) and `CMD_<KEY>_ENABLED` (disable a command, e.g. `CMD_RESET_ENABLED=False`):
   - New "Commands (rename / disable, optional)" section in `.env.example` listing all built-in command keys (`start onboard pause resume help profile reset quiet chatty health metrics`), the trigger-name rules (1–32 chars, letters/digits/underscore, leading `/` stripped, invalid/duplicate names fall back to the default), and worked examples.
   - New "⌨️ Commands (rename / disable)" section in `configuration.md` (with index entry) covering both keys, the validation/duplicate-fallback behavior, the admin-gate survives-rename guarantee, and the fact that `/help` is rendered live from this config.
+- **Per-task LLM metrics in `/metrics`** — `_render_llm_by_task` renders one line per canonical `LLM_TASK_TYPES` (calls/ok/fail/avg/max), prepended above the raw counters/gauges/timers dump.
 
 ### Changed
-- **Detailed `/help` descriptions** (`app/handlers/commands.py`) — every command's help line now spells out what it does and notes its constraints (`/reset` requires `/reset confirm`, `/quiet`/`/chatty` are group-only, `/health`/`/metrics` are admin-only). The help list remains generated from `config.COMMANDS`, so renamed commands appear under their custom trigger and disabled commands are hidden.
+- **Detailed, dynamic `/help`** — the help message is generated from `config.COMMANDS` and `_COMMANDS`, so renamed commands appear under their custom trigger and disabled commands are hidden. Every line now spells out what the command does and notes its constraints (`/reset` requires `/reset confirm`, `/quiet`/`/chatty` are group-only, `/health`/`/metrics` are admin-only).
 
 ## [2026-06-14] - Implicit Bot Addressing + Group Spam Protection: Implemented
 

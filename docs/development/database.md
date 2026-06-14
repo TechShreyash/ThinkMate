@@ -164,6 +164,36 @@ the DB on the hot path.
 
 ---
 
+### 5. `group_settings` Collection *(group on/off kill switch)*
+
+Stores a single per-group flag that lets a group admin turn the bot completely on or off in a chat
+via the `/groupoff` and `/groupon` commands. When a group is disabled, `_handle_group_message`
+returns at the top — no reply, no ambient/implicit reply, no identity capture, no memory
+extraction, and no buffer write.
+
+* **Primary Key (`_id`)**: the Telegram `chat_id` (integer).
+
+#### Example Document Schema:
+
+```json
+{
+  "_id": -1001234567890,
+  "enabled": false,
+  "created_at": "2026-06-14T12:00:00Z",
+  "updated_at": "2026-06-14T12:34:00Z"
+}
+```
+
+> **Default is enabled.** A group with no document is active, and `models.is_group_enabled`
+> degrades to `True` on any read error, so a transient DB hiccup can never silently mute the bot.
+
+The collection is read on every group message through `models.is_group_enabled(db, chat_id)` and
+written by `models.set_group_enabled(db, chat_id, enabled)` (a single upsert). Authorization for the
+toggle commands is enforced in [`commands.py`](../../app/handlers/commands.py) via
+`bot.get_chat_member` (administrator/creator) or a configured `ADMIN_USER_IDS` operator.
+
+---
+
 Database connections are managed asynchronously via `motor.motor_asyncio.AsyncIOMotorClient`. A single database client singleton is instantiated and reused — a *singleton* here means one shared client object is created on first use and handed out on every subsequent call, so the bot never opens redundant connection pools.
 
 ```python

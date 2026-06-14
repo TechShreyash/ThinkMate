@@ -663,3 +663,31 @@ async def upsert_chat_member(
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
+
+
+# --- group_settings (per-chat bot on/off kill switch) ---
+
+
+async def is_group_enabled(db: AsyncIOMotorDatabase, chat_id: int) -> bool:
+    """Return whether the bot is enabled in ``chat_id`` (default: enabled).
+
+    A group is "on" unless an admin has explicitly turned it off via ``/groupoff``.
+    An absent document means the group was never toggled, so the bot is active. This is
+    read on every group message, so it must be cheap and never raise — the caller treats
+    any failure as "enabled" so a transient DB hiccup can never silence the bot.
+    """
+    doc = await db["group_settings"].find_one({"_id": chat_id}, {"enabled": 1})
+    if not doc:
+        return True
+    return doc.get("enabled", True)
+
+
+async def set_group_enabled(db: AsyncIOMotorDatabase, chat_id: int, enabled: bool):
+    """Upsert the per-chat enabled flag (the ``/groupon`` / ``/groupoff`` kill switch)."""
+    now = _utcnow()
+    await db["group_settings"].update_one(
+        {"_id": chat_id},
+        {"$set": {"enabled": enabled, "updated_at": now},
+         "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )

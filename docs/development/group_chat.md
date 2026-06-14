@@ -56,6 +56,28 @@ The rules by chat type:
 > text handler, which ignores it — no LLM reply and no memory enqueue. Normal
 > conversational messages are still replied to as before.
 
+## Group kill switch (`/groupon` and `/groupoff`)
+
+Any group admin (or a globally-configured `ADMIN_USER_IDS` operator) can turn the bot completely
+on or off for a whole group:
+
+* **`/groupoff`** — the bot goes fully silent in that chat. `_handle_group_message` checks the
+  per-chat flag at the very top and returns immediately when the group is disabled: **no reply, no
+  ambient chime, no implicit reply, no identity capture, no memory extraction, and no buffer
+  write.** It is as if the bot were not in the group at all.
+* **`/groupon`** — re-enables the bot. Because slash commands are handled by
+  [`commands.py`](../../app/handlers/commands.py) (not the conversational text handler), `/groupon`
+  always works even while the group is disabled.
+
+The flag is stored in the `group_settings` collection (`_id = chat_id`, `enabled: bool`) via
+`models.set_group_enabled`, and read on every group message via `models.is_group_enabled`. The
+default is **enabled** — a group that was never toggled (no document) is active, and the read
+degrades to "enabled" on any DB error, so a transient hiccup can never silently mute the bot.
+Authorization uses `bot.get_chat_member` to confirm administrator/creator status; the commands
+reply with a short notice when used outside a group or by a non-admin. Both commands are
+env-mappable/disable-able like every other command (see
+[configuration.md](configuration.md#️-commands-rename--disable), keys `groupon` / `groupoff`).
+
 ## Data model
 
 The group features rest on three storage decisions: where messages are buffered, where extracted
@@ -70,6 +92,8 @@ group-aware path serve DMs unchanged.
   back to each `sender_id` (using the segment's own name→id map) and saved to each profile.
 * **Affinity** lives in `chat_members` (`_id = "{chat_id}:{user_id}"`): `affinity` (0–1,
   default 0.5), `mode` (`auto` / `quiet` / `chatty`). Cached in memory, written through on change.
+* **Group on/off** lives in `group_settings` (`_id = chat_id`, `enabled: bool`) — the
+  `/groupon` / `/groupoff` kill switch above.
 
 ## Implicit addressing (replying without being tagged)
 
