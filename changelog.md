@@ -2,6 +2,11 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 11 Consolidation: Spec (the "dreaming" pass)
+
+### Added
+- **Consolidation feature spec** under `.kiro/specs/consolidation/`: a scheduled, off-hot-path background pass that periodically reviews a user's full profile to refresh the summary/style, merge/de-duplicate items, and synthesize a bounded set of durable behavioral **insights** (stored in a dedicated `insights` list, rendered in the system prompt, never dropped by budget enforcement). Disabled by default (`CONSOLIDATION_INTERVAL_SECS=0`). Reuses the metrics-logger scheduler pattern, the compressor's never-wipe contract, and `memory_lock` serialization. `requirements.md` (EARS, 9 reqs), `design.md` (9 correctness properties), `tasks.md` (DAG, 6 waves).
+
 ## [2026-06-14] - Phase 10 Observability: Implemented (metrics, health, runbook)
 
 ### Added
