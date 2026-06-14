@@ -2,6 +2,11 @@
 
 All notable changes to the ThinkMate project will be documented in this file.
 
+## [2026-06-14] - Phase 12 Engagement & UX: Spec
+
+### Added
+- **Engagement & UX feature spec** under `.kiro/specs/engagement/`: proactive check-ins (re-engagement scheduler, disabled by default, quiet-hours + rate-limit + opt-out, never fabricated), temporal context in the system prompt, emotional continuity (bounded `mood_history` trend), and an `/onboard` command (+ `/pause`/`/resume`). Documents #3 (relevance-ranked memory) and #6 (semantic retrieval) as future. `requirements.md` (13 EARS reqs), `design.md` (14 correctness properties), `tasks.md` (DAG, 6 waves).
+
 ## [2026-06-14] - Phase 11 Consolidation: Implemented (the "dreaming" pass)
 
 ### Added
