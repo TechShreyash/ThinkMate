@@ -194,3 +194,103 @@ def start_consolidation_scheduler() -> "asyncio.Task | None":
         )
     except RuntimeError:
         return None
+
+
+# --- Proactive check-in scheduler (Phase 12, Requirements 5, 6.6/6.7, 7.5-7.8, 11, 12.3/12.6) ---
+
+
+def _in_quiet_hours(hour: int, start: int, end: int) -> bool:
+    """True if `hour` (0-23, UTC) is within [start, end). start==end => no quiet window.
+    Handles same-day (start<end) and midnight-wrapping (start>end)."""
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end  # wraps midnight
+
+
+async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
+    """Generate + send one check-in. Returns 'sent' | 'skipped' | 'failed'.
+
+    Always sets last_proactive_at (holds the rate-limit window even on skip/fail).
+    Never raises.
+    """
+    from app.database.connection import db_session
+    from app.database import models
+    from app.services.memory_loader import build_memory_block
+    from app.services.llm_service import llm_service
+    from app.services.chat_manager import _load_persona
+    from app.prompts.system_prompt import build_system_prompt
+
+    async with db_session() as db:
+        memory_text, _ = await build_memory_block(db, user_id)
+        # Always hold the window for this attempt.
+        await models.set_last_proactive(db, user_id, now=now)
+        system_prompt = build_system_prompt(_load_persona(), memory_text)
+        text = await llm_service.generate_checkin(user_id, system_prompt, memory_text)
+        if not text:
+            return "skipped"
+        try:
+            await bot.send_message(chat_id=user_id, text=text)
+        except Exception as e:  # Forbidden / blocked / network — stop nagging this user.
+            logger.warning(f"Proactive send failed for user {user_id}: {e}; disabling for them.")
+            await models.set_proactive_enabled(db, user_id, False)
+            return "failed"
+        # Record the assistant message in the buffer so a reply flows normally.
+        await models.add_message_to_buffer(db, user_id, "assistant", text, sender_id=0, sender_name="ThinkMate")
+        return "sent"
+
+
+async def _run_proactive_scan(bot) -> None:
+    from datetime import datetime, timezone
+    from app.database.connection import db_session
+    from app.database import models
+
+    metrics.incr("proactive.runs")
+    now = datetime.now(timezone.utc)
+    if _in_quiet_hours(now.hour, config.PROACTIVE_QUIET_START_HOUR, config.PROACTIVE_QUIET_END_HOUR):
+        logger.debug("[proactive] in quiet hours; skipping scan.")
+        return
+    async with db_session() as db:
+        due = await models.find_users_due_for_proactive(
+            db,
+            inactivity_secs=config.PROACTIVE_INACTIVITY_SECS,
+            min_interval_secs=config.PROACTIVE_MIN_INTERVAL_SECS,
+            limit=config.PROACTIVE_MAX_PER_SCAN,
+            now=now,
+        )
+    sent = skipped = failed = 0
+    for user_id in due:
+        try:
+            outcome = await _send_proactive_checkin(bot, user_id, now=now)
+            if outcome == "sent": sent += 1; metrics.incr("proactive.sent")
+            elif outcome == "skipped": skipped += 1; metrics.incr("proactive.skipped")
+            else: failed += 1; metrics.incr("proactive.failed")
+        except Exception as e:  # one user's failure must not abort the scan
+            failed += 1; metrics.incr("proactive.failed")
+            logger.warning(f"Proactive check-in error for user {user_id}: {e}")
+    logger.info(f"[proactive] scan: {len(due)} due, {sent} sent, {skipped} skipped, {failed} failed.")
+
+
+async def _proactive_loop(bot, scan_interval: float) -> None:
+    while True:
+        try:
+            await asyncio.sleep(scan_interval)
+            await _run_proactive_scan(bot)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug(f"proactive scan iteration failed: {e}")
+
+
+def start_proactive_scheduler(bot) -> "asyncio.Task | None":
+    """Start the proactive check-in scheduler when enabled; no-op (None) when disabled.
+
+    Enabled only when config.PROACTIVE_INTERVAL_SECS > 0. Needs the aiogram bot to send.
+    """
+    if config.PROACTIVE_INTERVAL_SECS <= 0:
+        return None
+    try:
+        return asyncio.get_running_loop().create_task(_proactive_loop(bot, config.PROACTIVE_INTERVAL_SECS))
+    except RuntimeError:
+        return None

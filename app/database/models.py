@@ -66,6 +66,8 @@ async def ensure_user(db: AsyncIOMotorDatabase, user_id: int, username: str, dis
                 "beliefs": [],
                 "events": [],
                 "insights": [],
+                "mood_history": [],
+                "onboarded": False,
                 "created_at": now,
             },
         },
@@ -211,12 +213,17 @@ async def save_extracted_memories(
 
     # 2. Direct emotional state update
     if extraction.emotional_state:
-        set_fields["emotional_state"] = {
+        mood_entry = {
             "mood": extraction.emotional_state.mood,
             "intensity": extraction.emotional_state.intensity,
             "trigger": extraction.emotional_state.trigger or "",
             "detected_at": now,
         }
+        set_fields["emotional_state"] = mood_entry
+        # Also append to the bounded mood_history (oldest dropped past MAX_MOOD_HISTORY).
+        mood_history = list(profile.get("mood_history") or [])
+        mood_history.append(mood_entry)
+        set_fields["mood_history"] = mood_history[-config.MAX_MOOD_HISTORY:]
 
     # 3. Facts CRUD (hard deletes, normalized matching)
     exclude_facts = {_normalize(f.content) for f in extraction.removed_facts}
@@ -431,8 +438,99 @@ async def get_active_facts(db: AsyncIOMotorDatabase, user_id: int) -> list[dict]
     return []
 
 
-# --- chat_members (per-(chat, user) affinity & mode) ---
+# --- Engagement / proactive check-ins (Phase 12) ---
 
+
+async def touch_and_get_last_interaction(
+    db: AsyncIOMotorDatabase, user_id: int, *, now=None
+) -> "datetime | None":
+    """Record ``last_interaction_at = now`` and return the *previous* value, in one round-trip.
+
+    A single ``find_one_and_update`` with ``ReturnDocument.BEFORE`` reads the prior
+    timestamp (for the temporal "last talked" gap) and writes the new one atomically.
+    Does **not** upsert (Req 2.3): a user without a profile is a no-op returning ``None``.
+    """
+    now = now or _utcnow()
+    doc = await db["user_profiles"].find_one_and_update(
+        {"_id": user_id},
+        {"$set": {"last_interaction_at": now}},
+        projection={"last_interaction_at": 1},
+        return_document=ReturnDocument.BEFORE,
+        upsert=False,
+    )
+    return (doc or {}).get("last_interaction_at")
+
+
+async def set_proactive_enabled(db: AsyncIOMotorDatabase, user_id: int, enabled: bool):
+    """Single-``$set`` toggle of the per-user proactive opt-out flag."""
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$set": {"proactive_enabled": enabled, "updated_at": _utcnow()}},
+    )
+
+
+async def set_onboarded(db: AsyncIOMotorDatabase, user_id: int, value: bool = True):
+    """Single-``$set`` write of the onboarding flag."""
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$set": {"onboarded": value, "updated_at": _utcnow()}},
+    )
+
+
+async def set_last_proactive(db: AsyncIOMotorDatabase, user_id: int, *, now=None):
+    """Single-``$set`` write of ``last_proactive_at`` (holds the rate-limit window)."""
+    now = now or _utcnow()
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {"$set": {"last_proactive_at": now, "updated_at": now}},
+    )
+
+
+async def find_users_due_for_proactive(
+    db: AsyncIOMotorDatabase,
+    *,
+    inactivity_secs: float,
+    min_interval_secs: float,
+    limit: int,
+    now=None,
+) -> list[int]:
+    """Return up to ``limit`` user ids due for a proactive check-in.
+
+    Due = ``last_interaction_at`` present AND older than ``now - inactivity_secs`` (the
+    ``$lt`` cutoff naturally excludes profiles where it's absent — a user who never
+    interacted is never due), AND (``last_proactive_at`` null/absent OR older than
+    ``now - min_interval_secs``), AND ``proactive_enabled != False`` (absent/true is
+    eligible). The grounding threshold (``>= config.PROACTIVE_MIN_ITEMS`` total
+    facts+beliefs+events) is applied in Python so it stays mongomock-friendly. Collection
+    stops once ``limit`` qualifying users are found, bounding the helper's own work.
+    """
+    now = now or _utcnow()
+    inactive_cutoff = now - timedelta(seconds=inactivity_secs)
+    nudge_cutoff = now - timedelta(seconds=min_interval_secs)
+    query = {
+        "last_interaction_at": {"$lt": inactive_cutoff},
+        "proactive_enabled": {"$ne": False},
+        "$or": [
+            {"last_proactive_at": {"$exists": False}},
+            {"last_proactive_at": None},
+            {"last_proactive_at": {"$lt": nudge_cutoff}},
+        ],
+    }
+    due: list[int] = []
+    async for doc in db["user_profiles"].find(query, {"facts": 1, "beliefs": 1, "events": 1}):
+        count = (
+            len(doc.get("facts") or [])
+            + len(doc.get("beliefs") or [])
+            + len(doc.get("events") or [])
+        )
+        if count >= config.PROACTIVE_MIN_ITEMS:
+            due.append(doc["_id"])
+            if len(due) >= limit:
+                break
+    return due
+
+
+# --- chat_members (per-(chat, user) affinity & mode) ---
 _VALID_MODES = {"auto", "quiet", "chatty"}
 
 

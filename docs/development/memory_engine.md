@@ -318,3 +318,76 @@ yield any durable pattern.
 > See [configuration.md](configuration.md#-consolidation-phase-11) for every consolidation key, its
 > default, and tuning guidance, and the `MemoryConsolidation` / `ConsolidatedInsight` schemas in
 > [schemas.py](../../app/services/schemas.py).
+
+---
+
+## ⏰ Phase 12 — Temporal context & emotional continuity *(implemented)*
+
+Phase 12 makes the bot feel less amnesiac between conversations with two small, **additive** memory
+features that ride the existing pipeline — no new heavy machinery, no migration, and everything new
+is read **defensively** so older profiles (written before Phase 12) render exactly as before. Both
+features were designed under the same priority order as the rest of the engine:
+**responsiveness → robustness → minimize LLM calls.** Neither adds an LLM call, and the hot path
+gains at most **one** combined Mongo round-trip.
+
+> The proactive check-in scheduler (the third Phase 12 engagement feature) lives off the hot path
+> and is documented in [configuration.md](configuration.md#-proactive-check-ins-phase-12),
+> [observability.md](observability.md#proactive-check-in-metrics-phase-12), and
+> [telegram_bot.md](telegram_bot.md#-engagement-commands-phase-12-implemented).
+
+### Temporal context — "now" and "last talked"
+
+The model previously had no sense of *when* it was talking or how long it had been since the last
+exchange. Phase 12 threads a small, optional time context into the system prompt:
+
+- **A new `## ⏰ TIME CONTEXT` section** in [system_prompt.py](../../app/prompts/system_prompt.py).
+  `build_system_prompt` gains an optional third parameter, `time_context: str = ""`, and renders the
+  section **only when it is non-empty**. Existing two-argument calls (and the empty default) produce
+  the prior prompt byte-for-byte, so nothing else changes.
+- **`last_interaction_at`** — a new timestamp on the user profile. On the **DM hot path only**,
+  `chat_manager.handle_message` records the current UTC time *and* reads the previous value in a
+  **single combined round-trip** via `models.touch_and_get_last_interaction` (a `find_one_and_update`
+  with `return_document=BEFORE`). It does **not** upsert — a user without a profile is a harmless
+  no-op returning `None` — and it never runs on the group path (groups pass an empty `time_context`,
+  so the group prompt is unchanged).
+- **A coarse "last talked" gap.** A pure helper, `build_time_context(now, prev)`, renders the
+  current UTC date/time plus a human gap in **coarse units** — minutes, hours, or days, never raw
+  seconds. On a user's first-ever interaction (`prev is None`) it renders only the date/time and
+  fabricates no gap.
+
+Because the gap is computed from one timestamp and the section is default-empty, this adds no LLM
+call and only the single combined read-then-set to the hot path.
+
+### Emotional continuity — a bounded mood history
+
+ThinkMate already tracked a *current* `emotional_state`, but overwrote it each time, so it could
+never see a **trend**. Phase 12 keeps a short, bounded history:
+
+- **Append on write.** Whenever `save_extracted_memories`
+  ([models.py](../../app/database/models.py)) writes a new `emotional_state`, it also appends a
+  matching entry (`{mood, intensity, trigger, detected_at}`) to a `mood_history` list — in the
+  **same single `$set` write**, no extra round-trip. The list is bounded to `MAX_MOOD_HISTORY`
+  (default `10`); once full, the oldest entry is dropped. `ensure_user` initializes
+  `mood_history: []` on insert.
+- **Render a trend.** Within the existing `=== CURRENT MOOD ===` block,
+  `compile_memory_text` ([memory_loader.py](../../app/services/memory_loader.py)) appends a short
+  oldest→newest trend line (a comma-joined list of recent mood words) after the current-mood line.
+  It reads `mood_history` defensively, so a profile without one renders exactly as before — no extra
+  line, no error.
+- **Exempt from budget shedding.** `mood_history` is its own tiny, bounded list and is **not** part
+  of the deterministic budget enforcer's drop order (oldest events → beliefs → facts). The rendered
+  trend is only ever a handful of short words, so its contribution is small and capped; the enforcer
+  never needs to (and never does) drop it.
+
+### No migration, defensive reads
+
+All new profile fields — `last_interaction_at`, `mood_history`, plus the proactive-feature fields
+`onboarded`, `last_proactive_at`, and `proactive_enabled` — are **additive** and read defensively
+(`doc.get("mood_history") or []`, `doc.get("last_interaction_at")`, `doc.get("proactive_enabled")`).
+There is **no migration step**: a profile created before Phase 12 simply lacks the fields and is
+treated as "never seen on the DM hot path / no mood history yet / eligible-but-not-yet-due," which
+is exactly the desired default.
+
+> See [configuration.md](configuration.md#-engagement--mood-history-phase-12) for `MAX_MOOD_HISTORY`
+> and the proactive keys, and [telegram_bot.md](telegram_bot.md#-engagement-commands-phase-12-implemented)
+> for the `/onboard`, `/pause`, and `/resume` commands.

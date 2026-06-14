@@ -122,6 +122,48 @@ design.
 
 ---
 
+## 💞 Engagement / Mood History (Phase 12)
+
+This single key tunes **emotional continuity** — the bounded `mood_history` list that lets ThinkMate
+render a short mood *trend* (not just the latest mood) in the memory profile. The history is
+appended whenever a new `emotional_state` is extracted and is exempt from budget-driven shedding.
+See [memory_engine.md](memory_engine.md#-phase-12--temporal-context--emotional-continuity-implemented)
+for the full design.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`MAX_MOOD_HISTORY`** | Integer | `10` | **Purpose**: Cap on the number of stored `mood_history` entries per user. Each new emotional state appends one entry and the oldest are dropped once the cap is reached, so the list (and the rendered trend line) stays small and bounded.<br>**How to Tune**: Raise for a longer mood trend, lower for a terser one. Safe at any positive value — it only ever bounds a tiny list. |
+
+---
+
+## 🔔 Proactive Check-ins (Phase 12)
+
+These tune the optional background **proactive check-in** scheduler — a periodic pass that
+occasionally sends a single, memory-grounded "thinking of you" nudge to users who have gone quiet
+for a while. Like consolidation, it runs entirely **off the hot path**, costs at most one LLM call
+per due user per cadence, never sends anything it can't ground in a real, known detail, and is
+**disabled by default** (`PROACTIVE_INTERVAL_SECS = 0` is the master switch). Users can opt out at
+any time with `/pause` (and back in with `/resume`); see
+[telegram_bot.md](telegram_bot.md#-engagement-commands-phase-12-implemented). Full design in
+[memory_engine.md](memory_engine.md#-phase-12--temporal-context--emotional-continuity-implemented).
+
+> **Quiet hours are UTC-only.** `PROACTIVE_QUIET_START_HOUR` / `PROACTIVE_QUIET_END_HOUR` are
+> interpreted against the **server's UTC clock**, not each user's local timezone — this is a
+> documented limitation. Set the window to suit your audience's dominant timezone, or set
+> `start == end` to disable the quiet window entirely.
+
+| Parameter | Type | Default | Description & How to Adjust |
+| :--- | :--- | :--- | :--- |
+| **`PROACTIVE_INTERVAL_SECS`** | Float | `0.0` | **Purpose**: How often the scheduler wakes to scan for due users — and the **master switch** for the whole feature.<br>**How to Tune**: Keep `0` (or any value ≤ 0) to **disable proactive check-ins entirely** (the scheduler is never started). Set a positive value (e.g. `3600` to scan hourly) to enable it. |
+| **`PROACTIVE_INACTIVITY_SECS`** | Float | `172800` *(2 days)* | **Purpose**: How long a user must have been silent (no interaction) before they become eligible for a check-in.<br>**How to Tune**: Lower to reach out sooner after a lull; raise to wait longer before nudging. |
+| **`PROACTIVE_MIN_INTERVAL_SECS`** | Float | `259200` *(3 days)* | **Purpose**: Minimum time between proactive nudges **per user**, so an inactive user is never pestered repeatedly.<br>**How to Tune**: Raise to space nudges further apart; keep comfortably above the scan interval. |
+| **`PROACTIVE_MAX_PER_SCAN`** | Integer | `20` | **Purpose**: Upper bound on how many check-ins a single scan sends, keeping each scan's work (and LLM volume) bounded.<br>**How to Tune**: Raise to drain a large due backlog faster; lower to spread the cost across more scans. |
+| **`PROACTIVE_MIN_ITEMS`** | Integer | `3` | **Purpose**: Minimum stored items (`facts + beliefs + events`) a user must have before a check-in is attempted, so a nudge is always grounded in something genuine rather than generic filler.<br>**How to Tune**: Raise to reach out only to richer profiles; lower to start nudging sooner. |
+| **`PROACTIVE_QUIET_START_HOUR`** | Integer | `22` | **Purpose**: Start of the daily quiet window (**UTC hour**, 0–23) during which scans are skipped so no one is messaged late at night.<br>**How to Tune**: Set with `PROACTIVE_QUIET_END_HOUR` to bracket your audience's night hours in UTC. The window may wrap midnight (e.g. `22`→`7`). Set equal to the end hour to disable quiet hours. |
+| **`PROACTIVE_QUIET_END_HOUR`** | Integer | `7` | **Purpose**: End of the daily quiet window (**UTC hour**, 0–23). Scans resume at this hour.<br>**How to Tune**: See `PROACTIVE_QUIET_START_HOUR`. |
+
+---
+
 ## 🔌 Connection Pool (advanced)
 
 The `motor` client uses a connection pool (driver default `maxPoolSize=100`). The *concurrently

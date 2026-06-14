@@ -217,6 +217,69 @@ design and the no-LLM ambient funnel are in [group_chat.md](group_chat.md).
 
 ---
 
+## 💞 Engagement commands *(Phase 12, implemented)*
+
+Phase 12 adds three small, DM-oriented commands plus light enhancements to `/start` and `/help`.
+They follow the exact same patterns as the existing commands — aiogram `Command`, the injected
+`db`, and `models` CRUD — and none of them makes an LLM call.
+
+### `/onboard` — a static, no-LLM introduction
+
+`/onboard` sends a single, persona-consistent welcome message (plain conversational text, no
+markdown or bullets) that introduces ThinkMate and asks three light starter questions to get the
+memory profile seeded faster. It is **static** — there is no LLM call. Under the hood it calls
+`models.ensure_user` to seed the profile and `models.set_onboarded(db, user.id, True)` to flip the
+`onboarded` flag. It does **not** gate normal chat: the user's eventual answers are captured by the
+ordinary extraction pipeline like any other message.
+
+### `/pause` and `/resume` — proactive opt-out / opt-in
+
+These toggle whether the user receives [proactive check-ins](configuration.md#-proactive-check-ins-phase-12):
+
+- **`/pause`** → `models.set_proactive_enabled(db, user_id, False)` — "I won't reach out on my own
+  anymore." The user is excluded from future proactive scans (the due-user query filters on
+  `proactive_enabled != False`).
+- **`/resume`** → `models.set_proactive_enabled(db, user_id, True)` — re-enables the occasional
+  nudge.
+
+They are DM-oriented; in a group they harmlessly toggle the caller's own flag, consistent with how
+`/quiet` and `/chatty` behave.
+
+### Enhanced `/start` and `/help`
+
+- **`/start`** still upserts the profile, but now checks the `onboarded` flag and **nudges
+  `/onboard` only when the user has not onboarded yet**. Already-onboarded users get the normal
+  pointer to `/profile` and `/help` instead.
+- **`/help`** now lists the new `/onboard`, `/pause`, and `/resume` commands alongside the existing
+  ones.
+
+```python
+@router.message(Command("onboard"))
+async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    user = message.from_user
+    await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
+    await models.set_onboarded(db, user.id, True)
+    await message.answer("hey, glad you're here. i'm ThinkMate ...")  # static, conversational
+
+
+@router.message(Command("pause"))
+async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    await models.set_proactive_enabled(db, message.from_user.id, False)
+    await message.answer("Got it — I won't reach out on my own anymore. ...")
+```
+
+> The background scheduler that actually sends the check-ins (and how "due" users are selected,
+> rate-limited, and quiet-hours-gated) is covered in
+> [memory_engine.md](memory_engine.md#-phase-12--temporal-context--emotional-continuity-implemented),
+> [configuration.md](configuration.md#-proactive-check-ins-phase-12), and
+> [observability.md](observability.md#proactive-check-in-metrics-phase-12).
+
+---
+
 ## 💡 Key Architectural Guidelines
 
 1.  **No business logic in handlers** — handlers validate, then call services/models with the injected `db`.

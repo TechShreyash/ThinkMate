@@ -79,6 +79,13 @@ def compile_memory_text(doc: dict) -> str:
     else:
         lines.append("Mood: calm")
 
+    # Mood trend (Phase 12 emotional continuity; read defensively, bounded).
+    mood_history = doc.get("mood_history") or []
+    if mood_history:
+        recent = mood_history[-config.MAX_MOOD_HISTORY:]
+        trend = ", ".join(m.get("mood", "?") for m in recent)
+        lines.append(f"Recent mood trend (oldest→newest): {trend}")
+
     return "\n".join(lines)
 
 

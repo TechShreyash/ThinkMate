@@ -86,11 +86,60 @@ async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
     if not user:
         return
     await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
-    await message.answer(
+    base = (
         f"Hi {html.bold(user.first_name or 'there')}! 👋\n\n"
         "I'm ThinkMate, an AI companion who remembers our past chats.\n"
-        "Use /profile to see what I remember, or /help for everything I can do.",
-        parse_mode="HTML",
+    )
+    # Nudge /onboard only when the profile is not yet onboarded (Req 4.5).
+    doc = await db["user_profiles"].find_one({"_id": user.id})
+    if doc and doc.get("onboarded"):
+        msg = base + "Use /profile to see what I remember, or /help for everything I can do."
+    else:
+        msg = base + (
+            "New here? Try /onboard and I'll get to know you faster. "
+            "Or use /profile and /help anytime."
+        )
+    await message.answer(msg, parse_mode="HTML")
+
+
+@router.message(Command("onboard"))
+async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    user = message.from_user
+    await models.ensure_user(db, user.id, user.username or "", user.first_name or "")
+    await models.set_onboarded(db, user.id, True)
+    # Static, persona-consistent, plain-text intro (no markdown/bullets, no LLM call).
+    # Does not gate or alter normal chat handling (Req 4.1, 4.2, 4.3).
+    await message.answer(
+        "hey, glad you're here. i'm ThinkMate — think of me less like an app and more "
+        "like a friend who actually remembers your stuff. the more we talk, the better i "
+        "get at it.\n\n"
+        "to kick things off, tell me a little about you whenever you feel like it. what "
+        "should i call you? what do your days usually look like? and what's something "
+        "you've been into lately that you could talk about for hours?\n\n"
+        "no rush and no forms. just talk to me like you would anyone else."
+    )
+
+
+@router.message(Command("pause"))
+async def cmd_pause(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    await models.set_proactive_enabled(db, message.from_user.id, False)
+    await message.answer(
+        "okay, i won't reach out first anymore — i'll be here whenever you want to talk. "
+        "send /resume if you want me to check in again."
+    )
+
+
+@router.message(Command("resume"))
+async def cmd_resume(message: Message, db: AsyncIOMotorDatabase):
+    if not message.from_user:
+        return
+    await models.set_proactive_enabled(db, message.from_user.id, True)
+    await message.answer(
+        "got it — i'll check in now and then if it's been a while. good to have you back. 🌱"
     )
 
 
@@ -99,7 +148,10 @@ async def cmd_help(message: Message):
     await message.answer(
         f"{html.bold('Here is what I can do:')}\n\n"
         "/start — say hi and set up your profile\n"
+        "/onboard — help me get to know you\n"
         "/profile — see what I remember about you\n"
+        "/pause — stop me from messaging first\n"
+        "/resume — let me check in again\n"
         "/reset — make me forget everything (with confirmation)\n"
         "/help — show this message\n\n"
         "Mostly though, just talk to me. 🙂",

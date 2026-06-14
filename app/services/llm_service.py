@@ -32,6 +32,7 @@ from app.services.schemas import (
 )
 from app.services.reactions import ALLOWED_REACTIONS, normalize_reaction
 from app.services.metrics import metrics
+from app.prompts.checkin_prompt import SYSTEM_CHECKIN_PROMPT
 from app.database import get_db
 
 T = TypeVar("T", bound=BaseModel)
@@ -225,6 +226,51 @@ class LLMService:
             self._fire_log(user_id, "chat_reply", inputs, status="failed", error=traceback.format_exc())
             logger.error(f"Reply generation failed for user {user_id}: {e}")
             raise
+
+    # ------------------------------------------------------------------ #
+    # Proactive check-in (one call, never raises into the scheduler)
+    # ------------------------------------------------------------------ #
+    async def generate_checkin(
+        self, user_id: int, system_prompt: str, memory_text: str
+    ) -> str | None:
+        """Generate a short, memory-grounded proactive check-in opener, or None to stay silent.
+
+        Returns None when the profile is ungroundable (blank memory_text), when the model
+        declines (empty or a NOTHING/none/n-a sentinel), or on any error — so the caller
+        sends nothing. One LLM call; never raises into the scheduler.
+        """
+        if not memory_text or not memory_text.strip():
+            return None
+        messages = [
+            {"role": "system", "content": system_prompt + "\n\n" + SYSTEM_CHECKIN_PROMPT},
+            {"role": "user", "content": "Write the check-in opener now (or reply with NOTHING)."},
+        ]
+        max_tokens = (config.MAX_RESPONSE_CHARS // config.CHARS_PER_TOKEN) + 40
+        inputs = {"system_prompt": system_prompt, "messages": messages}
+        start = time.perf_counter()
+        try:
+            response = await self._with_retries(
+                lambda: self.client.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    messages=messages,
+                    temperature=config.REPLY_TEMPERATURE,
+                    max_tokens=max_tokens,
+                    timeout=30.0,
+                ),
+                what=f"proactive_checkin u{user_id}",
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            self._fire_log(user_id, "proactive_checkin", inputs, {"raw_text": raw, "parsed_json": None}, "success")
+            metrics.record_llm("proactive_checkin", ok=True, latency=time.perf_counter() - start)
+            # Decline sentinels -> stay silent.
+            if not raw or raw.strip().lower().strip(".!") in ("nothing", "none", "n/a", "na"):
+                return None
+            return raw
+        except Exception as e:
+            metrics.record_llm("proactive_checkin", ok=False, latency=time.perf_counter() - start)
+            self._fire_log(user_id, "proactive_checkin", inputs, status="failed", error=traceback.format_exc())
+            logger.error(f"Proactive check-in generation failed for user {user_id}: {e}")
+            return None
 
     def _parse_reply_bundle(self, raw: str) -> tuple[str, str | None, float | None]:
         """Parse the {reply, reaction, affinity_delta} JSON; degrade gracefully on failure.

@@ -7,6 +7,7 @@ compression (rate-limited) when the memory profile outgrows its budget.
 """
 import os
 import asyncio
+from datetime import datetime, timezone
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
@@ -16,6 +17,28 @@ from app.services.group_gate import scan_negative_signal
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block
 from app.prompts.system_prompt import build_system_prompt
+
+
+def build_time_context(now: datetime, last_interaction_at) -> str:
+    """A short time-context string for the system prompt: current UTC time, and a coarse
+    'last talked' gap when a previous interaction exists (never raw seconds, never a gap on
+    first contact)."""
+    lines = [f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M')}"]
+    if last_interaction_at is not None:
+        try:
+            delta = now - last_interaction_at
+            secs = max(0, int(delta.total_seconds()))
+            if secs < 3600:
+                ago = f"{secs // 60} minute(s) ago"
+            elif secs < 86400:
+                ago = f"{secs // 3600} hour(s) ago"
+            else:
+                ago = f"{secs // 86400} day(s) ago"
+            lines.append(f"Last talked with this user: {ago}")
+        except Exception:
+            pass
+    return "\n".join(lines)
+
 
 _DEFAULT_PERSONA = "You are ThinkMate, a warm, witty AI companion."
 _persona_cache: dict = {"path": None, "mtime": None, "content": _DEFAULT_PERSONA}
@@ -107,7 +130,17 @@ async def handle_message(
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()
     memory_block, needs_compression = await build_memory_block(db, chat_id)
-    system_prompt = build_system_prompt(persona, memory_block)
+
+    # Temporal context: DM path only. Record the user's last-interaction time and compute a
+    # concise "now + last talked" string in a single combined round-trip (no extra LLM call,
+    # no upsert). Groups keep an empty time_context so multi-party behavior is unchanged.
+    if not is_group:
+        now = datetime.now(timezone.utc)
+        prev = await models.touch_and_get_last_interaction(db, chat_id, now=now)
+        time_context = build_time_context(now, prev)
+    else:
+        time_context = ""
+    system_prompt = build_system_prompt(persona, memory_block, time_context=time_context)
 
     # 4. Single LLM call -> reply + optional reaction (+ optional affinity_delta for groups).
     if is_group:

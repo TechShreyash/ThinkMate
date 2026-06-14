@@ -109,5 +109,17 @@ class Config(BaseModel):
     CONSOLIDATION_MIN_ITEMS: int = Field(default_factory=lambda: _env_int("CONSOLIDATION_MIN_ITEMS", 8))
     MAX_INSIGHTS: int = Field(default_factory=lambda: _env_int("MAX_INSIGHTS", 5))
 
+    # --- Engagement / mood history (Phase 12) ---
+    MAX_MOOD_HISTORY: int = Field(default_factory=lambda: _env_int("MAX_MOOD_HISTORY", 10))
+
+    # --- Proactive check-ins (Phase 12) ---
+    PROACTIVE_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_INTERVAL_SECS", 0.0))
+    PROACTIVE_INACTIVITY_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_INACTIVITY_SECS", 172800.0))
+    PROACTIVE_MIN_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_MIN_INTERVAL_SECS", 259200.0))
+    PROACTIVE_MAX_PER_SCAN: int = Field(default_factory=lambda: _env_int("PROACTIVE_MAX_PER_SCAN", 20))
+    PROACTIVE_MIN_ITEMS: int = Field(default_factory=lambda: _env_int("PROACTIVE_MIN_ITEMS", 3))
+    PROACTIVE_QUIET_START_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_START_HOUR", 22))
+    PROACTIVE_QUIET_END_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 7))
+
 
 config = Config()

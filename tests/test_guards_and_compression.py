@@ -7,7 +7,9 @@ from app.services.schemas import MemoryCompression, CompressedFact, CompressedEv
 @pytest.mark.asyncio
 async def test_input_guard_config():
     # Verify key tuning variables are present and sane (exact values are env-tunable).
-    assert config.USER_MEMORY_BUDGET_CHARS == 4000
+    # USER_MEMORY_BUDGET_CHARS is env-tunable; only assert it sits above the documented
+    # floor (~380-char empty template, so a budget below ~600 can never be satisfied).
+    assert config.USER_MEMORY_BUDGET_CHARS >= 600
     assert config.CHARS_PER_TOKEN == 4
     assert config.MAX_INPUT_CHARS >= config.MAX_RESPONSE_CHARS > 0
 

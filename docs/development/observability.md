@@ -98,6 +98,26 @@ are recorded via the `metrics.record_llm(call_type, ok=…, latency=…)` helper
 > enabled) — its absence is not an error. The summary and `/metrics` output degrade gracefully
 > when a metric is missing.
 
+### Proactive check-in metrics (Phase 12)
+
+The optional proactive check-in scheduler (see
+[configuration.md](configuration.md#-proactive-check-ins-phase-12)) records four counters per scan
+plus, for free, its own `llm.proactive_checkin.*` family (the check-in LLM call flows through the
+same `metrics.record_llm` helper as every other call type). All of these stay at zero unless the
+feature is enabled (`PROACTIVE_INTERVAL_SECS > 0`).
+
+| Metric name | Type | Recorded at | Meaning | Healthy | Concerning |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `proactive.runs` | counter | start of each scan (`_run_proactive_scan`) | How often the scheduler woke and scanned for due users. | Tracks the configured scan cadence. | — (cadence signal; read with the outcomes below). |
+| `proactive.sent` | counter | after a successful `bot.send_message` | Check-ins actually delivered to a user's DM. | Tracks genuine re-engagement volume. | — (volume signal). |
+| `proactive.skipped` | counter | when generation is empty/declined | Eligible users for whom the model produced nothing genuine to say (never-fabricate rule). | A normal share — the bot stays quiet rather than sending filler. | A very high skip ratio may mean profiles are too thin to ground a nudge (raise `PROACTIVE_MIN_ITEMS` or leave disabled). |
+| `proactive.failed` | counter | when a send raises (e.g. `Forbidden` / user blocked the bot) | Delivery failures; the affected user is auto-opted-out of future check-ins. | ~0, or a tiny fraction. | Rising → many users have blocked/restricted the bot, or a Telegram-side delivery problem. |
+| `llm.proactive_checkin.calls` / `.success` / `.failure` | counter | inside `generate_checkin` (via `record_llm`) | Volume/outcomes of the one LLM call each attempted check-in makes. | failures ~0. | rising failures → LLM endpoint stress on the background path. |
+| `llm.proactive_checkin.latency` | timer | wraps the check-in call | Check-in generation latency. | steady. | rising → shared endpoint pressure (background work). |
+
+Each scan also logs a one-line summary (`[proactive] scan: N due, S sent, K skipped, F failed.`)
+so the same numbers appear in the logs without a command.
+
 ### `snapshot()` shape
 
 A snapshot is a plain dict with three well-formed sections (empty sections when nothing has been

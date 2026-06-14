@@ -21,8 +21,11 @@ Below are your current active memories of the user. Use them naturally and casua
 """
 
 
-def build_system_prompt(persona_content: str, active_memory_text: str) -> str:
+def build_system_prompt(persona_content: str, active_memory_text: str, time_context: str = "") -> str:
+    time_block = ""
+    if time_context and time_context.strip():
+        time_block = f"\n---\n\n## ⏰ TIME CONTEXT\n{time_context.strip()}\n"
     return DEFAULT_SYSTEM_PROMPT_TEMPLATE.format(
         persona_content=persona_content,
         active_memory_text=active_memory_text or "No memories recorded yet. Start chatting to build a profile!",
-    )
+    ) + time_block

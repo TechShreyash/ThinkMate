@@ -30,11 +30,12 @@ Phase 8  Tests .................. mongomock suite; hot-path, race, retry, guard 
 Phase 9  Group chat ............. chat_id buffers, ambient gate, affinity, multi-party memory
 Phase 10 Observability & ops .... metrics, health checks, runbook
 Phase 11 Consolidation .......... periodic "dreaming" pass
+Phase 12 Engagement & UX ........ temporal context, mood history, onboarding, proactive check-ins
 ```
 
 Phases 0–8 deliver a production DM bot. Phase 9 adds group chat. Phase 10 adds the
-observability/ops layer and Phase 11 the periodic consolidation pass. The exact efficiency
-invariants every phase must respect live in
+observability/ops layer, Phase 11 the periodic consolidation pass, and Phase 12 a set of
+engagement/UX features. The exact efficiency invariants every phase must respect live in
 [performance_and_scaling.md](development/performance_and_scaling.md).
 
 ---
@@ -303,6 +304,52 @@ keys in [configuration.md](development/configuration.md#-consolidation-phase-11)
 
 ---
 
+## Phase 12 — Engagement & UX
+
+A set of small, additive engagement features that make ThinkMate feel more present and personable
+between conversations. Everything is built on patterns already proven in earlier phases, adds no
+required config, and is **off by default** wherever it could change behavior.
+
+**Status: implemented.** Four features ship in this phase:
+
+1. **Temporal context** — `build_system_prompt` gains an optional `time_context` parameter rendered
+   as a `## ⏰ TIME CONTEXT` section. On the DM hot path, `chat_manager` records/reads a new
+   `last_interaction_at` timestamp in a **single combined round-trip**
+   (`models.touch_and_get_last_interaction`) and renders the current UTC time plus a coarse
+   "last talked" gap (minutes/hours/days, never raw seconds). Empty `time_context` ⇒ prior prompt
+   byte-for-byte; the group path is unchanged.
+2. **Emotional continuity (mood history)** — a bounded `mood_history` list (capped at
+   `MAX_MOOD_HISTORY`, default `10`) is appended in the **same single write** as `emotional_state`
+   inside `save_extracted_memories`, and `compile_memory_text` renders a short oldest→newest trend
+   line in the `=== CURRENT MOOD ===` block. The list is exempt from budget-driven shedding.
+3. **Onboarding command** — a static, no-LLM `/onboard` that sends a persona-consistent intro,
+   seeds the profile, and sets an `onboarded` flag; `/start` nudges `/onboard` only for
+   un-onboarded users, and `/help` lists the new commands.
+4. **Proactive check-ins** — an optional background scheduler (`start_proactive_scheduler(bot)` in
+   `app/services/health.py`, mirroring the consolidation scheduler but taking the aiogram `bot`)
+   that occasionally sends a single, memory-grounded nudge to inactive users. It is opt-outable
+   (`/pause` / `/resume`), quiet-hours-aware (UTC-only), rate-limited and bounded per scan, never
+   sends empty/fabricated content, and is **disabled by default** (`PROACTIVE_INTERVAL_SECS = 0`).
+
+All new profile fields (`last_interaction_at`, `mood_history`, `onboarded`, `last_proactive_at`,
+`proactive_enabled`) are additive and read defensively — **no migration**. Full design in
+[memory_engine.md](development/memory_engine.md#-phase-12--temporal-context--emotional-continuity-implemented),
+[telegram_bot.md](development/telegram_bot.md#-engagement-commands-phase-12-implemented),
+[observability.md](development/observability.md#proactive-check-in-metrics-phase-12); keys in
+[configuration.md](development/configuration.md#-engagement--mood-history-phase-12).
+
+**Deferred / not yet implemented.** Two forward-looking memory-quality items were scoped but
+intentionally **deferred** in this phase:
+
+- **#3 Relevance-ranked memory selection** — instead of dumping the whole profile into the prompt,
+  score facts by recency/relevance and select the top ones, to avoid the "lost in the middle"
+  problem as profiles grow. *(Deferred.)*
+- **#6 Semantic retrieval over trimmed conversation history** — an embedding store of past
+  conversation segments so the bot can recall detail that was trimmed from the buffer and never
+  promoted to extracted memory. *(Deferred.)*
+
+---
+
 ## Build order checklist
 
 - [x] Phase 0 Foundations
@@ -317,8 +364,11 @@ keys in [configuration.md](development/configuration.md#-consolidation-phase-11)
 - [x] Phase 9 Group chat
 - [x] Phase 10 Observability & ops
 - [x] Phase 11 Consolidation
+- [x] Phase 12 Engagement & UX
 
-> Note: the current repository now implements Phases 0–11 — the full roadmap (DM bot, hardened,
-> group chat, the observability/ops layer, and the periodic consolidation "dreaming" pass). There
-> is no remaining forward-looking phase. This plan is written so the project could also be rebuilt
-> cleanly from scratch in this exact order.
+> Note: the current repository now implements Phases 0–12 — the full roadmap (DM bot, hardened,
+> group chat, the observability/ops layer, the periodic consolidation "dreaming" pass, and the
+> Phase 12 engagement/UX features). Two forward-looking memory-quality items remain **deferred**:
+> relevance-ranked memory selection (#3) and semantic retrieval over trimmed conversation history
+> (#6). This plan is written so the project could also be rebuilt cleanly from scratch in this
+> exact order.

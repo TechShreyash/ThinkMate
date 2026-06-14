@@ -8,7 +8,11 @@ from app.config import config
 from app.handlers import main_router
 from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db, ping_db
-from app.services.health import start_metrics_logger, start_consolidation_scheduler
+from app.services.health import (
+    start_metrics_logger,
+    start_consolidation_scheduler,
+    start_proactive_scheduler,
+)
 
 
 async def main():
@@ -38,6 +42,15 @@ async def main():
         )
 
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+
+    # Optional proactive check-in scheduler (Phase 12). Needs the aiogram bot to
+    # send, so it starts after `bot` is created. No-op unless
+    # config.PROACTIVE_INTERVAL_SECS > 0; runs under this asyncio loop.
+    if start_proactive_scheduler(bot) is not None:
+        logger.info(
+            f"Proactive check-in scheduler started (scan every {config.PROACTIVE_INTERVAL_SECS}s)."
+        )
+
     dp = Dispatcher()
 
     # Throttle spammers before any DB session is opened, then inject the DB session.
