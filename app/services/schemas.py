@@ -65,6 +65,15 @@ class EmotionLog(BaseModel):
 # --- PROFILE SCHEMAS ---
 class ProfileUpdate(BaseModel):
     communication_style: Optional[str] = Field(None, description="Updates to the communication style profile.")
+    gender: Optional[Literal["male", "female", "non-binary"]] = Field(
+        None,
+        description=(
+            "The user's gender, inferred from the conversation (self-identification, "
+            "gendered terms they use about themselves, pronouns, or grammatical gender in "
+            "gendered languages). Set ONLY when reasonably confident; leave null when unknown "
+            "or ambiguous. Do not guess from name alone."
+        ),
+    )
 
 # --- COMPREHENSIVE EXTRACTION SCHEMA ---
 class MemoryExtraction(BaseModel):

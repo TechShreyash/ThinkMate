@@ -61,6 +61,7 @@ async def ensure_user(db: AsyncIOMotorDatabase, user_id: int, username: str, dis
             "$setOnInsert": {
                 "profile_summary": "",
                 "communication_style": "",
+                "gender": None,
                 "emotional_state": None,
                 "facts": [],
                 "beliefs": [],
@@ -70,6 +71,71 @@ async def ensure_user(db: AsyncIOMotorDatabase, user_id: int, username: str, dis
                 "onboarded": False,
                 "created_at": now,
             },
+        },
+        upsert=True,
+    )
+
+
+async def refresh_identity_if_changed(
+    db: AsyncIOMotorDatabase, user_id: int, username: str, display_name: str
+) -> dict | None:
+    """Read the stored profile and write Identity_Fields only when absent or changed.
+
+    Returns a small change descriptor (e.g. {"created": bool, "username": (old, new),
+    "display_name": (old, new)}) when a write happened, else None. Never sets or clears
+    any Memory_Field. Safe to call on every group message.
+    """
+    profile = await db["user_profiles"].find_one(
+        {"_id": user_id}, {"username": 1, "display_name": 1}
+    )
+
+    if profile is None:
+        # No profile yet: create one carrying the incoming identity, with the SAME
+        # $setOnInsert memory-field skeleton ensure_user uses (empty memory, not empty
+        # identity). Use upsert so a concurrent create is idempotent.
+        await ensure_user(db, user_id, username, display_name)
+        return {"created": True, "username": (None, username),
+                "display_name": (None, display_name)}
+
+    set_fields: dict = {}
+    if username and profile.get("username") != username:
+        set_fields["username"] = username
+    if display_name and profile.get("display_name") != display_name:
+        set_fields["display_name"] = display_name
+
+    if not set_fields:
+        return None  # already current -> no write (Req 1.5)
+
+    set_fields["updated_at"] = _utcnow()
+    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+    return {"created": False, **{k: (profile.get(k), v)
+                                 for k, v in set_fields.items() if k != "updated_at"}}
+
+
+async def _ensure_memory_skeleton(db: AsyncIOMotorDatabase, user_id: int):
+    """Create the memory-field skeleton if absent WITHOUT writing Identity_Fields.
+
+    Uses the SAME ``$setOnInsert`` memory skeleton ``ensure_user`` seeds, but leaves
+    ``username``/``display_name`` unset so an absent profile is never stamped with
+    empty-string identity (Req 2.1). Safe as a fallback in the memory-write path.
+    """
+    now = _utcnow()
+    await db["user_profiles"].update_one(
+        {"_id": user_id},
+        {
+            "$setOnInsert": {
+                "profile_summary": "",
+                "communication_style": "",
+                "gender": None,
+                "emotional_state": None,
+                "facts": [],
+                "beliefs": [],
+                "events": [],
+                "insights": [],
+                "mood_history": [],
+                "onboarded": False,
+                "created_at": now,
+            }
         },
         upsert=True,
     )
@@ -197,7 +263,7 @@ async def save_extracted_memories(
     """
     profile = await db["user_profiles"].find_one({"_id": user_id})
     if not profile:
-        await ensure_user(db, user_id, "", "")
+        await _ensure_memory_skeleton(db, user_id)
         profile = await db["user_profiles"].find_one({"_id": user_id})
 
     facts = profile.get("facts", [])
@@ -210,6 +276,10 @@ async def save_extracted_memories(
     # 1. Profile style
     if extraction.profile_updates and extraction.profile_updates.communication_style:
         set_fields["communication_style"] = extraction.profile_updates.communication_style
+
+    # 1b. Gender (only overwrite when the extractor is confident enough to emit a value).
+    if extraction.profile_updates and extraction.profile_updates.gender:
+        set_fields["gender"] = extraction.profile_updates.gender
 
     # 2. Direct emotional state update
     if extraction.emotional_state:

@@ -200,7 +200,6 @@ class LLMService:
                 lambda: self.client.chat.completions.create(
                     model=config.LLM_MODEL,
                     messages=messages,
-                    temperature=config.REPLY_TEMPERATURE,
                     max_tokens=max_tokens,
                     timeout=30.0,
                     response_format={"type": "json_object"},
@@ -253,7 +252,6 @@ class LLMService:
                 lambda: self.client.chat.completions.create(
                     model=config.LLM_MODEL,
                     messages=messages,
-                    temperature=config.REPLY_TEMPERATURE,
                     max_tokens=max_tokens,
                     timeout=30.0,
                 ),
@@ -302,7 +300,7 @@ class LLMService:
     # ------------------------------------------------------------------ #
     async def _structured_call(
         self, *, user_id: int, call_type: str, model: str, messages: list[dict],
-        schema: type[T], temperature: float, timeout: float,
+        schema: type[T], timeout: float,
     ) -> T | None:
         """Return a validated ``schema`` instance, or ``None`` on failure.
 
@@ -317,7 +315,7 @@ class LLMService:
                 completion = await self._with_retries(
                     lambda: self.client.beta.chat.completions.parse(
                         model=model, messages=messages, response_format=schema,
-                        temperature=temperature, timeout=timeout,
+                        timeout=timeout,
                     ),
                     what=f"{call_type} parse u{user_id}",
                 )
@@ -351,7 +349,7 @@ class LLMService:
                 lambda: self.client.chat.completions.create(
                     model=model, messages=json_messages,
                     response_format={"type": "json_object"},
-                    temperature=temperature, timeout=timeout,
+                    timeout=timeout,
                 ),
                 what=f"{call_type} json u{user_id}",
             )
@@ -387,7 +385,7 @@ class LLMService:
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
             user_id=user_id, call_type="memory_extraction", model=model, messages=messages,
-            schema=MemoryExtraction, temperature=config.EXTRACTION_TEMPERATURE, timeout=45.0,
+            schema=MemoryExtraction, timeout=45.0,
         )
 
     async def extract_group_memory(
@@ -396,8 +394,7 @@ class LLMService:
         """Multi-party memory extraction over a rendered group segment (one LLM call).
 
         Mirrors :meth:`extract_memory` exactly — same model selection, retry/json_object/
-        native_parse handling via ``_structured_call``, same ``EXTRACTION_TEMPERATURE`` and
-        45s timeout, and the same ``None``-on-failure contract — but validates against
+        native_parse handling via ``_structured_call``, same 45s timeout, and the same ``None``-on-failure contract — but validates against
         :class:`GroupMemoryExtraction` so the result carries per-participant, name-tagged
         updates. ``user_history_text`` is the multi-party segment rendered as
         ``"SenderName: content"`` lines. The first argument is used only for audit logging
@@ -415,7 +412,7 @@ class LLMService:
         return await self._structured_call(
             user_id=user_id_or_chat_id, call_type="group_memory_extraction", model=model,
             messages=messages, schema=GroupMemoryExtraction,
-            temperature=config.EXTRACTION_TEMPERATURE, timeout=45.0,
+            timeout=45.0,
         )
 
     async def compress_memory(
@@ -434,7 +431,7 @@ class LLMService:
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
             user_id=user_id, call_type="memory_compression", model=model, messages=messages,
-            schema=MemoryCompression, temperature=config.EXTRACTION_TEMPERATURE, timeout=60.0,
+            schema=MemoryCompression, timeout=60.0,
         )
 
     async def consolidate_memory(
@@ -452,7 +449,7 @@ class LLMService:
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
             user_id=user_id, call_type="memory_consolidation", model=model, messages=messages,
-            schema=MemoryConsolidation, temperature=config.EXTRACTION_TEMPERATURE, timeout=60.0,
+            schema=MemoryConsolidation, timeout=60.0,
         )
 
 

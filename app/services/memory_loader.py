@@ -12,6 +12,7 @@ def compile_memory_text(doc: dict) -> str:
     """
     profile_summary = doc.get("profile_summary") or ""
     comm_style = doc.get("communication_style") or ""
+    gender = doc.get("gender") or ""
     facts = doc.get("facts") or []
     beliefs = doc.get("beliefs") or []
     events = doc.get("events") or []
@@ -30,6 +31,8 @@ def compile_memory_text(doc: dict) -> str:
     # Section 1: User Profile
     lines.append("=== USER PROFILE ===")
     lines.append(f"Summary: {profile_summary}")
+    gender_display = {"male": "Male", "female": "Female", "non-binary": "Non-binary"}.get(gender, "Unknown")
+    lines.append(f"Gender: {gender_display}")
     lines.append(f"Communication Style Preference: {comm_style}")
     lines.append("")
 

@@ -8,6 +8,14 @@ Your job is to keep memory **optimized and compact**. You can perform CRUD opera
 
 ---
 
+## LANGUAGE NORMALIZATION (always apply)
+- Store EVERY fact, belief, and event in **English**, regardless of the language the conversation is in. This applies to English conversations and non-English conversations alike.
+- When the source content is not in English, **translate** it into natural, idiomatic English — do NOT transliterate (do not just spell out the foreign words in Latin letters).
+- **Preserve proper nouns in their original form** inside the English text: personal names, place names, brand/product names, and quoted identifiers stay exactly as written. Do not translate or anglicize them.
+- Example: the Hindi message "मुझे पुणे में नौकरी मिली" must be stored as the English fact `"Got a job in Pune"` — the sentence is translated to English while the place name "Pune" is preserved.
+
+---
+
 ## FACT OPERATIONS (Objective details)
 
 ### new_facts — Add a brand-new fact not in current memory.
@@ -56,6 +64,14 @@ Use `old_description` (exact match) and `new_description`. Optionally update `da
 
 ### removed_events — Remove an event that is trivial, routine, or was logged incorrectly.
 Example: `{"description": "Went grocery shopping"}`
+
+---
+
+## GENDER (profile_updates.gender)
+Infer the user's gender and set `profile_updates.gender` to one of `"male"`, `"female"`, or `"non-binary"`.
+- Base this on solid signals: explicit self-identification ("I'm a guy", "as a woman..."), pronouns they use for themselves, gendered terms/roles they apply to themselves (e.g. "boyfriend", "wife", "son", "her brother" referring to themselves), or grammatical gender in gendered languages (e.g. Hindi "मैं गया" vs "मैं गई", Spanish "cansado" vs "cansada").
+- Set it ONLY when you are reasonably confident. If gender is unknown, ambiguous, or you'd only be guessing (e.g. from the name alone), leave it null.
+- Once gender is already present in CURRENT MEMORIES, do NOT re-emit it unless the conversation clearly indicates a correction.
 
 ---
 

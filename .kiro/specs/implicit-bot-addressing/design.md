@@ -31,11 +31,28 @@ Explicit_Address. The one signal automated mass-tagging cannot fake — a delibe
 quoting the bot is never silenced. The detector is defensive: any error degrades to "not spam" so a
 classification bug can never suppress a legitimate reply.
 
-Part A is built to mirror the existing `AmbientGate`: a pure, deterministic decision helper holding
-a small amount of bounded in-memory per-chat state, with injectable `now` for tests, living in
-`app/services/group_gate.py`. It plugs into the same router (`_handle_group_message`) and preserves
-every existing invariant — the single-write buffer rule, the ambient cooldown, affinity signals,
-and byte-for-byte DM behavior.
+**Part A-burst — Greeting-burst spam protection over time (Requirement 10).** A single bulk-mention
+message is one spam shape; the other is a *time-distributed* burst — a userbot that tags members
+one-by-one in rapid succession with near-identical low-content greetings ("hi @a", "hi @b", "hi @c",
+…). No single message trips the Mass_Tag_Spam mention-count threshold, so Part A-burst adds a third,
+**stateful** no-LLM detector, **Spam_Burst_Detector**, that tracks recent per-chat message content
+and arrival times in memory. It strips @mention tokens before comparing messages (so greetings
+tagging different people compare as the same content — Req 10.1), measures near-identical similarity
+against a configurable threshold (Req 10.2), and classifies messages as **Greeting_Burst_Spam** once
+the count of near-identical messages within a configurable time window reaches a configurable
+burst-count threshold (Req 10.3). Greeting_Burst_Spam is treated exactly like Mass_Tag_Spam for
+routing purposes: never an Implicit_Address even inside the recency window (Req 10.4), its
+cheap-trigger keywords never fire the ambient gate (Req 10.5), and a bare bot @mention inside it is
+not an Explicit_Address (Req 10.6) — while a deliberate reply-to-bot still is (Req 10.7). A lone
+greeting that is not part of a burst is never flagged (Req 10.8). Like the other detectors it is
+no-LLM (Req 10.10), defensive (errors degrade to "not burst" — Req 10.14), and its per-chat state is
+pruned by the existing idle sweep (Req 10.13).
+
+Part A is built to mirror the existing `AmbientGate`: pure/stateful deterministic decision helpers
+holding a small amount of bounded in-memory per-chat state, with injectable `now` for tests, living
+in `app/services/group_gate.py`. They plug into the same router (`_handle_group_message`) and
+preserve every existing invariant — the single-write buffer rule, the ambient cooldown, affinity
+signals, and byte-for-byte DM behavior.
 
 **Part B — Memory English normalization and reply language/script matching.** Two prompt-level
 changes that are independent of Part A and of each other:
@@ -81,6 +98,18 @@ changes that are independent of Part A and of each other:
 - Telegram represents both `@username` mentions (`mention` entities) and inline name-links
   (`text_mention` entities, which carry a `user` object) — counting both, de-duplicated by handle
   text or user id, gives the true distinct-participant count for the spam threshold.
+- Requirement 10 needs a *stateful* detector, unlike the single-message Mass_Tag_Spam scan. The
+  natural model is the same per-chat in-memory map pattern, but holding a short, bounded, time-windowed
+  history of recent mention-stripped message contents per chat (a `deque` of `(arrival_time, content)`
+  pruned to the burst window and a hard length cap). Similarity is computed with the standard-library
+  `difflib.SequenceMatcher.ratio()` over the mention-stripped, case-folded, whitespace-collapsed
+  content — deterministic, dependency-free, and bounded in cost by the small history size. Both
+  Mass_Tag_Spam and Greeting_Burst_Spam funnel into a single combined `spam` flag in the router, so
+  the Requirement 9 and Requirement 10 routing rules (suppress implicit, suppress ambient trigger,
+  don't promote a bulk/own @mention to explicit, but honor reply-to-bot) are expressed once and shared.
+- Mention stripping for the similarity comparison reuses the same entity model as the count scan: the
+  `@token` slices (`mention` entities) and the `text_mention` slices are removed from the text before
+  comparison, so "hi @alice" and "hi @bob" both reduce to "hi" and compare as identical (Req 10.1).
 
 ## Architecture
 
@@ -91,8 +120,10 @@ flowchart TD
     A[Group/supergroup text message] --> B{length guard}
     B -->|too long| Z[drop silently]
     B -->|ok| C[resolve bot identity, sender name, reply_to_bot]
-    C --> SPAM[count distinct @mentions<br/>spam = count > threshold<br/>error => not spam]
-    SPAM --> D{Explicit address?<br/>reply_to_bot? -> yes<br/>elif spam? -> no<br/>else is_addressed}
+    C --> BURST[Spam_Burst_Detector.observe<br/>mention-stripped near-identical<br/>burst-count within window<br/>error => not burst]
+    BURST --> SPAM[count distinct @mentions<br/>mass_tag = count > threshold<br/>error => not mass_tag]
+    SPAM --> COMBINE[spam = mass_tag OR greeting_burst]
+    COMBINE --> D{Explicit address?<br/>reply_to_bot? -> yes<br/>elif spam? -> no<br/>else is_addressed}
     D -->|yes Explicit_Address| E[affinity +0.05 bump]
     E --> F[enqueue reason=reply<br/>note_human_message]
     D -->|no| G[compute directed_at_other]
@@ -108,9 +139,12 @@ flowchart TD
 
 The detector is invoked **only** on non-explicitly-addressed group messages, strictly between the
 explicit-address check and the ambient gate (Requirement 1.1). DMs never reach this function
-(Requirement 5.1); explicit addresses return before it (Requirement 5.2). The Mass_Tag_Spam scan
-runs once, up front, and feeds three decisions: the spam-aware explicit check (Req 9.4/9.5), the
-implicit detector (Req 9.2), and the ambient trigger suppression (Req 9.3).
+(Requirement 5.1); explicit addresses return before it (Requirement 5.2). The two spam scans run
+once, up front: `Spam_Burst_Detector.observe` must see **every** group message (to build its
+time-windowed history), and the Mass_Tag_Spam mention count is a pure per-message scan. Their results
+are combined into a single `spam` flag (`spam = mass_tag OR greeting_burst`) that feeds three
+decisions shared by Requirements 9 and 10: the spam-aware explicit check (Req 9.4/9.5, 10.6/10.7),
+the implicit detector (Req 9.2, 10.4), and the ambient trigger suppression (Req 9.3, 10.5).
 
 ### Part A: recording "bot last spoke"
 
@@ -180,6 +214,62 @@ threshold of 5 marks the 6th-and-beyond distinct mention as spam. The bot's own 
 excluded from the count — a bulk tag that happens to include the bot is exactly the spam case
 Requirement 9.4 targets.
 
+### A0b. `SpamBurstDetector` (new stateful class, in `group_gate.py`)
+
+A no-LLM, **stateful** detector for time-distributed greeting bursts (Requirement 10). Unlike the
+single-message `is_mass_tag_spam` scan, it remembers a short, bounded, time-windowed history of recent
+mention-stripped message contents per chat and flags a message as Greeting_Burst_Spam once enough
+near-identical messages have arrived within the window. It mirrors `AmbientGate`'s shape: per-chat
+`dict` state keyed by `chat_id`, injectable `now`, a `prune` method wired into the idle sweep, and a
+fully defensive contract.
+
+State (keyed by `chat_id`):
+
+| Map | Meaning |
+|---|---|
+| `_recent: dict[int, deque[tuple[float, str]]]` | Recent `(arrival_time, mention_stripped_content)` pairs for the chat, evicted when older than `GROUP_SPAM_BURST_WINDOW_SECS` and hard-capped at `GROUP_SPAM_BURST_TRACK_MAX` entries. |
+| `_last_seen: dict[int, float]` | Most recent `now` observed for the chat; used by `prune`. |
+
+Interface:
+
+```python
+class SpamBurstDetector:
+    def observe(self, chat_id: int, text: str, entities, now: float) -> bool:
+        """Record a message and classify it as Greeting_Burst_Spam (True) or not (False).
+
+        Steps (no LLM, Req 10.10):
+        1. Strip @mention tokens (mention + text_mention entity slices) from `text`, then
+           case-fold and whitespace-collapse the remainder -> `content` (Req 10.1).
+        2. Evict this chat's history entries older than GROUP_SPAM_BURST_WINDOW_SECS (now-anchored).
+        3. Count how many retained entries are near-identical to `content`, i.e. have
+           difflib.SequenceMatcher ratio >= GROUP_SPAM_BURST_SIMILARITY (Req 10.2).
+        4. Append (now, content) to the history (hard-capped at GROUP_SPAM_BURST_TRACK_MAX).
+        5. Including the just-added message, if the near-identical count within the window
+           reaches GROUP_SPAM_BURST_COUNT -> classify as Greeting_Burst_Spam, return True
+           (Req 10.3). A lone or sub-threshold greeting returns False (Req 10.8).
+
+        Fully defensive: any internal error degrades to False ("not burst") so a classification
+        bug can never suppress a legitimate reply (Req 10.14). Updates `_last_seen`."""
+
+    def prune(self, now: float, max_idle: float | None = None) -> int:
+        """Drop per-chat history idle beyond max_idle; return count pruned (Req 10.13)."""
+```
+
+Mention stripping reuses the entity model from `count_distinct_mentions`: the `@token` slices and the
+`text_mention` slices are removed from `text` before comparison, so "hi @alice" and "hi @bob" both
+reduce to "hi" and compare as identical (Req 10.1). When entities are absent or malformed, a
+defensive regex fallback strips `@\w+` tokens so the comparison still excludes obvious mentions.
+
+The similarity metric is `difflib.SequenceMatcher(None, a, b).ratio()` (standard library,
+deterministic, in `[0, 1]`); two contents are *near-identical* when the ratio meets or exceeds
+`GROUP_SPAM_BURST_SIMILARITY` (Req 10.2). The count threshold and time window are both read live from
+config (Req 10.11), and the config loader supplies defaults for any unset value (Req 10.12).
+
+`observe` is the single entry point and is **stateful by design** (it both reads the history to
+classify and appends the current message). It is still deterministic given `now`, so it is unit- and
+property-testable with a fresh instance and an injected clock, exactly like `AmbientGate`. A
+module-level singleton `spam_burst_detector = SpamBurstDetector()` is exposed for the hot path.
+
 ### A1. Pure helper: `is_directed_at_other` (new, in `group_gate.py`)
 
 A no-LLM, side-effect-free predicate mirroring `is_addressed`. Because it is only consulted for
@@ -229,12 +319,16 @@ class ImplicitAddressGate:
         Only counts once the bot has spoken (no counter before the window can open)."""
 
     def decide(self, chat_id: int, *, directed_at_other: bool,
-               is_mass_tag_spam: bool, now: float) -> tuple[bool, str]:
+               is_spam: bool, now: float) -> tuple[bool, str]:
         """Classify a non-explicitly-addressed message. Returns (is_implicit, reason).
 
+        `is_spam` is the combined spam flag (Mass_Tag_Spam OR Greeting_Burst_Spam) computed by
+        the router; it is rejected first so neither spam shape is ever implicit, even inside the
+        recency window (Req 9.2, Req 10.4).
+
         reason is one of:
-          - "mass_tag_spam": the message is Mass_Tag_Spam (Req 9.2) — checked first, so
-            spam is never implicit even inside the recency window
+          - "spam": the message is Mass_Tag_Spam or Greeting_Burst_Spam (Req 9.2, 10.4) —
+            checked first, so spam is never implicit even inside the recency window
           - "no_bot_activity": the bot has never spoken in this chat (Req 1.4)
           - "directed_at_other": clearly aimed at another participant (Req 2.1)
           - "out_of_window": bot's last message is outside the Bot_Recency_Window (Req 1.3)
@@ -254,7 +348,7 @@ class ImplicitAddressGate:
 ```
 
 Window check inside `decide` (Requirement 1.2/1.3): spam is rejected first
-(`is_mass_tag_spam → (False, "mass_tag_spam")`, Req 9.2), then the bot's last message is "within the
+(`is_spam → (False, "spam")`, Req 9.2 / Req 10.4), then the bot's last message is "within the
 Bot_Recency_Window" when **both** bounds hold —
 
 ```
@@ -279,20 +373,27 @@ instantiate the class directly for isolated, deterministic state.
 Changes, in order:
 
 1. Compute `now = time.time()` once.
-2. Compute `spam = is_mass_tag_spam(user_text, message.entities, threshold=config.GROUP_MASS_TAG_SPAM_THRESHOLD)`
-   inside a `try/except` that degrades to `spam = False` (Requirement 9.6).
+2. Classify both spam shapes up front, each defended independently:
+   - `try: is_burst = spam_burst_detector.observe(chat_id, user_text, message.entities, now)`
+     `except Exception: is_burst = False` (Requirement 10.14). `observe` must run on **every** group
+     message so the time-windowed history is complete regardless of which path the message takes.
+   - `try: is_mass = is_mass_tag_spam(user_text, message.entities, threshold=config.GROUP_MASS_TAG_SPAM_THRESHOLD)`
+     `except Exception: is_mass = False` (Requirement 9.6).
+   - `spam = is_mass or is_burst` — the single combined flag used by every downstream decision.
 3. Spam-aware explicit-address decision (replaces the bare `is_addressed` call):
-   - `reply_to_bot` (computed as today) → **Explicit_Address** (Requirement 9.5: a deliberate
-     reply-to-bot survives spam).
-   - `elif spam` → **not** an Explicit_Address (Requirement 9.4: a bot @mention buried in a bulk
-     tag list, or the bot's name appearing in spam, does not count).
-   - `else` → existing `is_addressed(text, entities, reply_to_bot=False, bot_username, bot_name)`.
+   - `reply_to_bot` (computed as today) → **Explicit_Address** (Requirements 9.5 and 10.7: a
+     deliberate reply-to-bot survives both spam shapes).
+   - `elif spam` → **not** an Explicit_Address (Requirements 9.4 and 10.6: a bot @mention buried in a
+     bulk tag list or in a greeting-burst message, or the bot's name appearing in spam, does not
+     count).
+   - `else` → existing `is_addressed(text, entities, reply_to_bot=False, bot_username, bot_name)`
+     (Requirement 10.9: a genuine explicit address that is not burst uses the existing addressed path).
    If Explicit_Address: existing affinity `+0.05` bump and `enqueue_message(reason="reply")`
    (unchanged), then `implicit_gate.note_human_message(chat_id, now)`, then return.
 4. If not addressed: compute `reply_to_other` (a reply whose `from_user.id` is present and is not the
    bot's id) and `directed_at_other = is_directed_at_other(entities=message.entities, reply_to_other=...)`.
 5. `try: is_implicit, reason = implicit_gate.decide(chat_id, directed_at_other=directed_at_other,
-   is_mass_tag_spam=spam, now=now)` `except Exception: is_implicit = False` (Requirement 1.6 —
+   is_spam=spam, now=now)` `except Exception: is_implicit = False` (Requirement 1.6 —
    degrade to ambient).
 6. If `is_implicit and implicit_gate.cooldown_elapsed(chat_id, now)`:
    `implicit_gate.mark_implicit_reply(chat_id, now)` (Requirement 3.3) → log the implicit-reply
@@ -300,7 +401,7 @@ Changes, in order:
    `enqueue_message(reason="reply")` **without** writing the buffer (Requirement 3.4) → return.
 7. Otherwise (`not is_implicit`, or cooldown not elapsed → Requirement 4.1):
    `implicit_gate.note_human_message(chat_id, now)` then
-   `await _maybe_ambient_chime(..., is_mass_tag_spam=spam)` (existing path, which owns the buffer
+   `await _maybe_ambient_chime(..., is_spam=spam)` (existing path, which owns the buffer
    write on its drop branch — Requirement 5.3/5.4).
 
 Counter ordering: `note_human_message` is called *after* `decide` on every path, so the current
@@ -317,7 +418,7 @@ apply without adding new semantics.
 
 After a group reply is actually sent, record that the bot spoke:
 
-- Import the new singleton: `from app.services.group_gate import ambient_gate, implicit_gate`.
+- Import the new singletons: `from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector`.
 - In `_process_batch`, in the branch that calls `await last_message.answer(reply_text)` (i.e. not the
   suppressed ambient-empty case), when `chat_type in _GROUP_CHAT_TYPES`, call
   `implicit_gate.note_bot_spoke(chat_id, time.time())` (Requirement 6.1). Wrapped defensively so a
@@ -329,25 +430,28 @@ window reopens from the bot's latest message.
 ### A5. Pruning hook (`app/services/user_task_manager.py`, `_evict_idle`)
 
 Extend the existing prune block (which already prunes `ambient_gate` and `affinity_cache`) to also
-call `implicit_gate.prune(now)` (Requirement 6.4), inside the same defensive `try/except` so a prune
-failure never breaks the sweep.
+call `implicit_gate.prune(now)` (Requirement 6.4) and `spam_burst_detector.prune(now)`
+(Requirement 10.13), inside the same defensive `try/except` so a prune failure never breaks the
+sweep.
 
 ### A6. Ambient trigger suppression for spam (`app/handlers/messages.py`, `_maybe_ambient_chime`)
 
-`_maybe_ambient_chime` gains a keyword-only `is_mass_tag_spam: bool = False` parameter. Inside, the
-cheap-trigger scan becomes spam-aware:
+`_maybe_ambient_chime` gains a keyword-only `is_spam: bool = False` parameter (the combined
+Mass_Tag_Spam OR Greeting_Burst_Spam flag from the router). Inside, the cheap-trigger scan becomes
+spam-aware:
 
 ```python
-triggered = scan_cheap_triggers(user_text) and not is_mass_tag_spam
+triggered = scan_cheap_triggers(user_text) and not is_spam
 ```
 
-When the message is spam, `triggered` is forced `False`, so greeting/laughter/etc. keywords cannot
-fire the ambient gate (Requirement 9.3). The message still flows through `AmbientGate.decide` so the
-single-write invariant is preserved exactly as today: the gate remains the sole buffer writer on its
-drop branch, and a spam message with `triggered=False` simply drops at the `"no_trigger"` stage
-(unless it independently lands on the rare periodic scan tick, which remains affinity-and-dice
-gated — the requirement scopes suppression to *cheap-trigger keywords*, not the context-scan
-mechanism). This keeps spam handling a one-line, low-risk change with no new buffer-write paths.
+When the message is either spam shape, `triggered` is forced `False`, so greeting/laughter/etc.
+keywords cannot fire the ambient gate (Requirements 9.3 and 10.5). The message still flows through
+`AmbientGate.decide` so the single-write invariant is preserved exactly as today: the gate remains
+the sole buffer writer on its drop branch, and a spam message with `triggered=False` simply drops at
+the `"no_trigger"` stage (unless it independently lands on the rare periodic scan tick, which remains
+affinity-and-dice gated — the requirement scopes suppression to *cheap-trigger keywords*, not the
+context-scan mechanism). This keeps spam handling a one-line, low-risk change with no new buffer-write
+paths.
 
 ### B1. Extraction prompt (`app/prompts/extraction_prompt.py`)
 
@@ -389,6 +493,10 @@ _bot_last_spoke:      dict[int, float]   # now of bot's last sent message; absen
 _human_since_bot:     dict[int, int]     # human messages since bot last spoke; reset to 0 on note_bot_spoke
 _last_implicit_reply: dict[int, float]   # now of last implicit direct reply (Implicit_Cooldown anchor)
 _last_seen:           dict[int, float]   # most recent activity; used by prune()
+
+# SpamBurstDetector per-chat state (keyed by chat_id: int)
+_recent:    dict[int, deque[tuple[float, str]]]  # (arrival_time, mention_stripped_content), window+cap bounded
+_last_seen: dict[int, float]                     # most recent activity; used by prune()
 ```
 
 New configuration knobs (`app/config.py`), read live so tests can override:
@@ -399,9 +507,15 @@ New configuration knobs (`app/config.py`), read live so tests can override:
 | `GROUP_IMPLICIT_RECENCY_MAX_MSGS` | int | `4` | Bot_Recency_Window intervening-human-message bound (Req 4.3). Up to 4 other human messages may intervene before the window closes. |
 | `GROUP_IMPLICIT_COOLDOWN_SECS` | float | `30.0` | Implicit_Cooldown (Req 4.2). At most one implicit direct reply per chat per 30 s, so bursts of follow-ups don't let the bot dominate. Shorter than the 90 s ambient cooldown because implicit replies are wanted answers, not volunteered chime-ins. |
 | `GROUP_MASS_TAG_SPAM_THRESHOLD` | int | `5` | Mass_Tag_Spam threshold (Req 9.7). A message @mentioning **more than** 5 distinct participants is spam. Picked above the size of a normal "hey @a @b @c, what do you think?" cluster but well below a member-list broadcast. |
+| `GROUP_SPAM_BURST_SIMILARITY` | float | `0.85` | Greeting_Burst_Spam similarity threshold (Req 10.11). Two mention-stripped contents with a `difflib` ratio ≥ 0.85 are near-identical — high enough to catch "hi"/"hii"/"hi 👋" variants without conflating genuinely different short messages. |
+| `GROUP_SPAM_BURST_COUNT` | int | `3` | Greeting_Burst_Spam burst-count threshold (Req 10.11). Once 3 near-identical messages arrive within the window, the burst is flagged. A single greeting (count 1) or a pair is never flagged (Req 10.8). |
+| `GROUP_SPAM_BURST_WINDOW_SECS` | float | `60.0` | Greeting_Burst_Spam time window (Req 10.11). Near-identical messages are only counted toward a burst if they arrive within 60 s of each other, so normal, spaced-out greetings never trip it. |
+| `GROUP_SPAM_BURST_TRACK_MAX` | int | `20` | Hard cap on per-chat retained recent-message entries, bounding `SpamBurstDetector` memory independent of traffic volume. |
 
-Defaults are deliberately conservative: short time window, small message bound, and a cooldown that
-caps implicit replies to roughly two per minute per chat. They are tunable per Requirement 4.2/4.3.
+Per Requirement 10.12, every burst knob has a default supplied by the config loader, so an unset
+value is never an error. Defaults are deliberately conservative: short time window, small message
+bound, and a cooldown that caps implicit replies to roughly two per minute per chat. They are tunable
+per Requirements 4.2/4.3 and 10.11.
 
 Persisted models (`chat_buffers`, `chat_members`, per-user profiles) are unchanged. The existing
 `affinity` / `mode` fields continue to drive the ambient gate exactly as before.
@@ -412,10 +526,10 @@ Persisted models (`chat_buffers`, `chat_members`, per-user profiles) are unchang
 system — essentially, a formal statement about what the system should do. Properties serve as the
 bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-These properties cover **Part A** and **Part A-spam** only — the pure, deterministic
-`group_gate.py` logic (`ImplicitAddressGate`, `is_directed_at_other`, `is_mass_tag_spam`). They are
-fully unit-testable with an injected `now` and constructed entity/reply inputs, so each maps to a
-single property-based test.
+These properties cover **Part A**, **Part A-spam**, and **Part A-burst** — the pure/stateful,
+deterministic `group_gate.py` logic (`ImplicitAddressGate`, `is_directed_at_other`,
+`is_mass_tag_spam`, `SpamBurstDetector`). They are fully unit-testable with an injected `now` and
+constructed entity/reply inputs, so each maps to a single property-based test.
 
 **Part B is intentionally excluded.** Requirements 7 (English memory) and 8 (reply language/script
 matching) are realized entirely as prompt-text changes whose behavior is produced by the LLM. There
@@ -482,22 +596,62 @@ bulk mention list (with no reply-to-bot) does not make a spam message an Explici
 
 **Validates: Requirements 9.4, 9.5**
 
-### Property 8: Recency state pruning
+### Property 8: Recency and burst state pruning
 
-*For any* set of chats with assorted last-activity timestamps, `prune(now, max_idle)` removes
-exactly the chats whose tracking state has been idle longer than `max_idle` and leaves all
-recently-active chats' state intact, keeping the in-memory maps bounded.
+*For any* set of chats with assorted last-activity timestamps, `prune(now, max_idle)` on each
+in-memory tracker (`ImplicitAddressGate` and `SpamBurstDetector`) removes exactly the chats whose
+tracking state has been idle longer than `max_idle` and leaves all recently-active chats' state
+intact, keeping every in-memory map bounded.
 
-**Validates: Requirements 6.4**
+**Validates: Requirements 6.4, 10.13**
 
 ### Property 9: Defensive degradation (never raise)
 
-*For any* input — including malformed entities, non-string text, and `None` — `is_mass_tag_spam`
-never raises and degrades to `False` ("not spam"), and `decide` never raises and degrades to a
-not-implicit verdict. A failure in either component therefore can never suppress a legitimate reply;
-it can only fall through to the existing ambient path.
+*For any* input — including malformed entities, non-string text, and `None` — `is_mass_tag_spam`,
+`SpamBurstDetector.observe`, and `ImplicitAddressGate.decide` never raise: the spam classifiers
+degrade to `False` ("not spam" / "not burst") and `decide` degrades to a not-implicit verdict. A
+failure in any of these components therefore can never suppress a legitimate reply; it can only fall
+through to the existing ambient path.
 
-**Validates: Requirements 1.6, 9.6**
+**Validates: Requirements 1.6, 9.6, 10.14**
+
+### Property 10: Burst similarity excludes @mention tokens
+
+*For any* base message content and *any* two sets of @mention tokens decorating it, the
+`SpamBurstDetector` compares the two messages on their mention-stripped content — which are
+identical — so their `difflib` similarity is maximal and they are treated as near-identical. Greeting
+messages that tag different participants therefore compare as the same content regardless of who is
+tagged.
+
+**Validates: Requirements 10.1, 10.2**
+
+### Property 11: Greeting-burst classification threshold within the window
+
+*For any* sequence of near-identical (mention-stripped) messages arriving in a single chat, the
+`SpamBurstDetector` classifies a message as Greeting_Burst_Spam **if and only if** the count of
+near-identical messages within `GROUP_SPAM_BURST_WINDOW_SECS` reaches `GROUP_SPAM_BURST_COUNT`; a lone
+greeting, a sub-threshold count, or messages spaced beyond the window are classified as not
+Greeting_Burst_Spam.
+
+**Validates: Requirements 10.3, 10.8**
+
+### Property 12: Greeting-burst suppresses implicit classification and ambient triggers
+
+*For any* message classified as Greeting_Burst_Spam, `decide` classifies it as not an
+Implicit_Address even when the bot spoke within the recency window, and its effective ambient trigger
+(`scan_cheap_triggers(text) and not is_spam`) is `False` — so greeting cheap-trigger keywords never
+fire the ambient gate for a burst message.
+
+**Validates: Requirements 10.4, 10.5**
+
+### Property 13: Burst-aware explicit address
+
+*For any* Greeting_Burst_Spam message, the router treats it as an Explicit_Address **if and only if**
+it is a deliberate reply to one of the bot's own messages; a bare @mention of the bot inside a burst
+message (with no reply-to-bot) does not make it an Explicit_Address, while a genuine explicit address
+that is not classified as Greeting_Burst_Spam continues to use the existing addressed path.
+
+**Validates: Requirements 10.6, 10.7, 10.9**
 
 ## Error Handling
 
@@ -507,11 +661,14 @@ The design follows the codebase's established "degrade on the hot path, never ra
 | Failure point | Handling | Resulting behavior |
 |---|---|---|
 | `is_mass_tag_spam` raises internally | `try/except` inside the function returns `False` | Treated as not spam; normal processing continues (Req 9.6). |
+| `SpamBurstDetector.observe` raises internally | `try/except` inside `observe` returns `False` | Treated as not burst; normal processing continues (Req 10.14). |
+| Router's burst classification raises | `try/except` in `_handle_group_message` sets `is_burst = False` | Message processed as non-burst; combined `spam` flag falls back to mass-tag only (Req 10.14). |
 | Router's spam computation raises | `try/except` in `_handle_group_message` sets `spam = False` | Message processed as non-spam (Req 9.6). |
 | `implicit_gate.decide` raises | `try/except` in the router sets `is_implicit = False` | Message falls through to the ambient gate (Req 1.6). |
 | `is_directed_at_other` raises | Defensive internals return `False` | Message remains an implicit candidate (no crash); recency bounds still gate it. |
 | `note_human_message` / `note_bot_spoke` raises | Wrapped at call sites in `try/except` (debug log) | Tracking may miss one update; message delivery and routing are unaffected. |
 | `implicit_gate.prune` raises | Caught by the existing sweep `try/except` in `_evict_idle` | Sweep continues; stale state pruned on a later pass. |
+| `spam_burst_detector.prune` raises | Caught by the existing sweep `try/except` in `_evict_idle` | Sweep continues; stale burst history pruned on a later pass. |
 | Bot identity (`get_me`) unavailable | Existing behavior (`id=0`, empty username) | `reply_to_bot` is `False`; spam/implicit logic still runs; no crash. |
 
 Key safety guarantee: every degradation path lands a message on the existing ambient gate (or, for a
@@ -526,25 +683,29 @@ disables spam suppression rather than over-suppressing.
 ## Testing Strategy
 
 Testing mirrors the existing `tests/test_ambient_gate.py` approach: the new `group_gate.py` logic is
-pure and deterministic, so it is tested with plain synchronous functions using a fresh
-`ImplicitAddressGate()` per test for state isolation, an injected `now`, and constructed
-entity/reply inputs. Config knobs are overridden with set/restore in `try/finally`.
+pure/stateful and deterministic, so it is tested with plain synchronous functions using a fresh
+`ImplicitAddressGate()` / `SpamBurstDetector()` per test for state isolation, an injected `now`, and
+constructed entity/reply inputs. Config knobs are overridden with set/restore in `try/finally`.
 
-### Property-based tests (Part A / A-spam)
+### Property-based tests (Part A / A-spam / A-burst)
 
 - Library: **Hypothesis** (already a project dependency — see `.hypothesis/` and existing tests).
-- Each of the nine correctness properties is implemented as **exactly one** property-based test,
+- Each of the thirteen correctness properties is implemented as **exactly one** property-based test,
   configured to run a **minimum of 100 iterations** (`@settings(max_examples=100)` or higher).
 - Each test is tagged with a comment referencing its design property, in the form:
   `# Feature: implicit-bot-addressing, Property {n}: {property text}`.
-- Generators: `st.integers()` for chat ids and counters, `st.floats()` for elapsed times, small
-  lists of constructed mention/`text_mention` entity stand-ins (objects exposing `.type`,
-  `.offset`, `.length`, and `.user.id`) for the spam/directed-at-other scans, and booleans for
-  `directed_at_other` / `reply_to_bot` / `reply_to_other`. A deterministic clock is supplied via the
-  injected `now` so no property depends on wall-clock time.
+- Generators: `st.integers()` for chat ids and counters, `st.floats()` for elapsed times and arrival
+  sequences, small lists of constructed mention/`text_mention` entity stand-ins (objects exposing
+  `.type`, `.offset`, `.length`, and `.user.id`) for the spam/directed-at-other scans, short text
+  contents with varying @mention decorations for the burst similarity/burst-count properties, and
+  booleans for `directed_at_other` / `reply_to_bot` / `reply_to_other`. A deterministic clock is
+  supplied via the injected `now` so no property depends on wall-clock time.
 - Property 9 (never-raise) fuzzes deliberately malformed inputs (non-string text, `None`, entities
-  missing attributes or with negative offsets) and asserts no exception escapes and the verdict is
-  the safe default.
+  missing attributes or with negative offsets) across `is_mass_tag_spam`, `SpamBurstDetector.observe`,
+  and `decide`, and asserts no exception escapes and the verdict is the safe default.
+- Properties 10–11 (burst) generate a base content plus per-message mention sets and arrival times,
+  asserting mention-stripped equivalence (10) and the count/window threshold behavior (11) against
+  overridden `GROUP_SPAM_BURST_*` knobs.
 
 ### Example / unit tests (router wiring & invariants)
 
@@ -562,14 +723,20 @@ input-varying logic:
 - **Recency commit point (Req 6.1):** a sent group reply calls `note_bot_spoke`; a suppressed
   ambient empty-reply does **not**.
 - **Implicit-reply logging (Req 3.2):** the implicit path logs the decision with the chat id.
-- **Defensive fallthrough (Req 1.6, 9.6):** a detector/classifier stub that raises results in the
-  message reaching the ambient path.
+- **Defensive fallthrough (Req 1.6, 9.6, 10.14):** a detector/classifier stub that raises results in
+  the message reaching the ambient path.
+- **Burst observed on every path (Req 10.3):** `spam_burst_detector.observe` is called for every
+  group message (explicit, implicit, and ambient paths) so the time-windowed history is complete.
+- **Burst reply-to-bot survives (Req 10.7):** a burst-classified message that is a reply to the bot
+  still routes through the explicit addressed path.
 
-### Configuration smoke tests (Req 4.2, 4.3, 9.7)
+### Configuration smoke tests (Req 4.2, 4.3, 9.7, 10.11, 10.12)
 
 Single assertions that `GROUP_IMPLICIT_RECENCY_SECS`, `GROUP_IMPLICIT_RECENCY_MAX_MSGS`,
-`GROUP_IMPLICIT_COOLDOWN_SECS`, and `GROUP_MASS_TAG_SPAM_THRESHOLD` exist on `config` with sensible
-defaults and are read live by the gate (override-and-observe).
+`GROUP_IMPLICIT_COOLDOWN_SECS`, `GROUP_MASS_TAG_SPAM_THRESHOLD`, `GROUP_SPAM_BURST_SIMILARITY`,
+`GROUP_SPAM_BURST_COUNT`, `GROUP_SPAM_BURST_WINDOW_SECS`, and `GROUP_SPAM_BURST_TRACK_MAX` exist on
+`config` with sensible defaults (Req 10.12) and are read live by the gates/detectors
+(override-and-observe).
 
 ### Prompt-assertion tests (Part B — Req 7 & 8)
 

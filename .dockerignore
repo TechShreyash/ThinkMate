@@ -1,0 +1,34 @@
+# Keep the build context (and image) lean and free of secrets.
+
+# Secrets / local env — config is injected via environment variables.
+.env
+.env.example
+
+# Virtual envs & Python caches
+.venv/
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.hypothesis/
+build/
+dist/
+wheels/
+*.egg-info/
+
+# VCS & tooling
+.git/
+.gitignore
+.python-version
+uv.lock
+
+# Project meta not needed at runtime
+.kiro/
+.agents/
+docs/
+tests/
+README.md
+changelog.md
+
+# Runtime output & local data
+logs/
+data/

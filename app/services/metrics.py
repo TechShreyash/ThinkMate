@@ -25,14 +25,24 @@ from typing import Iterator
 
 from loguru import logger
 
-# Maps the four known LLM ``call_type`` values onto their metric name prefix.
+# Maps each known LLM ``call_type`` value onto its metric name prefix.
 # Any other call_type is used as-is (Requirement 2.1).
 _LLM_TYPE_PREFIX: dict[str, str] = {
     "chat_reply": "reply",
     "memory_extraction": "extraction",
     "group_memory_extraction": "group_extraction",
     "memory_compression": "compression",
+    # These two keep their full call_type as the prefix (the prior fall-through
+    # behavior) so existing counter names like ``llm.proactive_checkin.calls`` and
+    # ``llm.memory_consolidation.calls`` stay stable for the /health summary and tests.
+    "memory_consolidation": "memory_consolidation",
+    "proactive_checkin": "proactive_checkin",
 }
+
+# Single ordered source of truth for the known LLM task types and their metric
+# prefixes (Requirements 6.1, 6.2, 6.3, 6.7). Derived directly from
+# ``_LLM_TYPE_PREFIX`` so the two can never drift out of sync.
+LLM_TASK_TYPES: tuple[tuple[str, str], ...] = tuple(_LLM_TYPE_PREFIX.items())
 
 
 class MetricsRegistry:

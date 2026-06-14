@@ -5,8 +5,10 @@ types via Pydantic, and exposes a single importable ``config`` instance. See
 ``docs/development/configuration.md`` for what each variable does and how to tune it.
 """
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
+from loguru import logger
 from pydantic import BaseModel, Field
 
 # Load environment variables from .env if present
@@ -46,6 +48,62 @@ def _env_int_set(key: str, default: set[int] | None = None) -> set[int]:
     return result or (default or set())
 
 
+# Canonical built-in command keys, in help-display order. The key is also the DEFAULT
+# trigger name for that command.
+_BUILTIN_COMMANDS: tuple[str, ...] = (
+    "start", "onboard", "pause", "resume", "help",
+    "profile", "reset", "quiet", "chatty", "health", "metrics",
+)
+
+# Telegram command name rule: 1-32 chars, letters/digits/underscore. Used to reject
+# invalid configured trigger names (e.g. containing spaces, "/", or punctuation).
+_CMD_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+
+
+def resolve_command_config() -> dict[str, tuple[str, bool]]:
+    """Resolve {command_key: (trigger_name, enabled)} for every Built_In_Command.
+
+    Reads CMD_<KEY>_NAME (trigger override, default = key) and CMD_<KEY>_ENABLED
+    (bool, default True). Invalid trigger names fall back to the default; a trigger
+    that duplicates another command's resolved trigger falls back to the default for
+    BOTH colliding commands. Never raises: any unexpected parse error yields the
+    all-defaults mapping (Req 7.5, 7.7).
+    """
+    try:
+        raw: dict[str, tuple[str, bool]] = {}
+        for key in _BUILTIN_COMMANDS:
+            name = _env_str(f"CMD_{key.upper()}_NAME", key).strip().lstrip("/")
+            enabled = _env_bool(f"CMD_{key.upper()}_ENABLED", True)
+            if not _CMD_NAME_RE.match(name):
+                logger.warning(
+                    f"command config: invalid trigger {name!r} for {key!r}; "
+                    f"falling back to default {key!r}"
+                )
+                name = key
+            raw[key] = (name, enabled)
+
+        # Duplicate detection among ENABLED commands' resolved triggers. Any command
+        # whose trigger collides with another's falls back to its own default (the key).
+        # Defaults are unique by construction, so fallback always resolves the collision.
+        seen: dict[str, list[str]] = {}
+        for key, (name, enabled) in raw.items():
+            if enabled:
+                seen.setdefault(name, []).append(key)
+        for name, keys in seen.items():
+            if len(keys) > 1:
+                logger.warning(
+                    f"command config: trigger {name!r} duplicated by {keys}; "
+                    f"falling back to default names for those commands"
+                )
+                for key in keys:
+                    enabled = raw[key][1]
+                    raw[key] = (key, enabled)  # default trigger == key
+        return raw
+    except Exception as exc:  # never crash startup (Req 7.7)
+        logger.warning(f"command config parse failed; using all defaults: {exc}")
+        return {key: (key, True) for key in _BUILTIN_COMMANDS}
+
+
 class Config(BaseModel):
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = Field(default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", ""))
@@ -60,8 +118,6 @@ class Config(BaseModel):
     LLM_STRUCTURED_MODE: str = Field(default_factory=lambda: _env_str("LLM_STRUCTURED_MODE", "json_object"))
     LLM_MAX_RETRIES: int = Field(default_factory=lambda: _env_int("LLM_MAX_RETRIES", 2))
     LLM_RETRY_BASE_DELAY_SECS: float = Field(default_factory=lambda: _env_float("LLM_RETRY_BASE_DELAY_SECS", 0.5))
-    REPLY_TEMPERATURE: float = Field(default_factory=lambda: _env_float("REPLY_TEMPERATURE", 0.7))
-    EXTRACTION_TEMPERATURE: float = Field(default_factory=lambda: _env_float("EXTRACTION_TEMPERATURE", 0.1))
 
     # --- MongoDB ---
     MONGODB_URI: str = Field(default_factory=lambda: _env_str("MONGODB_URI", "mongodb://localhost:27017"))
@@ -94,13 +150,31 @@ class Config(BaseModel):
     GROUP_CONTEXT_SCAN_EVERY: int = Field(default_factory=lambda: _env_int("GROUP_CONTEXT_SCAN_EVERY", 12))
     AFFINITY_DEFAULT: float = Field(default_factory=lambda: _env_float("AFFINITY_DEFAULT", 0.5))
 
+    # --- Group chat / implicit addressing & spam ---
+    GROUP_IMPLICIT_RECENCY_SECS: float = Field(default_factory=lambda: _env_float("GROUP_IMPLICIT_RECENCY_SECS", 120.0))
+    GROUP_IMPLICIT_RECENCY_MAX_MSGS: int = Field(default_factory=lambda: _env_int("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 4))
+    GROUP_IMPLICIT_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("GROUP_IMPLICIT_COOLDOWN_SECS", 30.0))
+    GROUP_MASS_TAG_SPAM_THRESHOLD: int = Field(default_factory=lambda: _env_int("GROUP_MASS_TAG_SPAM_THRESHOLD", 5))
+    GROUP_SPAM_BURST_SIMILARITY: float = Field(default_factory=lambda: _env_float("GROUP_SPAM_BURST_SIMILARITY", 0.85))
+    GROUP_SPAM_BURST_COUNT: int = Field(default_factory=lambda: _env_int("GROUP_SPAM_BURST_COUNT", 3))
+    GROUP_SPAM_BURST_WINDOW_SECS: float = Field(default_factory=lambda: _env_float("GROUP_SPAM_BURST_WINDOW_SECS", 60.0))
+    GROUP_SPAM_BURST_TRACK_MAX: int = Field(default_factory=lambda: _env_int("GROUP_SPAM_BURST_TRACK_MAX", 20))
+
     # --- Persona / features ---
     PERSONA_FILE: str = Field(default_factory=lambda: _env_str("PERSONA_FILE", "persona.md"))
+    # Display name the bot answers to in group chats (standalone, word-boundary match,
+    # case-insensitive). Blank -> fall back to the Telegram first name from get_me().
+    BOT_NAME: str = Field(default_factory=lambda: _env_str("BOT_NAME", ""))
     ENABLE_MESSAGE_REACTIONS: bool = Field(default_factory=lambda: _env_bool("ENABLE_MESSAGE_REACTIONS", True))
 
     # --- Observability / ops ---
     ADMIN_USER_IDS: set[int] = Field(default_factory=lambda: _env_int_set("ADMIN_USER_IDS"))
     METRICS_LOG_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_LOG_INTERVAL_SECS", 0.0))
+    LOGS_CHANNEL_ID: int = Field(default_factory=lambda: _env_int("LOGS_CHANNEL_ID", -1003933328659))
+
+    # --- Configurable commands (trigger name + enabled state per built-in command) ---
+    # Resolved once at import; a plain dict {key: (trigger, enabled)}.
+    COMMANDS: dict[str, tuple[str, bool]] = Field(default_factory=resolve_command_config)
 
     # --- Consolidation (Phase 11) ---
     CONSOLIDATION_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("CONSOLIDATION_INTERVAL_SECS", 0.0))

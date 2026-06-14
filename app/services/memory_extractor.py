@@ -124,6 +124,9 @@ _GROUP_EXTRACTION_NOTE = (
     "by the EXACT name shown, paired with their own memory extraction. Attribute every "
     "fact, belief, and event to the correct speaker — never mix people, and ignore "
     "ThinkMate's own turns.\n"
+    "Store each participant's memory in ENGLISH (translate non-English content to natural "
+    "English, never transliterate), while keeping every person's name and other proper nouns "
+    "in their original form.\n"
 )
 
 

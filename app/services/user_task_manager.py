@@ -17,7 +17,7 @@ from app.config import config
 from app.database.connection import db_session
 from app.services.chat_manager import handle_message
 from app.services.metrics import metrics
-from app.services.group_gate import ambient_gate
+from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector
 from app.services.affinity import affinity_cache
 
 # Telegram chat.type values that map to the multi-party group path.
@@ -103,9 +103,12 @@ class UserTaskManager:
         try:
             gate_pruned = ambient_gate.prune(now)
             affinity_pruned = affinity_cache.prune(now, max_idle=config.USER_STATE_TTL_SECS * 4)
-            if gate_pruned or affinity_pruned:
+            implicit_pruned = implicit_gate.prune(now)
+            burst_pruned = spam_burst_detector.prune(now)
+            if gate_pruned or affinity_pruned or implicit_pruned or burst_pruned:
                 logger.debug(
-                    f"Pruned {gate_pruned} ambient-gate and {affinity_pruned} affinity-cache entries."
+                    f"Pruned {gate_pruned} ambient-gate, {affinity_pruned} affinity-cache, "
+                    f"{implicit_pruned} implicit-gate, and {burst_pruned} spam-burst entries."
                 )
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Ambient/affinity prune error: {e}")
@@ -270,6 +273,15 @@ class UserTaskManager:
                                         logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
 
                                 await last_message.answer(reply_text)
+
+                                # Record that the bot genuinely spoke in this group so
+                                # the implicit-address recency window reopens from now
+                                # (Req 6.1). A tracking failure must never break delivery.
+                                if chat_type in _GROUP_CHAT_TYPES:
+                                    try:
+                                        implicit_gate.note_bot_spoke(chat_id, time.time())
+                                    except Exception as track_err:  # noqa: BLE001
+                                        logger.debug(f"note_bot_spoke failed for chat {chat_id}: {track_err}")
                         except Exception as e:  # noqa: BLE001
                             # A failure for one sender group must not abort the rest
                             # of the batch — log, apologize to that group, continue.

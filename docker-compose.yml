@@ -1,0 +1,37 @@
+# ThinkMate — Coolify-friendly Compose file.
+#
+# Coolify: point the resource at this repo and pick "Docker Compose".
+# Set all configuration (TELEGRAM_BOT_TOKEN, MONGODB_URI, LLM_*, etc.) in the
+# Coolify "Environment Variables" UI — they are injected into the container at
+# runtime. The env_file below is an optional convenience for LOCAL runs
+# (`docker compose up`) and is not required in production.
+
+services:
+  thinkmate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: thinkmate:latest
+    restart: unless-stopped
+
+    # Local convenience only; ignored gracefully if the file is absent
+    # (e.g. on the Coolify server, where env comes from the UI).
+    env_file:
+      - path: .env
+        required: false
+
+    # Persist rotating file logs across restarts/redeploys.
+    volumes:
+      - thinkmate-logs:/app/logs
+
+    # Cap container stdout log growth.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Polling bot: no inbound ports are published.
+
+volumes:
+  thinkmate-logs:

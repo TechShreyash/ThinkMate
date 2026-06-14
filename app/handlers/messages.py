@@ -23,7 +23,15 @@ from loguru import logger
 from app.config import config
 from app.database import models
 from app.services.user_task_manager import user_task_manager
-from app.services.group_gate import is_addressed, scan_cheap_triggers, ambient_gate
+from app.services.group_gate import (
+    is_addressed,
+    is_mass_tag_spam,
+    is_directed_at_other,
+    scan_cheap_triggers,
+    ambient_gate,
+    implicit_gate,
+    spam_burst_detector,
+)
 from app.services.affinity import affinity_cache
 
 router = Router(name="messages")
@@ -34,7 +42,8 @@ _GROUP_CHAT_TYPES = ("group", "supergroup")
 # Cached identity from a single ``bot.get_me()`` call. Resolving the bot's username and
 # name is needed for addressed-detection on every group message, but ``get_me`` is a
 # network round-trip — so we cache the result process-wide after the first successful
-# call to avoid an API hit per message. Shape: {"id": int, "username": str, "name": str}.
+# call to avoid an API hit per message. The ``name`` honors ``config.BOT_NAME`` when set,
+# otherwise falls back to the Telegram first name. Shape: {"id": int, "username": str, "name": str}.
 _bot_identity: dict | None = None
 
 
@@ -53,7 +62,8 @@ async def _get_bot_identity(message: Message) -> dict:
         _bot_identity = {
             "id": me.id,
             "username": me.username or "",
-            "name": me.first_name or "",
+            # Prefer the configured BOT_NAME; fall back to the Telegram first name.
+            "name": config.BOT_NAME.strip() or (me.first_name or ""),
         }
     except Exception as e:  # noqa: BLE001
         logger.debug(f"get_me() failed; treating messages as not-addressed: {e}")
@@ -79,6 +89,8 @@ async def _maybe_ambient_chime(
     db: AsyncIOMotorDatabase,
     user_text: str,
     sender_name: str,
+    *,
+    is_spam: bool = False,
 ) -> None:
     """Run the ambient gate on a non-addressed group message → maybe chime in.
 
@@ -107,7 +119,11 @@ async def _maybe_ambient_chime(
         member = await affinity_cache.get(db, message.chat.id, message.from_user.id)
 
         # Cheap, no-LLM trigger scan (birthdays, congrats, questions, greetings, ...).
-        triggered = scan_cheap_triggers(user_text)
+        # Spam-aware: when the message is Mass_Tag_Spam or Greeting_Burst_Spam, force the
+        # trigger off so greeting/laughter/etc. keywords can never fire the ambient gate
+        # for a spam message (Req 9.3, 10.5). The message still flows through the gate so
+        # the single-write invariant holds — it simply drops at the "no_trigger" stage.
+        triggered = scan_cheap_triggers(user_text) and not is_spam
 
         now = time.time()
         should, stage = ambient_gate.decide(
@@ -243,19 +259,60 @@ async def _handle_group_message(
     # Resolve (cached) bot identity for addressed-detection.
     identity = await _get_bot_identity(message)
 
+    # Single clock read shared by every spam/recency decision below.
+    now = time.time()
+
+    # Classify both spam shapes up front, each defended independently so a classification
+    # bug can never suppress a legitimate reply.
+    #
+    # Greeting_Burst_Spam is stateful: ``observe`` must run on EVERY group message so the
+    # time-windowed history is complete regardless of which path the message takes
+    # (Req 10.14 — error degrades to "not burst").
+    try:
+        is_burst = spam_burst_detector.observe(
+            message.chat.id, user_text, message.entities, now
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"spam burst detector failed; treating as not-burst: {e}")
+        is_burst = False
+
+    # Mass_Tag_Spam is a pure per-message scan (Req 9.6 — error degrades to "not spam").
+    try:
+        is_mass = is_mass_tag_spam(
+            user_text,
+            message.entities,
+            threshold=config.GROUP_MASS_TAG_SPAM_THRESHOLD,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"mass-tag spam scan failed; treating as not-spam: {e}")
+        is_mass = False
+
+    # Single combined flag used by every downstream decision.
+    spam = is_mass or is_burst
+
     # reply_to_bot: the message replies to one of the bot's own messages.
     reply_to_bot = False
     reply_to = getattr(message, "reply_to_message", None)
     if reply_to is not None and getattr(reply_to, "from_user", None) is not None:
         reply_to_bot = (reply_to.from_user.id == identity["id"]) and identity["id"] != 0
 
-    addressed = is_addressed(
-        text=user_text,
-        entities=message.entities,
-        reply_to_bot=reply_to_bot,
-        bot_username=identity["username"],
-        bot_name=identity["name"],
-    )
+    # Spam-aware explicit-address decision (replaces the bare is_addressed call):
+    #   - reply_to_bot → explicit: a deliberate reply-to-bot survives spam (Req 9.5, 10.7).
+    #   - elif spam → NOT explicit: a bot @mention buried in a bulk/burst message does not
+    #     count as an explicit address (Req 9.4, 10.6).
+    #   - else → existing is_addressed scan (Req 10.9).
+    if reply_to_bot:
+        addressed = True
+    elif spam:
+        addressed = False
+    else:
+        addressed = is_addressed(
+            text=user_text,
+            entities=message.entities,
+            reply_to_bot=False,
+            bot_username=identity["username"],
+            bot_name=identity["name"],
+        )
 
     if addressed:
         # Affinity-up: a mention / reply-to-bot is a routing-level engagement signal
@@ -284,9 +341,65 @@ async def _handle_group_message(
             sender_name=sender_name,
             reason="reply",
         )
+        # Count this human message AFTER the decision so it is never treated as its own
+        # intervening predecessor.
+        implicit_gate.note_human_message(message.chat.id, now)
         return
 
-    # Not addressed: hand off to the ambient gate, which both decides whether to chime in
-    # and (on the drop path only) records the message to the buffer — preserving the
-    # single-write invariant.
-    await _maybe_ambient_chime(message, db, user_text, sender_name)
+    # --- Not explicitly addressed: implicit-address detection, then ambient gate. ---
+
+    # Is the message a reply to a *non-bot* participant? Used by is_directed_at_other.
+    reply_to_other = False
+    if reply_to is not None and getattr(reply_to, "from_user", None) is not None:
+        other_id = reply_to.from_user.id
+        reply_to_other = other_id is not None and not (
+            other_id == identity["id"] and identity["id"] != 0
+        )
+
+    directed_at_other = is_directed_at_other(
+        entities=message.entities,
+        reply_to_other=reply_to_other,
+    )
+
+    # Implicit-address decision (no-LLM). Defensive: any failure degrades to "not
+    # implicit" so the message simply falls through to the ambient gate (Req 1.6).
+    try:
+        is_implicit, reason = implicit_gate.decide(
+            message.chat.id,
+            directed_at_other=directed_at_other,
+            is_spam=spam,
+            now=now,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"implicit gate decision failed; degrading to ambient: {e}")
+        is_implicit = False
+
+    if is_implicit and implicit_gate.cooldown_elapsed(message.chat.id, now):
+        # Commit the cooldown BEFORE enqueueing so it holds even if the eventual reply is
+        # empty or fails (Req 3.3), mirroring the ambient mark_chimed contract.
+        implicit_gate.mark_implicit_reply(message.chat.id, now)
+        logger.debug(f"implicit reply decision chat={message.chat.id}")
+        # Count this human message AFTER the decision (see counter-ordering note below).
+        implicit_gate.note_human_message(message.chat.id, now)
+        # Single-write invariant: the implicit-reply path is identical to the addressed
+        # path for buffer purposes — enqueue with reason="reply" and do NOT write here;
+        # the enqueue → handle_message path appends the user message (Req 3.4).
+        await user_task_manager.enqueue_message(
+            message.bot,
+            message.chat.id,
+            user_text,
+            message,
+            user_id=message.from_user.id,
+            chat_type=message.chat.type,
+            sender_name=sender_name,
+            reason="reply",
+        )
+        return
+
+    # Neither explicit nor implicit (or the implicit cooldown has not elapsed — Req 4.1):
+    # hand off to the ambient gate, which both decides whether to chime in and (on the
+    # drop path only) records the message to the buffer — preserving the single-write
+    # invariant. Counter ordering: note_human_message runs AFTER decide on every path so
+    # the current message is never counted as one of its own intervening predecessors.
+    implicit_gate.note_human_message(message.chat.id, now)
+    await _maybe_ambient_chime(message, db, user_text, sender_name, is_spam=spam)

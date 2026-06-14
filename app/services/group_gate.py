@@ -22,8 +22,10 @@ helpers are defensive: malformed input never raises — it degrades to ``False``
 
 from __future__ import annotations
 
+import difflib
 import random
 import re
+from collections import deque
 
 from app.config import config
 
@@ -33,6 +35,10 @@ from app.config import config
 
 # Telegram entity types that represent a mention of a user/bot.
 _MENTION_ENTITY_TYPES: frozenset[str] = frozenset({"mention", "text_mention"})
+
+# Fallback @mention token matcher, used when entity offsets are absent or
+# malformed so similarity comparison still excludes obvious @mentions.
+_MENTION_TOKEN_RE: re.Pattern[str] = re.compile(r"@\w+")
 
 # Cheap-trigger patterns. Each entry is a pre-compiled, case-insensitive regex.
 # Kept conservative but reasonable; word boundaries avoid matching inside words.
@@ -210,6 +216,126 @@ def _has_mention_entity(entities, text: str, handle: str) -> bool:
         if fragment.lstrip("@").lower() == handle.lower():
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Mass-tagging / spam scan helpers (Task 2.1 / 2.2): pure, no-LLM, defensive.
+# ---------------------------------------------------------------------------
+
+
+def count_distinct_mentions(text, entities) -> int:
+    """Count the number of *distinct* participants a message @mentions.
+
+    Two entity kinds contribute (Requirement 9.1):
+
+    - ``mention`` entities (``@username``): distinct by the case-folded handle
+      text sliced from ``text`` (the ``@`` stripped).
+    - ``text_mention`` entities (inline name links carrying a ``user`` object):
+      distinct by the carried ``user.id``.
+
+    Tagging the same person twice counts once. The function is tolerant of
+    ``None``/empty/malformed entities (it skips anything it cannot read) and
+    never raises — returning ``0`` on total failure.
+
+    Args:
+        text: The message text (may be empty, None, or non-str).
+        entities: Optional iterable of Telegram entity-like objects, or None.
+
+    Returns:
+        The count of distinct @mentioned participants.
+    """
+    try:
+        if not entities:
+            return 0
+        safe_text = text if isinstance(text, str) else ""
+        try:
+            iterator = iter(entities)
+        except TypeError:
+            return 0
+
+        handles: set[str] = set()
+        user_ids: set[object] = set()
+        for entity in iterator:
+            etype = getattr(entity, "type", None)
+            if etype not in _MENTION_ENTITY_TYPES:
+                continue
+            if etype == "text_mention":
+                user = getattr(entity, "user", None)
+                uid = getattr(user, "id", None)
+                if uid is not None:
+                    user_ids.add(uid)
+                continue
+            # Plain ``mention`` entity: distinct by sliced, case-folded handle.
+            offset = getattr(entity, "offset", None)
+            length = getattr(entity, "length", None)
+            if not isinstance(offset, int) or not isinstance(length, int):
+                continue
+            if offset < 0 or length <= 0:
+                continue
+            fragment = safe_text[offset:offset + length].lstrip("@").casefold()
+            if fragment:
+                handles.add(fragment)
+        return len(handles) + len(user_ids)
+    except Exception:
+        return 0
+
+
+def is_mass_tag_spam(text, entities, *, threshold: int) -> bool:
+    """Return True when a message @mentions *more than* ``threshold`` participants.
+
+    Uses a strict ``>`` comparison (Requirement 9.1: "more than a configurable
+    threshold"), so a threshold of 5 marks the 6th-and-beyond distinct mention as
+    spam. The bot's own mention is **not** excluded from the count — a bulk tag
+    that happens to sweep up the bot is exactly the spam case Requirement 9.4
+    targets.
+
+    Fully defensive: any internal error degrades to ``False`` ("not spam") so a
+    classification bug can never suppress a legitimate reply (Requirement 9.6).
+
+    Args:
+        text: The message text (may be empty, None, or non-str).
+        entities: Optional iterable of Telegram entity-like objects, or None.
+        threshold: The distinct-mention count above which the message is spam.
+
+    Returns:
+        True if the message is mass-tag spam, otherwise False.
+    """
+    try:
+        return count_distinct_mentions(text, entities) > threshold
+    except Exception:
+        return False
+
+
+def is_directed_at_other(*, entities, reply_to_other: bool) -> bool:
+    """Return True when a non-explicitly-addressed message targets another participant.
+
+    Because this predicate is only consulted for messages that already failed
+    :func:`is_addressed`, any mention entity present must reference a *non-bot*
+    participant, and any reply present must be to a non-bot message. The message
+    is therefore Directed_At_Other when either holds (Requirement 2.1):
+
+    - ``reply_to_other`` is True — the message replies to a non-bot message
+      (Requirement 2.2);
+    - the message carries a ``mention`` / ``text_mention`` entity, i.e. an
+      @mention of another user (Requirement 2.3).
+
+    Fully defensive: malformed input degrades to ``False`` (never raises).
+
+    Args:
+        entities: Optional iterable of Telegram entity-like objects, or None.
+        reply_to_other: Whether the message replies to a non-bot message.
+
+    Returns:
+        True if the message is clearly aimed at another participant.
+    """
+    try:
+        if reply_to_other:
+            return True
+        # An empty handle makes ``_has_mention_entity`` a pure "is any mention
+        # entity present?" scan, which is exactly what we need here.
+        return _has_mention_entity(entities, "", "")
+    except Exception:
+        return False
 
 
 def scan_cheap_triggers(text: str) -> bool:
@@ -487,3 +613,323 @@ class AmbientGate:
 # Module-level singleton for the application hot path. Tests should instantiate
 # ``AmbientGate()`` directly to keep state isolated and deterministic.
 ambient_gate = AmbientGate()
+
+
+# ---------------------------------------------------------------------------
+# Implicit-address gate (Task 3.1): per-chat recent-activity tracking and the
+# implicit-reply throttle. Mirrors AmbientGate's shape (bounded in-memory maps
+# keyed by chat_id, injectable now, decision/commit split, prune hook).
+# ---------------------------------------------------------------------------
+
+
+class ImplicitAddressGate:
+    """Per-chat, no-LLM gate that judges whether a non-addressed message is
+    implicitly directed at the bot.
+
+    It holds the bot's recent-activity tracking and the implicit-reply throttle.
+    Like :class:`AmbientGate` it keeps bounded in-memory per-chat state keyed by
+    ``chat_id``, takes an injectable ``now`` for deterministic tests, separates
+    the pure :meth:`decide` predicate from the :meth:`mark_implicit_reply`
+    commit, and exposes :meth:`prune` for the idle sweep.
+
+    State (all keyed by ``chat_id``):
+
+    - ``_bot_last_spoke``: ``now`` when the bot last sent a message in the chat;
+      absent means the bot has never spoken there.
+    - ``_human_since_bot``: count of human messages observed since the bot's most
+      recent message (reset to 0 by :meth:`note_bot_spoke`).
+    - ``_last_implicit_reply``: ``now`` when the bot last issued an implicit
+      direct reply (for the Implicit_Cooldown); absent means never.
+    - ``_last_seen``: most recent ``now`` observed for the chat; used by
+      :meth:`prune`.
+
+    All tuning knobs are read live from :data:`config` (Requirement 1.5/4.2/4.3).
+    """
+
+    def __init__(self) -> None:
+        self._bot_last_spoke: dict[int, float] = {}
+        self._human_since_bot: dict[int, int] = {}
+        self._last_implicit_reply: dict[int, float] = {}
+        self._last_seen: dict[int, float] = {}
+        self._last_prune: float = 0.0
+
+    def note_bot_spoke(self, chat_id: int, now: float) -> None:
+        """Record that the bot just spoke in ``chat_id`` at ``now``.
+
+        Sets the last-spoke time and resets the since-bot human counter to 0, so
+        the Bot_Recency_Window reopens from the bot's latest message
+        (Requirement 6.1).
+        """
+        self._bot_last_spoke[chat_id] = now
+        self._human_since_bot[chat_id] = 0
+        self._last_seen[chat_id] = now
+
+    def note_human_message(self, chat_id: int, now: float) -> int:
+        """Record a human message and return the since-bot counter.
+
+        The counter only advances once the bot has spoken in the chat (there is
+        no window to fill before the bot's first message — Requirement 6.2).
+        Always updates the activity clock for :meth:`prune`.
+        """
+        self._last_seen[chat_id] = now
+        if chat_id not in self._bot_last_spoke:
+            return 0
+        count = self._human_since_bot.get(chat_id, 0) + 1
+        self._human_since_bot[chat_id] = count
+        return count
+
+    def decide(
+        self,
+        chat_id: int,
+        *,
+        directed_at_other: bool,
+        is_spam: bool,
+        now: float,
+    ) -> tuple[bool, str]:
+        """Classify a non-explicitly-addressed message; return ``(is_implicit, reason)``.
+
+        Pure predicate: it does **not** mutate state and never raises (malformed
+        input degrades to ``(False, "out_of_window")``). The current message is
+        NOT yet counted among the intervening human messages — the router calls
+        :meth:`note_human_message` *after* this.
+
+        Decision order:
+
+        1. ``is_spam`` → ``(False, "spam")`` — checked first so neither spam
+           shape is ever implicit, even inside the recency window (Req 9.2, 10.4).
+        2. bot has never spoken → ``(False, "no_bot_activity")`` (Req 1.4).
+        3. ``directed_at_other`` → ``(False, "directed_at_other")`` (Req 2.1).
+        4. window check — within the Bot_Recency_Window when **both** bounds hold
+           (Req 1.2/1.3):
+           ``elapsed = now - _bot_last_spoke <= GROUP_IMPLICIT_RECENCY_SECS`` AND
+           ``intervening = _human_since_bot <= GROUP_IMPLICIT_RECENCY_MAX_MSGS``
+           → ``(True, "implicit")`` else ``(False, "out_of_window")``.
+        """
+        try:
+            if is_spam:
+                return False, "spam"
+            last_spoke = self._bot_last_spoke.get(chat_id)
+            if last_spoke is None:
+                return False, "no_bot_activity"
+            if directed_at_other:
+                return False, "directed_at_other"
+            elapsed = now - last_spoke
+            intervening = self._human_since_bot.get(chat_id, 0)
+            within = (
+                elapsed <= config.GROUP_IMPLICIT_RECENCY_SECS
+                and intervening <= config.GROUP_IMPLICIT_RECENCY_MAX_MSGS
+            )
+            if within:
+                return True, "implicit"
+            return False, "out_of_window"
+        except Exception:
+            # Never raise: degrade to the safe default (not implicit → ambient).
+            return False, "out_of_window"
+
+    def cooldown_elapsed(self, chat_id: int, now: float) -> bool:
+        """Return True when the Implicit_Cooldown has elapsed for ``chat_id``.
+
+        A chat that has never issued an implicit reply is treated as
+        cooldown-elapsed. Otherwise the cooldown holds for
+        ``GROUP_IMPLICIT_COOLDOWN_SECS`` after the last implicit reply
+        (Requirement 4.1).
+        """
+        last = self._last_implicit_reply.get(chat_id)
+        if last is None:
+            return True
+        return (now - last) >= config.GROUP_IMPLICIT_COOLDOWN_SECS
+
+    def mark_implicit_reply(self, chat_id: int, now: float) -> None:
+        """Record that an implicit direct reply was dispatched (resets the cooldown).
+
+        Called by the router *before* enqueueing so the Implicit_Cooldown holds
+        even if the eventual reply is empty/fails (Requirement 3.3).
+        """
+        self._last_implicit_reply[chat_id] = now
+        self._last_seen[chat_id] = now
+
+    def prune(self, now: float, max_idle: float | None = None) -> int:
+        """Drop stale per-chat state so the maps stay bounded (Requirement 6.4).
+
+        An entry is stale when the chat has had no activity within ``max_idle``
+        seconds. Defaults to ``10 × GROUP_IMPLICIT_RECENCY_SECS`` (mirroring the
+        idle-horizon philosophy of :meth:`AmbientGate.prune`).
+
+        Returns the number of chats pruned.
+        """
+        if max_idle is None:
+            max_idle = 10.0 * config.GROUP_IMPLICIT_RECENCY_SECS
+        cutoff = now - max_idle
+        stale = [cid for cid, seen in self._last_seen.items() if seen <= cutoff]
+        for cid in stale:
+            self._last_seen.pop(cid, None)
+            self._bot_last_spoke.pop(cid, None)
+            self._human_since_bot.pop(cid, None)
+            self._last_implicit_reply.pop(cid, None)
+        self._last_prune = now
+        return len(stale)
+
+
+# Module-level singleton for the hot path. Tests instantiate ImplicitAddressGate()
+# directly for isolated, deterministic state.
+implicit_gate = ImplicitAddressGate()
+
+
+# ---------------------------------------------------------------------------
+# Greeting-burst spam detector (Task 4.1): stateful, no-LLM. Tracks a short,
+# bounded, time-windowed history of mention-stripped message contents per chat
+# and flags near-identical greeting bursts (Requirement 10).
+# ---------------------------------------------------------------------------
+
+
+class SpamBurstDetector:
+    """Per-chat, no-LLM, **stateful** detector for time-distributed greeting bursts.
+
+    It remembers a short, bounded, time-windowed history of recent
+    mention-stripped message contents per chat and flags a message as
+    Greeting_Burst_Spam once enough near-identical messages have arrived within
+    the window. It mirrors :class:`AmbientGate`'s shape: per-chat ``dict`` state
+    keyed by ``chat_id``, injectable ``now``, a :meth:`prune` method for the idle
+    sweep, and a fully defensive contract.
+
+    State (keyed by ``chat_id``):
+
+    - ``_recent``: a :class:`collections.deque` of
+      ``(arrival_time, mention_stripped_content)`` pairs, evicted when older than
+      ``GROUP_SPAM_BURST_WINDOW_SECS`` and hard-capped at
+      ``GROUP_SPAM_BURST_TRACK_MAX`` entries.
+    - ``_last_seen``: most recent ``now`` observed for the chat; used by
+      :meth:`prune`.
+
+    Similarity uses the standard-library
+    ``difflib.SequenceMatcher(None, a, b).ratio()`` (deterministic, dependency
+    free, in ``[0, 1]``); two contents are *near-identical* when the ratio meets
+    or exceeds ``GROUP_SPAM_BURST_SIMILARITY`` (Requirement 10.2). All knobs are
+    read live from :data:`config` (Requirement 10.11/10.12).
+    """
+
+    def __init__(self) -> None:
+        self._recent: dict[int, deque[tuple[float, str]]] = {}
+        self._last_seen: dict[int, float] = {}
+        self._last_prune: float = 0.0
+
+    @staticmethod
+    def _strip_and_normalize(text, entities) -> str:
+        """Return the mention-stripped, case-folded, whitespace-collapsed content.
+
+        Removes ``mention``/``text_mention`` entity slices from ``text`` (so
+        "hi @alice" and "hi @bob" both reduce to "hi" — Requirement 10.1), then
+        applies an ``@\\w+`` regex fallback to strip any leftover @tokens (covers
+        absent/malformed entities), then casefolds and collapses whitespace.
+        """
+        safe_text = text if isinstance(text, str) else ""
+        # Collect valid entity slices to remove.
+        ranges: list[tuple[int, int]] = []
+        if entities:
+            try:
+                iterator = iter(entities)
+            except TypeError:
+                iterator = iter(())
+            for entity in iterator:
+                etype = getattr(entity, "type", None)
+                if etype not in _MENTION_ENTITY_TYPES:
+                    continue
+                offset = getattr(entity, "offset", None)
+                length = getattr(entity, "length", None)
+                if not isinstance(offset, int) or not isinstance(length, int):
+                    continue
+                if offset < 0 or length <= 0:
+                    continue
+                ranges.append((offset, offset + length))
+        if ranges:
+            ranges.sort()
+            kept: list[str] = []
+            cursor = 0
+            for start, end in ranges:
+                if start > cursor:
+                    kept.append(safe_text[cursor:start])
+                cursor = max(cursor, end)
+            if cursor < len(safe_text):
+                kept.append(safe_text[cursor:])
+            stripped = " ".join(kept)
+        else:
+            stripped = safe_text
+        # Fallback / cleanup: drop any remaining @mention tokens.
+        stripped = _MENTION_TOKEN_RE.sub(" ", stripped)
+        # Casefold + collapse whitespace.
+        return " ".join(stripped.casefold().split())
+
+    def observe(self, chat_id: int, text, entities, now: float) -> bool:
+        """Record a message and classify it as Greeting_Burst_Spam (True) or not.
+
+        Steps (no LLM — Requirement 10.10):
+
+        1. Strip @mention tokens and normalize → ``content`` (Req 10.1).
+        2. Evict this chat's history entries older than
+           ``GROUP_SPAM_BURST_WINDOW_SECS`` (now-anchored).
+        3. Count retained entries near-identical to ``content`` (ratio ≥
+           ``GROUP_SPAM_BURST_SIMILARITY`` — Req 10.2).
+        4. Append ``(now, content)`` (hard-capped at
+           ``GROUP_SPAM_BURST_TRACK_MAX``).
+        5. Including the just-added message, return ``True`` when the
+           near-identical count reaches ``GROUP_SPAM_BURST_COUNT`` (Req 10.3);
+           a lone/sub-threshold greeting returns ``False`` (Req 10.8).
+
+        Fully defensive: any internal error degrades to ``False`` ("not burst")
+        so a classification bug can never suppress a legitimate reply
+        (Requirement 10.14). Updates ``_last_seen``.
+        """
+        try:
+            self._last_seen[chat_id] = now
+            content = self._strip_and_normalize(text, entities)
+
+            window = config.GROUP_SPAM_BURST_WINDOW_SECS
+            track_max = config.GROUP_SPAM_BURST_TRACK_MAX
+            similarity = config.GROUP_SPAM_BURST_SIMILARITY
+            burst_count = config.GROUP_SPAM_BURST_COUNT
+
+            maxlen = track_max if isinstance(track_max, int) and track_max > 0 else None
+            history = self._recent.get(chat_id)
+            if history is None:
+                history = deque(maxlen=maxlen)
+                self._recent[chat_id] = history
+
+            # 2. Evict entries older than the window (now-anchored).
+            cutoff = now - window
+            retained = [(t, c) for (t, c) in history if t >= cutoff]
+
+            # 3. Count retained entries near-identical to the current content.
+            near = 0
+            for _t, prior in retained:
+                ratio = difflib.SequenceMatcher(None, content, prior).ratio()
+                if ratio >= similarity:
+                    near += 1
+
+            # 4. Append the current message and re-bound the history.
+            retained.append((now, content))
+            self._recent[chat_id] = deque(retained, maxlen=maxlen)
+
+            # 5. Including the just-added message, threshold the burst count.
+            return (near + 1) >= burst_count
+        except Exception:
+            return False
+
+    def prune(self, now: float, max_idle: float | None = None) -> int:
+        """Drop per-chat history idle beyond ``max_idle``; return count pruned (Req 10.13).
+
+        Defaults to ``10 × GROUP_SPAM_BURST_WINDOW_SECS``.
+        """
+        if max_idle is None:
+            max_idle = 10.0 * config.GROUP_SPAM_BURST_WINDOW_SECS
+        cutoff = now - max_idle
+        stale = [cid for cid, seen in self._last_seen.items() if seen <= cutoff]
+        for cid in stale:
+            self._last_seen.pop(cid, None)
+            self._recent.pop(cid, None)
+        self._last_prune = now
+        return len(stale)
+
+
+# Module-level singleton for the hot path. Tests instantiate SpamBurstDetector()
+# directly for isolated, deterministic state.
+spam_burst_detector = SpamBurstDetector()

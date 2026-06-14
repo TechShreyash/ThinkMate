@@ -4,6 +4,32 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-14] - Implicit Bot Addressing + Group Spam Protection: Implemented
+
+### Added
+- **No-LLM implicit-addressing gate** (`app/services/group_gate.py`) that lets the bot reply to follow-up group messages aimed at it without an explicit @mention, bounded by a recency window:
+  - `ImplicitAddressGate` — per-chat in-memory state (`_bot_last_spoke`, `_human_since_bot`, `_last_implicit_reply`, `_last_seen`). `decide(...)` is a pure, never-raising predicate that classifies a message as implicit only inside both the time window (`GROUP_IMPLICIT_RECENCY_SECS`) AND the intervening-message bound (`GROUP_IMPLICIT_RECENCY_MAX_MSGS`), rejecting spam, no-bot-activity, and directed-at-other first. `cooldown_elapsed`/`mark_implicit_reply` enforce the per-chat `GROUP_IMPLICIT_COOLDOWN_SECS` so the bot replies implicitly at most once per window; `note_bot_spoke`/`note_human_message` track the window; `prune` drops idle chats.
+  - **Spam protection** — `count_distinct_mentions`/`is_mass_tag_spam` (mass-tag detector, strict `>` threshold) and `SpamBurstDetector` (mention-stripped, case-folded near-duplicate greeting-burst detector using `difflib`, window + hard-cap bounded). Spam suppresses implicit classification and ambient cheap-trigger firing, while a genuine reply-to-bot still reaches the explicit path.
+  - `is_directed_at_other` keeps the bot quiet when a non-addressed message replies to or @mentions another participant.
+- **Router wiring** (`app/handlers/messages.py`): `_handle_group_message` classifies both spam shapes up front (each defensive), applies the spam-aware explicit decision, consults `implicit_gate.decide` before the ambient gate, and preserves the single-write buffer invariant and byte-for-byte DM behavior. `_maybe_ambient_chime` gains an `is_spam` guard. Recency commit point added in `user_task_manager.py` (`note_bot_spoke` on actual group send) with both new trackers added to the idle sweep.
+- **Prompt changes**: extraction prompt now normalizes all stored facts/beliefs/events to English (translating, preserving proper nouns); system prompt strengthens reply language/script matching (Hinglish vs Devanagari, judged from recent context, independent of how memories are stored).
+- **Config** (eight new env-overridable knobs): `GROUP_IMPLICIT_RECENCY_SECS`, `GROUP_IMPLICIT_RECENCY_MAX_MSGS`, `GROUP_IMPLICIT_COOLDOWN_SECS`, `GROUP_MASS_TAG_SPAM_THRESHOLD`, `GROUP_SPAM_BURST_SIMILARITY`, `GROUP_SPAM_BURST_COUNT`, `GROUP_SPAM_BURST_WINDOW_SECS`, `GROUP_SPAM_BURST_TRACK_MAX`.
+- **Tests**: Hypothesis property tests (one per correctness property) plus router/helper/config/prompt example tests — `test_group_gate_helpers`, `test_group_config_smoke`, `test_group_router_implicit`, `test_prompt_language`, `test_recency_commit`, and the `test_prop_*` burst/implicit/spam suite.
+- Docs: `docs/development/group_chat.md` and `configuration.md` updated for the implicit-addressing flow, spam protections, and new knobs.
+
+## [2026-06-14] - Group User Memory + Ops (log forwarding, per-task metrics, configurable commands): Implemented
+
+### Added
+- **Per-person group memory** — group replies now compose a per-user memory block (keyed by `sender_id`) alongside the group block (keyed by `chat_id`). `build_system_prompt` gains an optional `user_memory_text` parameter that appends a distinctly-labeled per-user section after the group block, rendering byte-for-byte identical output (and an unchanged DM path) when empty. Per-user load failures degrade to group-only without raising.
+- **Identity-safe model accessors** (`app/database/models.py`): `refresh_identity_if_changed` writes `username`/`display_name` only when absent or changed (never blanking populated values, never touching memory fields); `_ensure_memory_skeleton` replaces the blank-identity `ensure_user` fallback in `save_extracted_memories` so memory writes never alter identity fields. Group handler captures identity best-effort before routing; extractor resolves memory to identity-bearing user ids and skips unresolved participants without creating empty profiles.
+- **Centralized log forwarding to a Telegram channel**:
+  - `app/services/log_forwarder.py` — forwards the three explicit group-memory events (identity, extraction-saved, extraction-skipped) to `LOGS_CHANNEL_ID`, with source anti-recursion, a `no_forward` self-log marker, and swallow-on-failure.
+  - `app/services/error_log_sink.py` — a loguru sink forwarding `WARNING`+ records to the channel via `loop.call_soon_threadsafe`, with a re-entry guard, `no_forward` skip, level guard, and full exception swallowing so it never blocks or raises into the logging call. Registered in `main.py` alongside the console/file sinks.
+- **Per-task LLM metrics** (`app/services/metrics.py`): completed `_LLM_TYPE_PREFIX` for all six task types (including `memory_consolidation -> consolidation`, `proactive_checkin -> checkin`) and exported `LLM_TASK_TYPES` as the single ordered source of truth. `/metrics` now renders an "LLM calls by task" section (calls/success/failure/avg/max per task, `0` when absent).
+- **Environment-configurable commands**: `resolve_command_config` reads `CMD_<KEY>_NAME`/`CMD_<KEY>_ENABLED` per built-in command, validating trigger names, falling back colliding/invalid triggers to defaults, and never raising at startup. `commands.py` converted to a `register_commands(router)` registry that binds enabled commands to resolved triggers, skips disabled ones, keeps the admin gate inside `cmd_health`/`cmd_metrics`, and renders `/help` dynamically. New `LOGS_CHANNEL_ID` and `COMMANDS` config.
+- **Deployment**: added `Dockerfile`, `docker-compose.yml`, and `.dockerignore`.
+- **Tests**: Hypothesis property + example tests for identity/memory separation, group extraction, prompt composition, log forwarder, error log sink, per-task metrics, and command config/registry.
+
 ## [2026-06-14] - Phase 12 Engagement & UX: Implemented
 
 ### Added

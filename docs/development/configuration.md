@@ -12,11 +12,11 @@ Every setting below is documented in a table with four columns: **Parameter** (t
 The variables are grouped by the subsystem they govern, in the order they appear below:
 
 - **🔑 Credentials & Connection Settings** — Telegram and MongoDB connection details plus audit-log retention.
-- **🧠 LLM Server Settings** — the inference endpoint, model selection, retries, and sampling temperatures.
+- **🧠 LLM Server Settings** — the inference endpoint, model selection, and retries.
 - **📐 Memory Tuning & Budget Constraints** — buffer sizes and the character budgets that drive extraction and compression.
 - **⏱️ Queue & Message Batching** — how the bot groups rapid-fire messages and evicts idle per-user state.
 - **🛡️ Input & Output Security Guards** — rate limits and length caps that protect against spam and abuse.
-- **👤 Persona Settings** — the persona-file path and the emoji-reaction switch.
+- **👤 Persona Settings** — the persona-file path, the name the bot answers to, and the emoji-reaction switch.
 - **👥 Group Chat & Ambient Replies** — how the bot behaves in groups and supergroups.
 - **📊 Observability / ops** — in-process metrics and the admin `/health` and `/metrics` commands.
 - **🌙 Consolidation (Phase 11)** — the optional background "dreaming" pass over a user's whole profile.
@@ -48,8 +48,6 @@ The variables are grouped by the subsystem they govern, in the order they appear
 | **`LLM_STRUCTURED_MODE`** | String | `json_object` | **Purpose**: Strategy for structured (JSON) outputs.<br>**How to Tune**: Keep `json_object` for Gemini proxies, Ollama, LM Studio, OpenRouter, and most non-OpenAI backends (they reject the `additionalProperties` field that native parsing emits). Use `native_parse` only on a true OpenAI endpoint to get strict schema validation via `beta.chat.completions.parse`. |
 | **`LLM_MAX_RETRIES`** | Integer | `2` | **Purpose**: Retries for transient LLM errors (timeout, connection, 429, 5xx).<br>**How to Tune**: Raise for flaky endpoints; keep low to protect chat responsiveness. |
 | **`LLM_RETRY_BASE_DELAY_SECS`** | Float | `0.5` | **Purpose**: Base delay for exponential backoff between retries (`delay = base * 2^attempt`). |
-| **`REPLY_TEMPERATURE`** | Float | `0.7` | **Purpose**: Sampling temperature for conversational replies.<br>**How to Tune**: Lower (e.g. `0.5`) for steadier replies, higher (e.g. `0.9`) for more variety. |
-| **`EXTRACTION_TEMPERATURE`** | Float | `0.1` | **Purpose**: Sampling temperature for memory extraction/compression. Kept low for deterministic, faithful structured output. |
 
 ---
 
@@ -93,6 +91,7 @@ The variables are grouped by the subsystem they govern, in the order they appear
 | Parameter | Type | Default | Description & How to Adjust |
 | :--- | :--- | :--- | :--- |
 | **`PERSONA_FILE`** | Path | `persona.md` | **Purpose**: Path to the Markdown file defining the bot's tone and traits.<br>**How to Tune**: Default is `persona.md`. Tune if you are hosting multiple bot instances with distinct personalities. |
+| **`BOT_NAME`** | String | *(blank → uses Telegram first name)* | **Purpose**: The display name the bot answers to in group chats, matched as a standalone, case-insensitive, word-boundary token (in addition to its auto-detected `@username` mention and reply-to-bot).<br>**How to Tune**: Set to the name you want members to call the bot (e.g. `Mate`). Leave blank to fall back to the bot's Telegram first name resolved via `get_me()`. The `@username` mention is always auto-detected regardless of this value. |
 | **`ENABLE_MESSAGE_REACTIONS`** | Bool | `True` | **Purpose**: Master switch for Telegram emoji reactions on user messages. When `False`, the reaction field of the combined reply call is ignored.<br>**How to Tune**: Disable if a deployment's chats forbid reactions or to save nothing extra (reactions ride the existing reply call, so there is no LLM-cost saving — this is purely behavioral). |
 
 ---
