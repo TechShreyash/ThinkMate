@@ -136,6 +136,10 @@ async def test_dm_router_enqueues_without_identity_capture():
     message.text = "tell me something"
     message.bot = MagicMock()
     message.answer = AsyncMock()
+    message.sender_chat = None
+    message.forward_origin = None
+    message.forward_date = None
+    message.is_automatic_forward = False
     db = MagicMock()
 
     with patch.object(

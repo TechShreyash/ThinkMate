@@ -39,6 +39,10 @@ def _make_command_message(text: str) -> MagicMock:
     message.text = text
     message.bot = MagicMock()
     message.answer = AsyncMock()
+    message.sender_chat = None
+    message.forward_origin = None
+    message.forward_date = None
+    message.is_automatic_forward = False
     return message
 
 

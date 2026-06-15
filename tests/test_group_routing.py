@@ -129,6 +129,11 @@ def _make_group_message(
     message.reply_to_message = reply_to_message
     message.answer = AsyncMock()
     message.bot = MagicMock()
+    # Real-message defaults so the non-conversational guard (forward/channel) is inert.
+    message.sender_chat = None
+    message.forward_origin = None
+    message.forward_date = None
+    message.is_automatic_forward = False
     return message
 
 
@@ -245,6 +250,38 @@ async def test_channel_message_is_ignored_entirely():
         assert not mock_buffer.called, "channel update must not write the buffer"
         assert not mock_chime.called, "channel update must not run the ambient gate"
         assert not message.answer.called, "channel update must not answer"
+
+
+@pytest.mark.parametrize(
+    "attr,value",
+    [
+        ("is_automatic_forward", True),   # linked-channel post auto-copied into the group
+        ("forward_origin", object()),      # user manually forwarded something in
+        ("forward_date", 1234567890),      # legacy forwarded marker
+        ("sender_chat", object()),         # sent on behalf of a channel/group, not a person
+    ],
+)
+@pytest.mark.asyncio
+async def test_forwarded_or_channel_authored_message_is_ignored(attr, value):
+    """Forwarded / auto-forwarded / channel-authored messages are not user turns.
+
+    Regression for the bot replying to a linked-channel post that appeared in the
+    discussion group. Each of these markers must short-circuit the handler: no enqueue,
+    no buffer write, no ambient gate, no answer.
+    """
+    db = MagicMock()
+    message = _make_group_message("ThinkMate is live (Beta) ...")
+    setattr(message, attr, value)
+
+    (p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity) = _patch_deps()
+    with p_enqueue as mock_enqueue, p_buffer as mock_buffer, p_bump as mock_bump, \
+            p_get as mock_get, p_chime as mock_chime, p_identity:
+        await messages_module.handle_user_message(message, db)
+
+        assert not mock_enqueue.called, f"{attr} message must not enqueue"
+        assert not mock_buffer.called, f"{attr} message must not write the buffer"
+        assert not mock_chime.called, f"{attr} message must not run the ambient gate"
+        assert not message.answer.called, f"{attr} message must not answer"
 
 
 @pytest.mark.asyncio

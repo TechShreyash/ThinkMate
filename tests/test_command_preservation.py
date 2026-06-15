@@ -70,6 +70,10 @@ def _make_message(text, with_sender=True):
     message.text = text
     message.bot = MagicMock()
     message.answer = AsyncMock()
+    message.sender_chat = None
+    message.forward_origin = None
+    message.forward_date = None
+    message.is_automatic_forward = False
     return message
 
 

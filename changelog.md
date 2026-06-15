@@ -4,6 +4,11 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Only treat genuine user messages as conversation in groups
+
+### Fixed
+- **Bot replied to forwarded / linked-channel posts** (`app/handlers/messages.py`) — a channel post that was auto-forwarded into the linked discussion group (and manually-forwarded content) was treated as a user turn, so the bot replied to it. `handle_user_message` now ignores any message that is not a genuine member-typed message: `sender_chat` set (sent on behalf of a channel/group, incl. channel posts and anonymous admins), `is_automatic_forward` (linked-channel auto-copy into the discussion group), or a forward (`forward_origin`/`forward_date`). Each skip is logged and traced (`route=skip`). Added parametrized regression tests (`tests/test_group_routing.py`) and set real-message defaults (`sender_chat=None`, `forward_origin=None`, `forward_date=None`, `is_automatic_forward=False`) on the affected test message builders. Full suite: 460 passing.
+
 ## [2026-06-15] - Group reply correctness: speaker anchor, command replies, simpler group commands
 
 ### Fixed

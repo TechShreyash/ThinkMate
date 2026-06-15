@@ -44,6 +44,11 @@ def _make_group_message(
     message.reply_to_message = reply_to_message
     message.answer = AsyncMock()
     message.bot = MagicMock()
+    # Real-message defaults so the non-conversational guard (forward/channel) is inert.
+    message.sender_chat = None
+    message.forward_origin = None
+    message.forward_date = None
+    message.is_automatic_forward = False
     return message
 
 

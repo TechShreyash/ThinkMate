@@ -230,6 +230,27 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
 
+    # Only react to a genuine message typed by a member — never to content that merely
+    # appeared in the chat. This blocks three cases that otherwise get mistaken for a
+    # user turn (the bot was replying to a linked-channel post forwarded into the group):
+    #   - sender_chat: the message was sent on behalf of a channel/group (channel posts,
+    #     anonymous admins) rather than by a person.
+    #   - is_automatic_forward: a linked channel's post auto-copied into the discussion group.
+    #   - forwarded: content the user forwarded from elsewhere — not their own words.
+    if (
+        getattr(message, "sender_chat", None) is not None
+        or getattr(message, "is_automatic_forward", False)
+        or getattr(message, "forward_origin", None) is not None
+        or getattr(message, "forward_date", None) is not None
+    ):
+        logger.debug(
+            f"ignoring non-conversational message in chat "
+            f"{getattr(getattr(message, 'chat', None), 'id', '?')} "
+            f"(sender_chat/auto_forward/forwarded)"
+        )
+        await _trace_routing(message, "skip", "forwarded / channel-authored — not a user turn")
+        return
+
     user_text = message.text or ""
 
     # Skip bot commands: registered commands are handled by commands.py, and any
