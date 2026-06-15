@@ -49,6 +49,31 @@ class ThrottlingMiddleware(BaseMiddleware):
         if not message or not message.from_user:
             return await handler(event, data)
 
+        now = time.time()
+
+        # Resolve the message's REAL send time (``message.date``, timezone-aware UTC) for
+        # the sliding-window math. Using the send time instead of the processing time is
+        # what prevents the burst-catch-up false positive: when Telegram delivers several
+        # messages together (after downtime, lag, or a long-poll catch-up) they're all
+        # processed at the same instant, so stamping them with ``time.time()`` collapses
+        # them into one window and trips the limiter even though the user sent them
+        # seconds apart. Fall back to wall-clock ``now`` if the date is missing/odd.
+        msg_ts = now
+        msg_date = getattr(message, "date", None)
+        if msg_date is not None:
+            try:
+                msg_ts = msg_date.timestamp()
+            except Exception:  # noqa: BLE001
+                msg_ts = now
+
+        # Drop stale backlog before anything else. On (re)start or catch-up, Telegram can
+        # deliver a burst of old messages at once. A real-time chat bot must not reply to
+        # them. Compare the message's own send time to wall-clock ``now`` and ignore
+        # anything older than the staleness window (no counting, no warning, no reply).
+        if config.STALE_MESSAGE_SECS > 0 and (now - msg_ts) > config.STALE_MESSAGE_SECS:
+            metrics.incr("throttle.stale_dropped")
+            return
+
         # Never engage with other bots. Without this guard, a second bot in the same
         # chat gets counted in the sliding window like a human; when it posts faster
         # than the limit, ThinkMate fires the "Slow down!" warning, and as timestamps
@@ -58,20 +83,28 @@ class ThrottlingMiddleware(BaseMiddleware):
         if message.from_user.is_bot:
             return
 
+        # The per-user rate limit applies in EVERY chat (a single user still can't flood
+        # the bot). What differs by chat type is the user-facing warning: a public
+        # "Slow down" in a group scolds ordinary chatter and floods active groups with
+        # warnings for people the bot was never going to answer. So the warning is sent
+        # ONLY in private chats; in groups the over-limit message is dropped silently.
+        is_private = getattr(getattr(message, "chat", None), "type", None) == "private"
+
         user_id = message.from_user.id
-        now = time.time()
+        # Memory pruning uses wall-clock time (it evicts idle users), independent of the
+        # send-time window math below.
         if now - self._last_prune > config.RATE_LIMIT_WINDOW_SECS:
             self._prune(now)
-        window = [t for t in self.users[user_id] if now - t < config.RATE_LIMIT_WINDOW_SECS]
+        # Sliding window is computed against the message's send time so catch-up bursts
+        # spread across their real timestamps instead of collapsing onto one instant.
+        window = [t for t in self.users[user_id] if msg_ts - t < config.RATE_LIMIT_WINDOW_SECS]
 
         if len(window) >= config.RATE_LIMIT_MAX_REQUESTS:
-            # Warn exactly once per spam episode. Relying on ``len(window) == MAX``
-            # was fragile: as old timestamps slid out of the window the count kept
-            # falling back to the threshold and re-crossing it, re-firing the warning
-            # over and over. Track a per-user "already warned" flag instead so a
-            # continuously-spamming user sees the notice a single time; it is cleared
-            # below the moment they fall back under the limit.
-            if user_id not in self.warned:
+            # Warn at most once per spam episode, and only in a DM. The per-user "warned"
+            # flag is only ever set for private chats, so group over-limit drops stay
+            # completely silent (no public message, no re-arming flood). It is cleared
+            # below the moment the user falls back under the limit.
+            if is_private and user_id not in self.warned:
                 self.warned.add(user_id)
                 try:
                     await message.answer(
@@ -91,7 +124,7 @@ class ThrottlingMiddleware(BaseMiddleware):
                     )
                 except Exception:  # noqa: BLE001
                     pass
-            window.append(now)  # extend the window if they keep spamming
+            window.append(msg_ts)  # extend the window if they keep spamming
             self.users[user_id] = window
             metrics.incr("throttle.drops")
             return
@@ -99,7 +132,7 @@ class ThrottlingMiddleware(BaseMiddleware):
         # Under the limit: clear any prior warning flag so a future, separate burst
         # warns the user again exactly once.
         self.warned.discard(user_id)
-        window.append(now)
+        window.append(msg_ts)
         self.users[user_id] = window
         return await handler(event, data)
 

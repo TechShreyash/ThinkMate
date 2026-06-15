@@ -223,6 +223,9 @@ async def test_throttling_middleware():
         mock_message.from_user = MagicMock()
         mock_message.from_user.id = 12345
         mock_message.from_user.is_bot = False
+        mock_message.date = None
+        mock_message.chat = MagicMock()
+        mock_message.chat.type = "private"
         mock_message.answer = AsyncMock()
         
         # 1st request - should pass
@@ -269,6 +272,7 @@ async def test_throttling_middleware_ignores_other_bots():
         mock_message.from_user = MagicMock()
         mock_message.from_user.id = 99999
         mock_message.from_user.is_bot = True
+        mock_message.date = None
         mock_message.answer = AsyncMock()
 
         # Even far past the limit, a bot sender never reaches the handler and is
@@ -281,6 +285,135 @@ async def test_throttling_middleware_ignores_other_bots():
     finally:
         config.RATE_LIMIT_MAX_REQUESTS = original_requests
         config.RATE_LIMIT_WINDOW_SECS = original_window
+
+
+@pytest.mark.asyncio
+async def test_throttling_middleware_drops_stale_backlog():
+    """A message older than STALE_MESSAGE_SECS is dropped: no handler, no warning.
+
+    Regression for the startup flood where a backlog of old messages was processed at
+    once, each stamped with the current time, tripping the rate limit for many users
+    and spamming "Slow down" warnings.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.handlers.middlewares import ThrottlingMiddleware
+
+    original_stale = config.STALE_MESSAGE_SECS
+    config.STALE_MESSAGE_SECS = 60.0
+    try:
+        middleware = ThrottlingMiddleware()
+        mock_handler = AsyncMock()
+
+        # A clearly-old message (10 minutes ago) must be dropped outright.
+        stale = MagicMock(spec=Message)
+        stale.from_user = MagicMock()
+        stale.from_user.id = 555
+        stale.from_user.is_bot = False
+        stale.date = datetime.now(timezone.utc) - timedelta(minutes=10)
+        stale.answer = AsyncMock()
+
+        await middleware(mock_handler, stale, {})
+        mock_handler.assert_not_called()
+        stale.answer.assert_not_called()
+
+        # A fresh message (now) passes straight through to the handler.
+        fresh = MagicMock(spec=Message)
+        fresh.from_user = MagicMock()
+        fresh.from_user.id = 555
+        fresh.from_user.is_bot = False
+        fresh.date = datetime.now(timezone.utc)
+        fresh.chat = MagicMock()
+        fresh.chat.type = "private"
+        fresh.answer = AsyncMock()
+
+        await middleware(mock_handler, fresh, {})
+        mock_handler.assert_called_once()
+    finally:
+        config.STALE_MESSAGE_SECS = original_stale
+
+
+@pytest.mark.asyncio
+async def test_throttling_middleware_limits_groups_silently_without_warning():
+    """In a group the per-user limit still drops excess, but NO public warning is sent.
+
+    Regression for the flood where the bot publicly scolded ordinary group chatter. The
+    per-user rate limit applies everywhere (a single user can't flood the bot); only the
+    user-facing "Slow down" warning is suppressed in groups.
+    """
+    from app.handlers.middlewares import ThrottlingMiddleware
+
+    original_requests = config.RATE_LIMIT_MAX_REQUESTS
+    original_window = config.RATE_LIMIT_WINDOW_SECS
+    config.RATE_LIMIT_MAX_REQUESTS = 2
+    config.RATE_LIMIT_WINDOW_SECS = 1.0
+    try:
+        middleware = ThrottlingMiddleware()
+        mock_handler = AsyncMock()
+        mock_message = MagicMock(spec=Message)
+        mock_message.from_user = MagicMock()
+        mock_message.from_user.id = 777
+        mock_message.from_user.is_bot = False
+        mock_message.date = None
+        mock_message.chat = MagicMock()
+        mock_message.chat.type = "supergroup"
+        mock_message.answer = AsyncMock()
+
+        # 10 rapid messages from one user in a group: the first two pass, the rest are
+        # dropped silently — and crucially, no "Slow down" warning is ever posted.
+        for _ in range(10):
+            await middleware(mock_handler, mock_message, {})
+
+        assert mock_handler.call_count == 2, "per-user limit must still drop excess in groups"
+        mock_message.answer.assert_not_called()
+    finally:
+        config.RATE_LIMIT_MAX_REQUESTS = original_requests
+        config.RATE_LIMIT_WINDOW_SECS = original_window
+
+
+@pytest.mark.asyncio
+async def test_throttling_middleware_burst_catchup_no_false_positive():
+    """Messages SENT seconds apart but processed together must not trip the limiter.
+
+    Simulates a catch-up burst: three messages whose send times are 5s apart, all
+    delivered and processed at the same instant. Because the sliding window uses each
+    message's real send time (``message.date``) instead of the processing time, they stay
+    spread across the window and none is falsely throttled. Under the old processing-time
+    logic all three collapsed onto one instant and tripped the "Slow down" warning.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.handlers.middlewares import ThrottlingMiddleware
+
+    original_requests = config.RATE_LIMIT_MAX_REQUESTS
+    original_window = config.RATE_LIMIT_WINDOW_SECS
+    original_stale = config.STALE_MESSAGE_SECS
+    config.RATE_LIMIT_MAX_REQUESTS = 2
+    config.RATE_LIMIT_WINDOW_SECS = 10.0
+    config.STALE_MESSAGE_SECS = 300.0  # generous, so the spaced sends aren't dropped as stale
+    try:
+        middleware = ThrottlingMiddleware()
+        mock_handler = AsyncMock()
+        base = datetime.now(timezone.utc) - timedelta(seconds=10)
+        sent = []
+        for i in range(3):  # send times: base, base+5s, base+10s
+            msg = MagicMock(spec=Message)
+            msg.from_user = MagicMock()
+            msg.from_user.id = 333
+            msg.from_user.is_bot = False
+            msg.chat = MagicMock()
+            msg.chat.type = "private"
+            msg.date = base + timedelta(seconds=5 * i)
+            msg.answer = AsyncMock()
+            await middleware(mock_handler, msg, {})
+            sent.append(msg)
+
+        # All three reached the handler (none throttled) and no warning was ever sent.
+        assert mock_handler.call_count == 3
+        for msg in sent:
+            msg.answer.assert_not_called()
+    finally:
+        config.RATE_LIMIT_MAX_REQUESTS = original_requests
+        config.RATE_LIMIT_WINDOW_SECS = original_window
+        config.STALE_MESSAGE_SECS = original_stale
 
 
     user_id = 44444

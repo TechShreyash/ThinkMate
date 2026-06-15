@@ -53,6 +53,9 @@ async def test_throttle_drop_increments_counter():
         mock_message.from_user = MagicMock()
         mock_message.from_user.id = 12345
         mock_message.from_user.is_bot = False
+        mock_message.date = None
+        mock_message.chat = MagicMock()
+        mock_message.chat.type = "private"
         mock_message.answer = AsyncMock()
 
         # First two requests pass; the next three are dropped past the limit.

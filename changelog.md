@@ -4,6 +4,14 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Fix "Slow down" throttle false positives & group flood
+
+### Fixed
+- **Throttle no longer floods groups with public "Slow down" warnings** (`app/handlers/middlewares.py`) — `ThrottlingMiddleware` ran on every update and posted a public warning into any chat where a user crossed the per-user limit, so in active groups the bot publicly policed ordinary chatter from people it was never going to answer (one warning per fast typer, re-armed each time they dipped under and crossed again). The per-user limit still applies in every chat, but the user-facing warning is now sent **only in private chats**; in groups the over-limit message is dropped silently.
+- **Throttle uses the message's real send time, not processing time** — the sliding window now keys off `message.date` (falling back to wall-clock time if absent). Previously a burst of messages delivered together after downtime / lag / long-poll catch-up were all stamped with the same `time.time()` and collapsed into one window, tripping the limiter even though the user sent them seconds apart.
+- **Stale backlog is dropped** — messages older than the new `STALE_MESSAGE_SECS` (default 60s) are ignored entirely (no reply, no counting, no warning), so a restart/catch-up can't make the bot reply to or throttle 30-minute-old messages. New config `STALE_MESSAGE_SECS`.
+- Added tests: group silent-limit (no public warning), stale-drop, and catch-up burst with spaced send times (`tests/test_batching_and_concurrency.py`). Full suite: 463 passing.
+
 ## [2026-06-15] - Only treat genuine user messages as conversation in groups
 
 ### Fixed

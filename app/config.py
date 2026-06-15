@@ -165,6 +165,12 @@ class Config(BaseModel):
     # --- Input/Output guards ---
     RATE_LIMIT_MAX_REQUESTS: int = Field(default_factory=lambda: _env_int("RATE_LIMIT_MAX_REQUESTS", 5))
     RATE_LIMIT_WINDOW_SECS: float = Field(default_factory=lambda: _env_float("RATE_LIMIT_WINDOW_SECS", 10.0))
+    # Ignore any message older than this many seconds at processing time. On (re)start or
+    # catch-up, Telegram can deliver a burst of backlog messages at once; a real-time chat
+    # bot must not reply to stale messages, and processing them floods the throttle (every
+    # old message is stamped with the *current* time, so they all pile into one rate-limit
+    # window and trip it en masse → a wave of "Slow down" warnings at startup). 0 disables.
+    STALE_MESSAGE_SECS: float = Field(default_factory=lambda: _env_float("STALE_MESSAGE_SECS", 60.0))
     MAX_QUEUED_MESSAGES: int = Field(default_factory=lambda: _env_int("MAX_QUEUED_MESSAGES", 10))
     MAX_INPUT_CHARS: int = Field(default_factory=lambda: _env_int("MAX_INPUT_CHARS", 2500))
     MAX_RESPONSE_CHARS: int = Field(default_factory=lambda: _env_int("MAX_RESPONSE_CHARS", 2000))
