@@ -21,6 +21,11 @@ class ThrottlingMiddleware(BaseMiddleware):
         # back under the limit, so a later, separate burst warns them once again.
         self.warned: set[int] = set()
         self._last_prune = 0.0
+        # Wall-clock time this middleware (≈ the process) started. The staleness guard is
+        # anchored to this so it ONLY drops backlog that predates startup — it can never
+        # drop a steady-state message, even when a busy bot is processing seconds or
+        # minutes behind. This is what keeps a high-throughput bot from silencing itself.
+        self._started_at = time.time()
 
     def _prune(self, now: float):
         """Drop entries for users with no activity in the window (bounds memory)."""
@@ -66,11 +71,14 @@ class ThrottlingMiddleware(BaseMiddleware):
             except Exception:  # noqa: BLE001
                 msg_ts = now
 
-        # Drop stale backlog before anything else. On (re)start or catch-up, Telegram can
-        # deliver a burst of old messages at once. A real-time chat bot must not reply to
-        # them. Compare the message's own send time to wall-clock ``now`` and ignore
-        # anything older than the staleness window (no counting, no warning, no reply).
-        if config.STALE_MESSAGE_SECS > 0 and (now - msg_ts) > config.STALE_MESSAGE_SECS:
+        # Drop pre-startup backlog only. On (re)start, Telegram can deliver a burst of
+        # messages that piled up while the bot was down (drop_pending_updates should catch
+        # these; this is a safety net). We drop a message only when its send time predates
+        # the process start by more than STALE_MESSAGE_SECS. Crucially this is anchored to
+        # STARTUP, not a rolling "now - age": a message sent while the bot is running is
+        # ALWAYS processed, even if the bot is lagging minutes behind under heavy load — so
+        # a high-throughput bot can never silence itself by marking live traffic "stale".
+        if config.STALE_MESSAGE_SECS > 0 and msg_ts < self._started_at - config.STALE_MESSAGE_SECS:
             metrics.incr("throttle.stale_dropped")
             return
 

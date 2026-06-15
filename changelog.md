@@ -4,6 +4,11 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Stale guard anchored to startup (fix bot going silent under load)
+
+### Fixed
+- **Bot stopped replying under high load** (`app/handlers/middlewares.py`, `app/config.py`) — the `STALE_MESSAGE_SECS` guard compared each message against a rolling "now − send time", so on a busy/high-throughput bot whose event loop lagged more than the threshold (default 60s), *every* live message looked stale and was dropped → total silence. The guard is now anchored to the process start time: it only drops backlog that predates startup by more than `STALE_MESSAGE_SECS`, and a message sent while the bot is running is always processed regardless of how far behind the bot is. `ThrottlingMiddleware` records `_started_at` at construction. Full suite: 463 passing.
+
 ## [2026-06-15] - Fix "Slow down" throttle false positives & group flood
 
 ### Fixed
