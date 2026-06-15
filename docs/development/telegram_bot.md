@@ -219,8 +219,42 @@ if reaction:
     except Exception as react_err:
         logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
 
-await last_message.answer(reply_text)
+# In groups the reply threads under the triggering message (reply); DMs use answer.
+await last_message.reply(reply_text)
 ```
+
+---
+
+### 3. Membership Handler (`app/handlers/membership.py`)
+
+When the bot is **added to a group**, it posts a one-time self-introduction explaining who it is and
+how to talk to it (mention or reply), plus a pointer to DM the start command for the full guide.
+
+It listens for the `my_chat_member` update rather than the `new_chat_members` service message,
+because `my_chat_member` always concerns the bot itself and is delivered **even when Telegram group
+privacy mode is ON** (which otherwise suppresses the service message). The
+[`ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION)`](../../app/handlers/membership.py)
+fires only on a genuine join (left/kicked → member/administrator), and the handler ignores non-group
+chats so a user pressing **start** in a DM never triggers the group intro.
+
+```python
+from aiogram import Router, html
+from aiogram.filters import ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.types import ChatMemberUpdated
+
+router = Router(name="membership")
+
+@router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
+async def on_added_to_group(event: ChatMemberUpdated) -> None:
+    if event.chat.type not in ("group", "supergroup"):
+        return
+    await event.bot.send_message(event.chat.id, await _intro_text(event.bot), parse_mode="HTML")
+```
+
+The membership router is included in `main_router` alongside the command and message routers
+(`app/handlers/__init__.py`). Because `main.py` starts polling with
+`allowed_updates=dp.resolve_used_update_types()`, registering a `my_chat_member` handler is enough
+for Telegram to start delivering those updates — no manual `allowed_updates` change is needed.
 
 ---
 
@@ -438,6 +472,12 @@ Telegram's native **"/" command menu** is intentionally kept minimal: at startup
 polling begins), which publishes **only the entry-point command** (`CMD_START_NAME`, e.g.
 `/chatbot`) in the default scope (`BotCommandScopeDefault`). Every other command is discoverable
 through the in-chat guide opened from `/start`, so the menu stays clean and uncluttered.
+
+Because Telegram stores command menus **per scope**, `setup_bot_commands` also calls
+`delete_my_commands(scope=BotCommandScopeAllGroupChats())` at startup. Earlier versions published a
+group-scoped menu (the `quiet`/`chatty`/`group*` toggles), and setting only the default scope would
+leave that stale menu showing inside group chats. Clearing the group scope guarantees that the
+single entry-point command is the only thing surfaced anywhere.
 
 This startup publishing can be enabled or disabled via the **`TELEGRAM_PUBLISH_COMMANDS`** environment variable (defaults to `True`). When disabled, the bot skips registering commands with Telegram entirely.
 

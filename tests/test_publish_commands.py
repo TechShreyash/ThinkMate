@@ -3,7 +3,7 @@ import pytest
 import os
 import importlib
 from unittest.mock import AsyncMock, MagicMock, patch
-from aiogram.types import BotCommandScopeDefault
+from aiogram.types import BotCommandScopeAllGroupChats, BotCommandScopeDefault
 
 from app.config import config
 from app.handlers.commands import setup_bot_commands
@@ -39,6 +39,7 @@ async def test_setup_bot_commands_when_enabled():
     """When TELEGRAM_PUBLISH_COMMANDS is True, set_my_commands is called."""
     bot = MagicMock()
     bot.set_my_commands = AsyncMock()
+    bot.delete_my_commands = AsyncMock()
 
     original = config.TELEGRAM_PUBLISH_COMMANDS
     config.TELEGRAM_PUBLISH_COMMANDS = True
@@ -50,6 +51,11 @@ async def test_setup_bot_commands_when_enabled():
     bot.set_my_commands.assert_called_once()
     args, kwargs = bot.set_my_commands.call_args
     assert isinstance(kwargs.get("scope"), BotCommandScopeDefault)
+
+    # The stale group-scoped menu from earlier versions must be cleared.
+    bot.delete_my_commands.assert_called_once()
+    _, del_kwargs = bot.delete_my_commands.call_args
+    assert isinstance(del_kwargs.get("scope"), BotCommandScopeAllGroupChats)
 
 @pytest.mark.asyncio
 async def test_setup_bot_commands_when_disabled():

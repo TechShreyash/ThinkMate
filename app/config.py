@@ -200,6 +200,12 @@ class Config(BaseModel):
     # still run). Cheap single-document upsert, so on by default.
     METRICS_PERSIST_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_PERSIST_INTERVAL_SECS", 300.0))
     LOGS_CHANNEL_ID: int | None = Field(default_factory=lambda: _env_int_or_none("LOGS_CHANNEL_ID"))
+    # Early-phase verbose tracing: when True, per-message routing decisions (group
+    # addressed/implicit/ambient/spam outcomes, throttling, blocked-user skips) are
+    # forwarded to the Logs_Channel so internal behavior can be verified live. Noisy by
+    # design — intended for early phase; turn off once behavior is trusted. Requires
+    # LOGS_CHANNEL_ID to be set (otherwise it is a no-op).
+    FORWARD_DIAGNOSTICS: bool = Field(default_factory=lambda: _env_bool("FORWARD_DIAGNOSTICS", False))
 
     # --- Configurable commands (trigger name + enabled state per built-in command) ---
     # Resolved once at import; a plain dict {key: (trigger, enabled)}.

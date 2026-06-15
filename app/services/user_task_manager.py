@@ -13,16 +13,37 @@ import time
 from loguru import logger
 from aiogram import Bot
 from aiogram.types import Message, ReactionTypeEmoji
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from app.config import config
 from app.database.connection import db_session
+from app.database import models
 from app.services.chat_manager import handle_message
 from app.services.metrics import metrics
 from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector
 from app.services.affinity import affinity_cache
+from app.services import log_forwarder
 
 # Telegram chat.type values that map to the multi-party group path.
 _GROUP_CHAT_TYPES = ("group", "supergroup")
 _VALID_CHAT_TYPES = ("private", "group", "supergroup", "channel")
+
+
+async def _reply_to(message: Message, text: str):
+    """Send ``text`` as a Telegram *reply* to ``message`` (threaded under it).
+
+    Using ``reply`` instead of ``answer`` makes every bot response visibly attach
+    to the user message that triggered it — essential in busy group chats where a
+    bare ``answer`` looks like an unrelated standalone post. Falls back to a plain
+    ``answer`` if the original message can no longer be replied to (e.g. it was
+    deleted), so delivery still succeeds. ``TelegramForbiddenError`` (the user
+    blocked the bot) is intentionally NOT caught here — it propagates to the
+    caller's blocked-user handling.
+    """
+    try:
+        return await message.reply(text)
+    except TelegramBadRequest:
+        # The message to reply to is gone / cannot be replied to — send standalone.
+        return await message.answer(text)
 
 
 class UserState:
@@ -285,7 +306,14 @@ class UserTaskManager:
                                     )
                                     reply_text = "Sorry, I lost my train of thought there — could you say that again?"
 
-                                await last_message.answer(reply_text)
+                                # In groups, reply to the triggering message so the
+                                # response visibly threads under it (a bare answer looks
+                                # like an unrelated standalone post in a busy chat). DMs
+                                # keep the plain answer — threading is needless there.
+                                if chat_type in _GROUP_CHAT_TYPES:
+                                    await _reply_to(last_message, reply_text)
+                                else:
+                                    await last_message.answer(reply_text)
 
                                 # Record that the bot genuinely spoke in this group so
                                 # the implicit-address recency window reopens from now
@@ -295,11 +323,42 @@ class UserTaskManager:
                                         implicit_gate.note_bot_spoke(chat_id, time.time())
                                     except Exception as track_err:  # noqa: BLE001
                                         logger.debug(f"note_bot_spoke failed for chat {chat_id}: {track_err}")
+                        except TelegramForbiddenError as e:
+                            # The user blocked the bot (or it was kicked/restricted).
+                            # Sending an apology would just fail again with the same
+                            # Forbidden error, so don't try — log quietly and, for a DM
+                            # (chat_id == sender_id), auto-disable proactive check-ins so
+                            # we stop nagging a user who can no longer receive messages.
+                            logger.info(
+                                f"Bot blocked/forbidden for sender {sender_id} in chat {chat_id}; "
+                                f"skipping reply: {e}"
+                            )
+                            try:
+                                await log_forwarder.diagnostic(
+                                    last_message.bot,
+                                    chat_id,
+                                    f"🚫 blocked: sender={sender_id} chat={chat_id} "
+                                    f"— reply skipped"
+                                    + (", proactive disabled" if chat_type == "private" else ""),
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                            if chat_type == "private":
+                                try:
+                                    await models.set_proactive_enabled(db, sender_id, False)
+                                except Exception as disable_err:  # noqa: BLE001
+                                    logger.debug(
+                                        f"Failed to disable proactive for blocked user {sender_id}: {disable_err}"
+                                    )
                         except Exception as e:  # noqa: BLE001
                             # A failure for one sender group must not abort the rest
                             # of the batch — log, apologize to that group, continue.
                             logger.error(f"Error processing sender {sender_id} batch for chat {chat_id}: {e}")
-                            await last_message.answer("Sorry, I ran into a problem just now — mind trying again?")
+                            try:
+                                await _reply_to(last_message, "Sorry, I ran into a problem just now — mind trying again?")
+                            except TelegramForbiddenError:
+                                # Blocked between generation and the apology — nothing to do.
+                                logger.info(f"Apology to sender {sender_id} skipped; bot is blocked.")
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Error processing batch for chat {chat_id}: {e}")
             finally:

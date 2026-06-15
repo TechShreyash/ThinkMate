@@ -17,6 +17,7 @@ from aiogram import F, Router, html
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllGroupChats,
     BotCommandScopeDefault,
     CallbackQuery,
     InlineKeyboardButton,
@@ -874,13 +875,21 @@ async def setup_bot_commands(bot) -> None:
     Every other command is intentionally kept out of the published menu — users discover
     the rest through the in-chat guide opened from /start. Best-effort: a failure is
     logged and never blocks startup.
+
+    Also clears any group-scoped menu published by earlier versions: Telegram stores
+    command menus per scope, so setting the default scope alone leaves a stale
+    ``BotCommandScopeAllGroupChats`` menu visible in groups. Deleting it ensures only the
+    entry-point command remains anywhere.
     """
     if not config.TELEGRAM_PUBLISH_COMMANDS:
         logger.info("Telegram command menu publishing is disabled by config.")
         return
     try:
         await bot.set_my_commands(_menu_for(_MENU_DM_KEYS), scope=BotCommandScopeDefault())
-        logger.info("Published Telegram command menu (start only).")
+        # Drop any group-scoped menu left over from previous versions so groups don't show
+        # stale toggle commands; the default scope then applies everywhere.
+        await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
+        logger.info("Published Telegram command menu (start only); cleared group scope.")
     except Exception as exc:  # noqa: BLE001 - cosmetic; never block startup
         logger.warning(f"set_my_commands failed (command menu not published): {exc}")
 

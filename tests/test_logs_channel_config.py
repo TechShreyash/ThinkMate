@@ -82,3 +82,47 @@ def test_error_log_sink_noop_when_channel_unset():
 
     # Loop should not have been called because sink returns early
     loop.call_soon_threadsafe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_respects_forward_flag():
+    """log_forwarder.diagnostic forwards only when FORWARD_DIAGNOSTICS is enabled."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    orig_channel = config.LOGS_CHANNEL_ID
+    orig_flag = config.FORWARD_DIAGNOSTICS
+    config.LOGS_CHANNEL_ID = -100555  # channel set so send() itself is not a no-op
+    try:
+        # Flag OFF -> no forward, even with a channel configured.
+        config.FORWARD_DIAGNOSTICS = False
+        await log_forwarder.diagnostic(bot, source_chat_id=123, text="route trace")
+        bot.send_message.assert_not_called()
+
+        # Flag ON -> forwarded to the channel.
+        config.FORWARD_DIAGNOSTICS = True
+        await log_forwarder.diagnostic(bot, source_chat_id=123, text="route trace")
+        bot.send_message.assert_called_once()
+        assert bot.send_message.call_args.kwargs["chat_id"] == -100555
+    finally:
+        config.LOGS_CHANNEL_ID = orig_channel
+        config.FORWARD_DIAGNOSTICS = orig_flag
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_noop_when_channel_unset_even_if_flag_on():
+    """diagnostic stays a no-op when the channel is unset, regardless of the flag."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    orig_channel = config.LOGS_CHANNEL_ID
+    orig_flag = config.FORWARD_DIAGNOSTICS
+    config.LOGS_CHANNEL_ID = None
+    config.FORWARD_DIAGNOSTICS = True
+    try:
+        await log_forwarder.diagnostic(bot, source_chat_id=123, text="route trace")
+    finally:
+        config.LOGS_CHANNEL_ID = orig_channel
+        config.FORWARD_DIAGNOSTICS = orig_flag
+
+    bot.send_message.assert_not_called()

@@ -27,6 +27,7 @@ def _make_group_message(chat_id: int) -> MagicMock:
     msg.chat.id = chat_id
     msg.chat.type = "group"
     msg.answer = AsyncMock()
+    msg.reply = AsyncMock()
     msg.react = AsyncMock()
     return msg
 
@@ -56,8 +57,9 @@ async def test_sent_group_reply_calls_note_bot_spoke():
             )
             await asyncio.sleep(0.25)
 
-            # The reply was actually sent...
-            message.answer.assert_called_once_with("Hey there!")
+            # The reply was actually sent as a Telegram reply (threaded under the
+            # triggering message in groups)...
+            message.reply.assert_called_once_with("Hey there!")
             # ...so the bot's recent activity is recorded for the chat.
             mock_note.assert_called_once()
             assert mock_note.call_args[0][0] == chat_id
@@ -93,6 +95,7 @@ async def test_suppressed_ambient_empty_reply_does_not_call_note_bot_spoke():
 
             # Nothing was sent...
             message.answer.assert_not_called()
+            message.reply.assert_not_called()
             # ...so the bot did not "speak" and note_bot_spoke is never called.
             mock_note.assert_not_called()
     finally:

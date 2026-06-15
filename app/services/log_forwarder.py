@@ -41,6 +41,18 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
         _log.debug(f"log_forwarder send failed (discarded): {e}")
 
 
+async def diagnostic(bot, source_chat_id: int | None, text: str) -> None:
+    """Forward an early-phase *diagnostic* trace to the Logs_Channel.
+
+    A no-op unless ``FORWARD_DIAGNOSTICS`` is enabled (and a channel/bot exist), so the
+    verbose per-message routing traces can be switched off in one place once the bot's
+    behavior is trusted. Shares :func:`send`'s best-effort, never-raise contract.
+    """
+    if not config.FORWARD_DIAGNOSTICS:
+        return
+    await send(bot, source_chat_id, text)
+
+
 async def send_document(
     bot,
     source_chat_id: int | None,

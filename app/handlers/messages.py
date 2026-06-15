@@ -85,6 +85,33 @@ def _display_name(message: Message) -> str:
     )
 
 
+def _truncate(text: str, limit: int = 80) -> str:
+    """Single-line, length-bounded preview of a message for trace logs."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+async def _trace_routing(message: Message, decision: str, detail: str = "") -> None:
+    """Emit a group routing-decision trace to the console (DEBUG) and, when
+    ``FORWARD_DIAGNOSTICS`` is on, to the Logs_Channel.
+
+    Gives live visibility into WHY the bot did or did not respond to each group
+    message — the core early-phase debugging signal. Best-effort: never raises.
+    """
+    sender = _display_name(message) or "?"
+    preview = _truncate(getattr(message, "text", "") or "")
+    line = (
+        f"🧭 route={decision} chat={getattr(getattr(message, 'chat', None), 'id', '?')} "
+        f"sender={getattr(message.from_user, 'id', '?')}({sender})"
+        f"{(' ' + detail) if detail else ''} | “{preview}”"
+    )
+    logger.debug(line)
+    try:
+        await log_forwarder.diagnostic(message.bot, getattr(getattr(message, "chat", None), "id", None), line)
+    except Exception:  # noqa: BLE001 - tracing must never affect routing
+        pass
+
+
 async def _maybe_ambient_chime(
     message: Message,
     db: AsyncIOMotorDatabase,
@@ -174,10 +201,12 @@ async def _maybe_ambient_chime(
             sender_name=sender_name,
         )
         logger.debug(f"ambient drop stage={stage} chat={message.chat.id}")
+        await _trace_routing(message, "ambient→drop", f"stage={stage}")
         return
 
     # Passed the funnel — log the chime decision before dispatching (Req 7.2).
     logger.debug(f"ambient chime stage={stage} chat={message.chat.id}")
+    await _trace_routing(message, "ambient→chime", f"stage={stage} affinity={member['affinity']:.2f}")
 
     # Reset the cooldown NOW so a failed/empty reply still holds the window (Req 3.7).
     # Do NOT write the buffer here: this message will be enqueued and the
@@ -274,6 +303,7 @@ async def _handle_group_message(
     # "enabled" so a transient DB hiccup can never silently mute the bot.
     try:
         if not await models.is_group_enabled(db, message.chat.id):
+            await _trace_routing(message, "group-disabled", "kill switch on (/groupoff)")
             return
     except Exception as e:  # noqa: BLE001
         logger.debug(f"group-enabled check failed; treating as enabled: {e}")
@@ -350,6 +380,11 @@ async def _handle_group_message(
         addressed = True
     elif spam:
         addressed = False
+        await _trace_routing(
+            message,
+            "spam-detected",
+            f"mass_tag={is_mass} burst={is_burst} (mention ignored)",
+        )
     else:
         addressed = is_addressed(
             text=user_text,
@@ -376,6 +411,11 @@ async def _handle_group_message(
 
         # Single-write invariant: do NOT buffer here — the enqueue → handle_message path
         # appends the user message, mirroring DM behavior.
+        await _trace_routing(
+            message,
+            "addressed→reply",
+            f"via={'reply_to_bot' if reply_to_bot else 'mention/name'}",
+        )
         await user_task_manager.enqueue_message(
             message.bot,
             message.chat.id,
@@ -418,12 +458,14 @@ async def _handle_group_message(
     except Exception as e:  # noqa: BLE001
         logger.debug(f"implicit gate decision failed; degrading to ambient: {e}")
         is_implicit = False
+        reason = "error"
 
     if is_implicit and implicit_gate.cooldown_elapsed(message.chat.id, now):
         # Commit the cooldown BEFORE enqueueing so it holds even if the eventual reply is
         # empty or fails (Req 3.3), mirroring the ambient mark_chimed contract.
         implicit_gate.mark_implicit_reply(message.chat.id, now)
         logger.debug(f"implicit reply decision chat={message.chat.id}")
+        await _trace_routing(message, "implicit→reply", "within recency window")
         # Count this human message AFTER the decision (see counter-ordering note below).
         implicit_gate.note_human_message(message.chat.id, now)
         # Single-write invariant: the implicit-reply path is identical to the addressed
@@ -440,6 +482,18 @@ async def _handle_group_message(
             reason="reply",
         )
         return
+
+    # Diagnostic: surface WHY no direct (implicit) reply happened, so silent-bot
+    # reports are debuggable. "out_of_window" = recency window closed (too old, or
+    # more than GROUP_IMPLICIT_RECENCY_MAX_MSGS human messages since the bot last
+    # spoke); "no_bot_activity" = the bot has not spoken in this chat yet;
+    # "cooldown" here means implicit fired but GROUP_IMPLICIT_COOLDOWN_SECS holds.
+    if is_implicit:
+        logger.debug(f"implicit reply suppressed by cooldown chat={message.chat.id}")
+        await _trace_routing(message, "implicit→cooldown", "→ ambient gate")
+    else:
+        logger.debug(f"implicit drop reason={reason} chat={message.chat.id}")
+        await _trace_routing(message, "not-implicit", f"reason={reason} → ambient gate")
 
     # Neither explicit nor implicit (or the implicit cooldown has not elapsed — Req 4.1):
     # hand off to the ambient gate, which both decides whether to chime in and (on the

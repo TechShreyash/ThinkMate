@@ -222,6 +222,7 @@ async def test_throttling_middleware():
         mock_message = MagicMock(spec=Message)
         mock_message.from_user = MagicMock()
         mock_message.from_user.id = 12345
+        mock_message.from_user.is_bot = False
         mock_message.answer = AsyncMock()
         
         # 1st request - should pass
@@ -246,8 +247,42 @@ async def test_throttling_middleware():
         config.RATE_LIMIT_MAX_REQUESTS = original_requests
         config.RATE_LIMIT_WINDOW_SECS = original_window
 
+
 @pytest.mark.asyncio
-async def test_user_task_manager_queue_limit_guard(temp_db):
+async def test_throttling_middleware_ignores_other_bots():
+    """Messages authored by other bots are dropped entirely: no handler, no warning.
+
+    Regression guard for the bot-to-bot loop where a second bot in the same chat got
+    rate-limited like a human and flooded the chat with repeated "Slow down!" warnings.
+    """
+    from app.handlers.middlewares import ThrottlingMiddleware
+
+    original_requests = config.RATE_LIMIT_MAX_REQUESTS
+    original_window = config.RATE_LIMIT_WINDOW_SECS
+    config.RATE_LIMIT_MAX_REQUESTS = 2
+    config.RATE_LIMIT_WINDOW_SECS = 1.0
+
+    try:
+        middleware = ThrottlingMiddleware()
+        mock_handler = AsyncMock()
+        mock_message = MagicMock(spec=Message)
+        mock_message.from_user = MagicMock()
+        mock_message.from_user.id = 99999
+        mock_message.from_user.is_bot = True
+        mock_message.answer = AsyncMock()
+
+        # Even far past the limit, a bot sender never reaches the handler and is
+        # never warned.
+        for _ in range(10):
+            await middleware(mock_handler, mock_message, {})
+
+        mock_handler.assert_not_called()
+        mock_message.answer.assert_not_called()
+    finally:
+        config.RATE_LIMIT_MAX_REQUESTS = original_requests
+        config.RATE_LIMIT_WINDOW_SECS = original_window
+
+
     user_id = 44444
     
     # Save original configs

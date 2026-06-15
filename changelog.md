@@ -4,6 +4,26 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Group bot hardening: bot-loop fix, reply threading, blocked-user handling, join intro & diagnostics
+
+### Added
+- **Group self-introduction on join** (`app/handlers/membership.py`, new) — a `my_chat_member` handler (`ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION)`) posts a one-time intro when the bot is added to a group/supergroup, explaining who it is, how to address it (mention/reply), and pointing to the DM start command. Uses `my_chat_member` (not the `new_chat_members` service message) so it fires even with Telegram group privacy ON. Registered in `app/handlers/__init__.py` as `membership_router`; `allowed_updates` picks it up automatically via `resolve_used_update_types()`.
+- **Live routing diagnostics to the Logs_Channel** — new `FORWARD_DIAGNOSTICS` config flag (`app/config.py`, default `False`) and `log_forwarder.diagnostic()` helper that forwards per-message routing decisions only when enabled. `app/handlers/messages.py` now emits `🧭 route=…` traces at every terminal group decision (addressed→reply, implicit→reply/cooldown, not-implicit with drop reason, ambient chime/drop stage, spam-detected, group-disabled); throttling and blocked-user events are traced too. Added to `.env.example` and the deployment env.
+
+### Fixed
+- **Bot-to-bot loop / "Slow down!" spam** (`app/handlers/middlewares.py`) — `ThrottlingMiddleware` now drops updates authored by other bots (`from_user.is_bot`) entirely, so two bots in one chat no longer throttle and reply to each other. The warn-once logic was rewritten to track a per-user `warned` set instead of the fragile `len(window) == MAX` equality (which re-fired the warning repeatedly as timestamps slid out of the window); a spamming user now sees the notice exactly once per episode.
+- **Bot now replies (threads) under the user's message in groups** (`app/services/user_task_manager.py`) — group responses use a new `_reply_to()` helper (`message.reply`, falling back to `answer` if the original was deleted) instead of a standalone `answer`, so replies visibly attach to the triggering message. DMs keep plain `answer`.
+- **Blocked-user handling** (`app/services/user_task_manager.py`) — a `TelegramForbiddenError` (user blocked the bot) is now caught specifically: the futile apology send is skipped, the event is logged at INFO, and for DMs proactive check-ins are auto-disabled. Eliminates the double ERROR log that previously appeared per blocked user.
+- **Implicit-recency observability** (`app/handlers/messages.py`) — the handler now logs WHY an implicit reply was skipped (`out_of_window`, `no_bot_activity`, `cooldown`, …), making silent-bot reports debuggable. (Note: implicit/ambient replies still require Telegram group privacy mode to be OFF so the bot receives non-addressed messages.)
+
+### Tests
+- `tests/test_membership_intro.py` (intro on group join, no intro in DM, send-failure swallowed), `tests/test_logs_channel_config.py` (diagnostic flag gating), bot-drop throttle case in `tests/test_batching_and_concurrency.py`, and updated `tests/test_recency_commit.py`/throttle/metrics tests for the reply-threading and `is_bot` changes. Full suite: 446 passing.
+
+## [2026-06-15] - Clear stale group-scoped command menu
+
+### Fixed
+- **Stale group "/" menu cleared** (`app/handlers/commands.py`) — earlier versions published a group-scoped command menu via `BotCommandScopeAllGroupChats` (`quiet`, `chatty`, and the `group*` toggles). Because Telegram stores menus per scope, switching to a single default-scope entry left that old group menu visible inside group chats. `setup_bot_commands` now also calls `delete_my_commands(scope=BotCommandScopeAllGroupChats())` (re-adding the `BotCommandScopeAllGroupChats` import), so only the entry-point command (`CMD_START_NAME`) is surfaced anywhere. Updated `test_publish_commands.py` to assert the group scope is deleted, and refreshed `docs/development/telegram_bot.md`.
+
 ## [2026-06-15] - Command UX Consolidation (single entry point + on/off/status toggles)
 
 ### Changed
