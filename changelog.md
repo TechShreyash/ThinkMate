@@ -4,6 +4,19 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Group reply correctness: speaker anchor, command replies, simpler group commands
+
+### Fixed
+- **Wrong-name replies in groups** (`app/prompts/system_prompt.py`, `app/services/chat_manager.py`) — the group system prompt never told the model who was speaking *now*; it only inferred the name from the "Name: text" transcript, so it routinely greeted the wrong participant (e.g. answering a new sender as "Rahul"). `build_system_prompt` gained a `speaker_name` parameter that renders an always-present "🗣️ WHO YOU ARE REPLYING TO" anchor for groups — including for brand-new senders with no stored memories (the per-user memory block, which only renders when memories exist, previously left no name anchor at all). `handle_message` passes the triggering sender's name.
+- **`/groupquiet` `/groupchatty` `/groupnormal` silently did nothing** (`app/handlers/commands.py`) — the shared `_set_group_mode` function had lost its `def` line in an earlier edit, so the body was dangling inside `cmd_groupbot` and the three wrappers called an undefined name (raising `NameError`, swallowed by aiogram → no response). Fixed while consolidating (below).
+- **Command responses now reply to the user in groups** — every command handler now sends via a new `_reply()` helper that threads the response under the user's command in groups (plain `answer` in DMs, with a deleted-message fallback), matching the conversational reply behavior. Previously commands posted standalone messages.
+
+### Changed
+- **Simpler group commands** — the three near-identical `/groupquiet`, `/groupchatty`, `/groupnormal` commands were consolidated into a single `/groupmode quiet|chatty|normal` (bare `/groupmode` reports the current setting). `/groupbot on|off` (kill switch) and the personal `/quiet` `/chatty` are unchanged. Updated `_BUILTIN_COMMANDS` (`app/config.py`), the `_COMMANDS` registry, the help list and the groups guide screen, `.env.example` KEYS, and docs (`configuration.md`, `group_chat.md`, `database.md`, `telegram_bot.md`).
+
+### Tests
+- Added `build_system_prompt` speaker-anchor tests (`tests/test_engagement_units.py`), `/groupmode` set/normal/status/DM tests and reply-in-group assertions (`tests/test_affinity_and_commands.py`), and updated `tests/test_health_and_command.py` for group reply threading. Full suite: 453 passing.
+
 ## [2026-06-15] - Group bot hardening: bot-loop fix, reply threading, blocked-user handling, join intro & diagnostics
 
 ### Added

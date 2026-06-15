@@ -871,7 +871,7 @@ async def get_group_mode(db: AsyncIOMotorDatabase, chat_id: int) -> str:
 
 
 async def set_group_mode(db: AsyncIOMotorDatabase, chat_id: int, mode: str):
-    """Upsert the per-chat group-wide ambient mode (the ``/groupquiet`` etc. commands).
+    """Upsert the per-chat group-wide ambient mode (the ``/groupmode`` command).
 
     An invalid ``mode`` is coerced to ``"auto"`` so the stored value is always valid.
     """

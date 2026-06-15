@@ -26,11 +26,50 @@ def build_system_prompt(
     active_memory_text: str,
     time_context: str = "",
     user_memory_text: str = "",
+    speaker_name: str = "",
+    is_group: bool = False,
+    bot_name: str = "",
 ) -> str:
     base = DEFAULT_SYSTEM_PROMPT_TEMPLATE.format(
         persona_content=persona_content,
         active_memory_text=active_memory_text or "No memories recorded yet. Start chatting to build a profile!",
     )
+    # Group-only multi-party section: explain the named-transcript format and demand
+    # correct per-speaker attribution. Without this the model can mistake the "Name:"
+    # prefix for message text, merge different speakers, or wrongly attribute a fact/
+    # opinion to whoever spoke most recently. Rendered for every group message.
+    group_block = ""
+    if is_group:
+        me = (bot_name or "").strip() or "you"
+        group_block = (
+            "\n---\n\n## 👥 GROUP CHAT — MULTIPLE PEOPLE\n"
+            "You are in a group chat with several participants, not a one-on-one DM. "
+            "In the conversation history:\n"
+            "- Each turn is prefixed with the speaker's name, like `Alice: <message>`. "
+            "The text before the first colon is WHO said that line — it is attribution, "
+            "not part of their message.\n"
+            f"- Your own earlier replies appear prefixed with your name (`{me}: …`).\n\n"
+            "Keep track of who said what. Attribute statements, questions, and opinions "
+            "to the specific person who made them, and never merge or confuse different "
+            "participants. When a message refers to another member, use the right name. "
+            "Do NOT begin your own reply with your name or any `Name:` prefix — just "
+            "write the reply naturally.\n"
+        )
+    # Group-only speaker anchor: explicitly name the person whose message you are
+    # replying to RIGHT NOW. Without this the model only infers the speaker from the
+    # "Name: text" transcript and routinely misattributes the reply to a different
+    # participant who spoke earlier (e.g. greeting the wrong person by name). Always
+    # rendered for groups — including for a brand-new sender who has no stored memories
+    # yet — so the name anchor never disappears.
+    speaker_block = ""
+    if speaker_name and speaker_name.strip():
+        name = speaker_name.strip()
+        speaker_block = (
+            "\n---\n\n## 🗣️ WHO YOU ARE REPLYING TO\n"
+            f"The latest message is from **{name}**. You are replying to {name}. "
+            "Address and refer to them by this name — never greet or name a different "
+            "participant who spoke earlier in the conversation.\n"
+        )
     user_block = ""
     if user_memory_text and user_memory_text.strip():
         user_block = (
@@ -42,4 +81,4 @@ def build_system_prompt(
     time_block = ""
     if time_context and time_context.strip():
         time_block = f"\n---\n\n## ⏰ TIME CONTEXT\n{time_context.strip()}\n"
-    return base + user_block + time_block
+    return base + group_block + speaker_block + user_block + time_block

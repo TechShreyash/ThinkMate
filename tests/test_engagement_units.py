@@ -54,6 +54,43 @@ def test_build_system_prompt_non_empty_time_context_adds_one_section():
     assert text in prompt
 
 
+def test_build_system_prompt_speaker_name_anchors_the_reply_target():
+    """A group speaker_name renders a clear 'who you are replying to' anchor with the name."""
+    prompt = build_system_prompt("P", "M", speaker_name="Shreyash")
+    assert "WHO YOU ARE REPLYING TO" in prompt
+    assert "Shreyash" in prompt
+
+
+def test_build_system_prompt_speaker_block_present_without_user_memory():
+    """The speaker anchor renders even for a brand-new sender with no stored memories."""
+    # No user_memory_text -> the per-user MEMORIES block is absent, but the name anchor
+    # must still be there so the model never misattributes the reply.
+    prompt = build_system_prompt("P", "M", user_memory_text="", speaker_name="Shreyash")
+    assert "WHO YOU ARE REPLYING TO" in prompt
+    assert "MEMORIES OF THE PERSON SPEAKING NOW" not in prompt
+
+
+def test_build_system_prompt_no_speaker_name_is_backward_compatible():
+    """Omitting speaker_name (DM path) renders no speaker anchor, byte-for-byte."""
+    assert build_system_prompt("P", "M") == build_system_prompt("P", "M", speaker_name="")
+
+
+def test_build_system_prompt_group_section_explains_multiparty():
+    """is_group renders the multi-party section naming the transcript format and the bot."""
+    prompt = build_system_prompt("P", "M", is_group=True, bot_name="Nova")
+    assert "GROUP CHAT" in prompt
+    assert "Nova" in prompt
+    # It must explain that the name prefix is attribution, not message text.
+    assert "attribution" in prompt.lower() or "who said" in prompt.lower()
+
+
+def test_build_system_prompt_no_group_section_in_dm():
+    """The DM path (is_group default False) never renders the group multi-party section."""
+    prompt = build_system_prompt("P", "M")
+    assert "GROUP CHAT" not in prompt
+    assert build_system_prompt("P", "M") == build_system_prompt("P", "M", is_group=False)
+
+
 # --------------------------------------------------------------------------- #
 # 2. compile_memory_text: mood trend rendering (present / absent)
 # --------------------------------------------------------------------------- #

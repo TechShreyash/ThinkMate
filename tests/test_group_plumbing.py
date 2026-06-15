@@ -158,6 +158,50 @@ async def test_group_handle_message_multiparty():
             mock_bump.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_group_history_labels_bot_turns_and_prompt_has_group_section():
+    """Group history prefixes the bot's own turns with its name, and the system prompt
+    carries the multi-party GROUP CHAT section so the model can track who said what."""
+    chat_id = -200
+
+    with patch(
+        "app.services.chat_manager.llm_service.generate_reply_bundle",
+        new_callable=AsyncMock,
+    ) as mock_reply, patch(
+        "app.services.chat_manager.affinity_cache.bump",
+        new_callable=AsyncMock,
+    ):
+        mock_reply.return_value = ("ok", None, 0.0)
+
+        async with connection.db_session() as db:
+            # Seed a prior bot reply so the rendered history includes an assistant turn.
+            await models.add_message_to_buffer(
+                db, chat_id, "assistant", "earlier reply",
+                sender_id=0, sender_name="Botty",
+            )
+            await handle_message(
+                db,
+                chat_id=chat_id,
+                user_text="yo",
+                chat_type="group",
+                sender_id=222,
+                sender_name="Bob",
+            )
+
+            system_prompt = mock_reply.call_args.args[1]
+            history = mock_reply.call_args.args[2]
+
+            # The bot's earlier turn is name-prefixed in the multi-party transcript.
+            assert any(
+                t["role"] == "assistant" and t["content"].startswith("Botty: ")
+                for t in history
+            )
+            # The user turn is still attributed too.
+            assert any(t["content"] == "Bob: yo" for t in history)
+            # The system prompt explains the multi-party group format.
+            assert "GROUP CHAT" in system_prompt
+
+
 # --------------------------------------------------------------------------- #
 # 4. enqueue_message keys its pending/batching state on chat_id (a group
 #    batches per chat, distinct from the speaking user's id).

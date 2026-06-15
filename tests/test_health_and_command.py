@@ -29,6 +29,7 @@ def _make_message(user_id: int, chat_type: str = "private") -> MagicMock:
     message.chat = MagicMock()
     message.chat.type = chat_type
     message.answer = AsyncMock()
+    message.reply = AsyncMock()
     return message
 
 
@@ -115,10 +116,12 @@ async def test_health_admin_id_gate():
         with patch("app.database.connection.ping_db", new_callable=AsyncMock):
             allowed = _make_message(user_id=123, chat_type="supergroup")
             await cmd_health(allowed, db)
-            allowed.answer.assert_called_once()
+            # In a group the report threads as a reply to the command.
+            allowed.reply.assert_called_once()
 
             denied = _make_message(user_id=999, chat_type="supergroup")
             await cmd_health(denied, db)
+            denied.reply.assert_not_called()
             denied.answer.assert_not_called()
     finally:
         config.ADMIN_USER_IDS = original

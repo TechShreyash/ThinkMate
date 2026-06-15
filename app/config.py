@@ -63,7 +63,7 @@ def _env_int_set(key: str, default: set[int] | None = None) -> set[int]:
 _BUILTIN_COMMANDS: tuple[str, ...] = (
     "start", "onboard", "checkins",
     "profile", "reset", "reactions", "quiet", "chatty",
-    "groupbot", "groupquiet", "groupchatty", "groupnormal",
+    "groupbot", "groupmode",
     "health", "metrics",
 )
 

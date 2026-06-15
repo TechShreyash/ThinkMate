@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from aiogram import F, Router, html
 from aiogram.filters import Command, CommandObject
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
@@ -46,6 +47,22 @@ def _trigger(key: str) -> str:
     """
     name, _enabled = config.COMMANDS.get(key, (key, True))
     return name
+
+
+async def _reply(message: Message, text: str, **kwargs):
+    """Send a command response as a Telegram *reply* in groups, plain answer in DMs.
+
+    Mirrors the conversational reply behavior: in a group/supergroup the response threads
+    under the user's command so it's clear who it's for; in a DM a plain answer is used
+    (threading is needless there). Falls back to a plain answer if the original message
+    can no longer be replied to (e.g. it was deleted).
+    """
+    if getattr(getattr(message, "chat", None), "type", None) in ("group", "supergroup"):
+        try:
+            return await message.reply(text, **kwargs)
+        except TelegramBadRequest:
+            return await message.answer(text, **kwargs)
+    return await message.answer(text, **kwargs)
 
 
 def _parse_toggle(arg: str | None) -> bool | None:
@@ -345,8 +362,7 @@ def _build_help_text(is_admin: bool) -> str:
     lines = [f"{html.bold('Here is what I can do:')}", ""]
     lines += section("The basics", ("start", "onboard", "profile"))
     lines += section("Check-ins & memory", ("checkins", "reset", "reactions"))
-    lines += section("In group chats", ("quiet", "chatty", "groupbot",
-                                        "groupquiet", "groupchatty", "groupnormal"))
+    lines += section("In group chats", ("quiet", "chatty", "groupbot", "groupmode"))
     if is_admin:
         lines += section("Admin", ("health", "metrics"))
     lines += ["Mostly though, just talk to me. 🙂"]
@@ -408,11 +424,9 @@ def _guide_screen(screen: str, is_admin: bool) -> tuple[str, InlineKeyboardMarku
             f"• /{_trigger('quiet')} — I'll hang back.\n"
             f"• /{_trigger('chatty')} — I'll join in more.\n\n"
             f"{html.bold('Group admins can also:')}\n"
-            f"• /{_trigger('groupbot')} on — turn me on for the group.\n"
-            f"• /{_trigger('groupbot')} off — turn me off here completely.\n"
-            f"• /{_trigger('groupquiet')} — keep me low-key for everyone here.\n"
-            f"• /{_trigger('groupchatty')} — let me join in more for everyone here.\n"
-            f"• /{_trigger('groupnormal')} — clear that; each person's own setting applies.\n\n"
+            f"• /{_trigger('groupbot')} on|off — turn me on or off for the whole group.\n"
+            f"• /{_trigger('groupmode')} quiet|chatty|normal — set how chatty I am for "
+            "everyone here (normal = each person's own setting applies).\n\n"
             "A group admin's choice takes priority over personal "
             f"/{_trigger('quiet')} or /{_trigger('chatty')} settings."
         )
@@ -509,7 +523,7 @@ async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
             "New here? Tap 📖 below to see how I work, or just say hi and start chatting. "
             f"To help me learn about you faster, try /{_trigger('onboard')}."
         )
-    await message.answer(msg, parse_mode="HTML", reply_markup=_kb_welcome(onboarded))
+    await _reply(message, msg, parse_mode="HTML", reply_markup=_kb_welcome(onboarded))
 
 
 async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
@@ -521,7 +535,7 @@ async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
     # Static, persona-consistent, plain-text intro (no markdown/bullets, no LLM call).
     # Does not gate or alter normal chat handling (Req 4.1, 4.2, 4.3). The inline
     # buttons are navigation only and live outside the (plain) message text.
-    await message.answer(_onboard_text(), reply_markup=_kb_onboard())
+    await _reply(message, _onboard_text(), reply_markup=_kb_onboard())
 
 
 async def cmd_checkins(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
@@ -546,7 +560,7 @@ async def cmd_checkins(message: Message, command: CommandObject, db: AsyncIOMoto
             )
         else:
             status = f"My check-ins are {html.bold('off')} — I won't message you first."
-        await message.answer(
+        await _reply(message, 
             f"{status}\n\nUse /{trig} on or /{trig} off to change it.",
             parse_mode="HTML",
         )
@@ -554,11 +568,11 @@ async def cmd_checkins(message: Message, command: CommandObject, db: AsyncIOMoto
 
     await models.set_proactive_enabled(db, user.id, desired)
     if desired:
-        await message.answer(
+        await _reply(message, 
             "Got it — I'll check in now and then if it's been a while. Good to have you back. 🌱"
         )
     else:
-        await message.answer(
+        await _reply(message, 
             "Okay, I won't message you first anymore — I'll be right here whenever you want "
             f"to talk. Send /{trig} on if you'd like me to check in again now and then."
         )
@@ -582,7 +596,7 @@ async def cmd_reactions(message: Message, command: CommandObject, db: AsyncIOMot
     if desired is None:
         current = await models.get_reactions_enabled(db, user.id)
         state = html.bold("on") if current else html.bold("off")
-        await message.answer(
+        await _reply(message, 
             f"Emoji reactions on your messages are currently {state}.\n\n"
             f"Use /{trig} on or /{trig} off to change it.",
             parse_mode="HTML",
@@ -591,9 +605,9 @@ async def cmd_reactions(message: Message, command: CommandObject, db: AsyncIOMot
 
     await models.set_reactions_enabled(db, user.id, desired)
     if desired:
-        await message.answer("Okay, I'll add little emoji reactions to your messages again. 👍")
+        await _reply(message, "Okay, I'll add little emoji reactions to your messages again. 👍")
     else:
-        await message.answer(
+        await _reply(message, 
             "Got it — no more emoji reactions on your messages. Send "
             f"/{trig} on if you change your mind. 🙂"
         )
@@ -612,14 +626,14 @@ async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
         )
     )
     if not has_memories:
-        await message.answer(
+        await _reply(message, 
             "I don't have any memories saved for you yet — we just need to chat a bit "
             f"first! Say hi, or try /{_trigger('onboard')} for a quick intro. 🌱"
         )
         return
 
     profile_data, _ = await build_memory_block(db, user_id)
-    await message.answer(
+    await _reply(message, 
         f"📋 {html.bold('Here is what I remember about you:')}\n\n"
         f"{html.code(profile_data)}\n\n"
         f"Want me to forget all of it? Send /{_trigger('reset')}.",
@@ -631,7 +645,7 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
     if not message.from_user:
         return
     if (command.args or "").strip().lower() != "confirm":
-        await message.answer(
+        await _reply(message, 
             "⚠️ This will erase everything I remember about you and our chats — there's "
             "no undo.\n\n"
             f"If you're sure, send: /{_trigger('reset')} confirm"
@@ -665,7 +679,7 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
         logger.warning(f"reset backup failed for user {user.id}: {exc}")
 
     await models.reset_user(db, user.id)
-    await message.answer(
+    await _reply(message, 
         "Done — I've cleared everything and we're starting fresh. 🌱\n\n"
         "Changed your mind later? A backup was just saved, so reach out to an admin and "
         "they can help bring your memories back."
@@ -676,14 +690,14 @@ async def cmd_quiet(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
     if message.chat.type == "private":
-        await message.answer(
+        await _reply(message, 
             f"/{_trigger('quiet')} and /{_trigger('chatty')} control how much I chime in "
             "inside a group. Here in our DM I always reply to you, so there's nothing to "
             "quiet. 🙂"
         )
         return
     await affinity_cache.set_mode(db, message.chat.id, message.from_user.id, "quiet")
-    await message.answer(
+    await _reply(message, 
         "Okay, I'll hang back around you here — this is just your own personal setting, it "
         "won't change how I act with anyone else in the group. Mention me anytime you need "
         "me. 🤫"
@@ -694,14 +708,14 @@ async def cmd_chatty(message: Message, db: AsyncIOMotorDatabase):
     if not message.from_user:
         return
     if message.chat.type == "private":
-        await message.answer(
+        await _reply(message, 
             f"/{_trigger('quiet')} and /{_trigger('chatty')} control how much I chime in "
             "inside a group. Here in our DM I always reply to you, so there's nothing to "
             "boost. 🙂"
         )
         return
     await affinity_cache.set_mode(db, message.chat.id, message.from_user.id, "chatty")
-    await message.answer(
+    await _reply(message, 
         "You got it — I'll chime in more with you here! This is just your own personal "
         "setting and won't change how I act with anyone else in the group. 😄"
     )
@@ -735,7 +749,7 @@ async def cmd_groupbot(message: Message, command: CommandObject, db: AsyncIOMoto
     open to anyone in the chat; changing it is admin-gated (same authorization as before).
     """
     if message.chat.type not in ("group", "supergroup"):
-        await message.answer(
+        await _reply(message, 
             "This only works inside a group — it turns me on or off for everyone here. "
             "In our DM I'm always around. 🙂"
         )
@@ -746,7 +760,7 @@ async def cmd_groupbot(message: Message, command: CommandObject, db: AsyncIOMoto
     if desired is None:
         current = await models.is_group_enabled(db, message.chat.id)
         state = html.bold("on") if current else html.bold("off")
-        await message.answer(
+        await _reply(message, 
             f"I'm currently {state} in this group.\n\n"
             f"A group admin can use /{trig} on or /{trig} off to change it.",
             parse_mode="HTML",
@@ -754,64 +768,99 @@ async def cmd_groupbot(message: Message, command: CommandObject, db: AsyncIOMoto
         return
 
     if not await _is_group_admin(message):
-        await message.answer("Only a group admin can do that. 🙂")
+        await _reply(message, "Only a group admin can do that. 🙂")
         return
     await models.set_group_enabled(db, message.chat.id, desired)
     if desired:
-        await message.answer("I'm back on in this group — talk to me anytime. 👋")
+        await _reply(message, "I'm back on in this group — talk to me anytime. 👋")
     else:
-        await message.answer(
+        await _reply(message, 
             "Okay, I'll go quiet in this group — I won't reply or remember anything here "
             f"until an admin turns me back on with /{trig} on. 🤐"
         )
-    """Shared body for /groupquiet, /groupchatty, /groupnormal.
+
+
+async def _set_group_mode(message: Message, db: AsyncIOMotorDatabase, *, mode: str) -> None:
+    """Shared body for the group-wide ``/groupmode`` command (quiet/chatty/normal).
 
     Group-only and admin-gated (same authorization as the kill switch). Sets the
     group-wide ambient mode, which takes PRIORITY over each member's personal
     /quiet|/chatty: when an admin sets the group to quiet or chatty, that wins for
-    everyone here regardless of their own setting. ``/groupnormal`` (mode ``auto``)
+    everyone here regardless of their own setting. ``/groupmode normal`` (mode ``auto``)
     clears the override so personal settings apply again.
     """
     if message.chat.type not in ("group", "supergroup"):
-        await message.answer(
+        await _reply(message, 
             "This only works inside a group — it sets how chatty I am for everyone here. "
             "In our DM I'm always around. 🙂"
         )
         return
     if not await _is_group_admin(message):
-        await message.answer("Only a group admin can do that. 🙂")
+        await _reply(message, "Only a group admin can do that. 🙂")
         return
     await models.set_group_mode(db, message.chat.id, mode)
     if mode == "quiet":
-        await message.answer(
+        await _reply(message, 
             "Okay, I'll hang back for the whole group — I'll still reply when someone "
             "@mentions me or replies to me, just no chiming in on my own. This overrides "
             f"everyone's personal /{_trigger('chatty')} here until an admin runs "
-            f"/{_trigger('groupnormal')}. 🤫"
+            f"/{_trigger('groupmode')} normal. 🤫"
         )
     elif mode == "chatty":
-        await message.answer(
+        await _reply(message, 
             "You got it — I'll join in more across the whole group! This overrides "
             f"everyone's personal /{_trigger('quiet')} here until an admin runs "
-            f"/{_trigger('groupnormal')}. 😄"
+            f"/{_trigger('groupmode')} normal. 😄"
         )
     else:  # auto
-        await message.answer(
+        await _reply(message, 
             "Back to normal for the group — everyone's own "
             f"/{_trigger('quiet')} or /{_trigger('chatty')} setting applies again. 🙂"
         )
 
 
-async def cmd_groupquiet(message: Message, db: AsyncIOMotorDatabase):
-    await _set_group_mode(message, db, mode="quiet")
+async def cmd_groupmode(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
+    """Set how chatty I am for the WHOLE group: ``/groupmode quiet|chatty|normal``.
 
+    Group-only. A bare ``/groupmode`` reports the current group-wide setting (open to
+    anyone); changing it is admin-gated. The group-wide setting overrides each member's
+    personal ``/quiet``|``/chatty`` until an admin sets it back to ``normal``.
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        await _reply(
+            message,
+            "This only works inside a group — it sets how chatty I am for everyone here. "
+            "In our DM I'm always around. 🙂",
+        )
+        return
 
-async def cmd_groupchatty(message: Message, db: AsyncIOMotorDatabase):
-    await _set_group_mode(message, db, mode="chatty")
+    trig = _trigger("groupmode")
+    arg = (command.args or "").strip().lower()
+    mode = {
+        "quiet": "quiet",
+        "chatty": "chatty",
+        "normal": "auto", "auto": "auto", "reset": "auto", "clear": "auto",
+    }.get(arg)
 
+    if mode is None:
+        # No (or unrecognized) argument -> report the current setting + usage. Reading the
+        # state is open to anyone; only changing it is admin-gated (below).
+        try:
+            current = await models.get_group_mode(db, message.chat.id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"group-mode read failed for {message.chat.id}: {e}")
+            current = "auto"
+        label = {"quiet": "quiet", "chatty": "chatty"}.get(current, "normal")
+        await _reply(
+            message,
+            f"My group-wide setting here is {html.bold(label)}.\n\n"
+            f"A group admin can change it with /{trig} quiet, /{trig} chatty, "
+            f"or /{trig} normal.",
+            parse_mode="HTML",
+        )
+        return
 
-async def cmd_groupnormal(message: Message, db: AsyncIOMotorDatabase):
-    await _set_group_mode(message, db, mode="auto")
+    await _set_group_mode(message, db, mode=mode)
 
 
 async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
@@ -819,13 +868,13 @@ async def cmd_health(message: Message, db: AsyncIOMotorDatabase):
         return  # fail closed; never leak a report (Req 4.3, 4.4)
     live = liveness()
     ready = await readiness(db)
-    await message.answer(_render_health(live, ready), parse_mode="HTML")
+    await _reply(message, _render_health(live, ready), parse_mode="HTML")
 
 
 async def cmd_metrics(message: Message, db: AsyncIOMotorDatabase):
     if not _admin_allowed(message):
         return  # same authorization rule as /health (Req 4.5)
-    await message.answer(_render_metrics(metrics.snapshot()), parse_mode="HTML")
+    await _reply(message, _render_metrics(metrics.snapshot()), parse_mode="HTML")
 
 
 # Static map: command_key -> (handler, help description). Order follows _BUILTIN_COMMANDS.
@@ -839,9 +888,7 @@ _COMMANDS: dict[str, tuple] = {
     "quiet":   (cmd_quiet,   "your personal setting: I'll chime in less with you in this group (group-only)"),
     "chatty":  (cmd_chatty,  "your personal setting: I'll chime in more with you in this group (group-only)"),
     "groupbot": (cmd_groupbot, "turn me on or off for this whole group — /groupbot on|off (group admin only)"),
-    "groupquiet":  (cmd_groupquiet,  "make me quieter for the whole group (group admin only)"),
-    "groupchatty": (cmd_groupchatty, "make me chattier for the whole group (group admin only)"),
-    "groupnormal": (cmd_groupnormal, "clear the group-wide setting; personal modes apply (group admin only)"),
+    "groupmode": (cmd_groupmode, "set how chatty I am for the whole group — /groupmode quiet|chatty|normal (group admin only)"),
     "health":  (cmd_health,  "ops health + readiness report (admin-only)"),
     "metrics": (cmd_metrics, "ops metrics snapshot, incl. LLM-by-task (admin-only)"),
 }

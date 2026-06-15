@@ -147,8 +147,8 @@ async def _maybe_ambient_chime(
         member = await affinity_cache.get(db, message.chat.id, message.from_user.id)
 
         # Group-wide admin override takes PRIORITY over the member's personal mode: when an
-        # admin has set the group to "quiet" or "chatty" (/groupquiet|/groupchatty), that
-        # wins for everyone here; "auto" (the default, /groupnormal) defers to each user's
+        # admin has set the group to "quiet" or "chatty" (/groupmode quiet|chatty), that
+        # wins for everyone here; "auto" (the default, /groupmode normal) defers to each user's
         # own /quiet|/chatty. Read defensively so a DB hiccup degrades to "auto" (no
         # override) rather than dropping the message off the ambient path.
         try:

@@ -177,7 +177,7 @@ Stores per-group settings controlled by group admins:
 1. **On/off kill switch** (`enabled`) — `/groupoff` / `/groupon`. When a group is disabled,
    `_handle_group_message` returns at the top — no reply, no ambient/implicit reply, no identity
    capture, no memory extraction, and no buffer write.
-2. **Group-wide ambient mode** (`group_mode`) — `/groupquiet`, `/groupchatty`, `/groupnormal`. This
+2. **Group-wide ambient mode** (`group_mode`) — `/groupmode quiet|chatty|normal`. This
    sets how chatty the bot is for **everyone** in the group and takes **priority over each member's
    personal `/quiet` / `/chatty`** preference. Values: `auto` (default — no override, defer to the
    per-user mode), `quiet`, `chatty`.

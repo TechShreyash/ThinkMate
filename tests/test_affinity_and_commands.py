@@ -19,7 +19,7 @@ from app.config import config
 from app.database import connection, models
 from app.services.affinity import AffinityCache
 import app.handlers.commands as commands_module
-from app.handlers.commands import cmd_quiet, cmd_chatty
+from app.handlers.commands import cmd_quiet, cmd_chatty, cmd_groupmode
 
 
 # --------------------------------------------------------------------------- #
@@ -156,6 +156,7 @@ def _make_group_message(chat_type: str, chat_id: int, user_id: int) -> MagicMock
     message.from_user = MagicMock()
     message.from_user.id = user_id
     message.answer = AsyncMock()
+    message.reply = AsyncMock()
     return message
 
 
@@ -174,7 +175,7 @@ async def test_cmd_quiet_in_group_sets_mode_and_acknowledges():
         await cmd_quiet(message, db)
 
     mock_set_mode.assert_awaited_once_with(db, -100, 222, "quiet")
-    assert message.answer.called
+    assert message.reply.called
 
 
 @pytest.mark.asyncio
@@ -192,6 +193,81 @@ async def test_cmd_chatty_in_group_sets_mode_and_acknowledges():
         await cmd_chatty(message, db)
 
     mock_set_mode.assert_awaited_once_with(db, -100, 222, "chatty")
+    assert message.reply.called
+
+
+@pytest.mark.asyncio
+async def test_cmd_groupmode_sets_group_wide_mode_for_admin():
+    """/groupmode quiet sets the group-wide mode (admin) and replies."""
+    db = MagicMock()
+    message = _make_group_message("supergroup", chat_id=-100, user_id=222)
+    command = MagicMock()
+    command.args = "quiet"
+
+    with patch.object(
+        commands_module, "_is_group_admin", new_callable=AsyncMock, return_value=True
+    ), patch.object(
+        commands_module.models, "set_group_mode", new_callable=AsyncMock
+    ) as mock_set:
+        await cmd_groupmode(message, command, db)
+
+    mock_set.assert_awaited_once_with(db, -100, "quiet")
+    assert message.reply.called
+
+
+@pytest.mark.asyncio
+async def test_cmd_groupmode_normal_maps_to_auto():
+    """/groupmode normal clears the override by setting mode 'auto'."""
+    db = MagicMock()
+    message = _make_group_message("supergroup", chat_id=-100, user_id=222)
+    command = MagicMock()
+    command.args = "normal"
+
+    with patch.object(
+        commands_module, "_is_group_admin", new_callable=AsyncMock, return_value=True
+    ), patch.object(
+        commands_module.models, "set_group_mode", new_callable=AsyncMock
+    ) as mock_set:
+        await cmd_groupmode(message, command, db)
+
+    mock_set.assert_awaited_once_with(db, -100, "auto")
+
+
+@pytest.mark.asyncio
+async def test_cmd_groupmode_bare_reports_status_without_admin():
+    """A bare /groupmode reports the current setting (no admin gate, no write)."""
+    db = MagicMock()
+    message = _make_group_message("supergroup", chat_id=-100, user_id=222)
+    command = MagicMock()
+    command.args = None
+
+    with patch.object(
+        commands_module.models, "get_group_mode", new_callable=AsyncMock, return_value="auto"
+    ) as mock_get, patch.object(
+        commands_module.models, "set_group_mode", new_callable=AsyncMock
+    ) as mock_set:
+        await cmd_groupmode(message, command, db)
+
+    mock_get.assert_awaited_once()
+    mock_set.assert_not_called()
+    assert message.reply.called
+
+
+@pytest.mark.asyncio
+async def test_cmd_groupmode_in_dm_is_rejected():
+    """/groupmode in a DM explains it's group-only and never writes group state."""
+    db = MagicMock()
+    message = _make_group_message("private", chat_id=5, user_id=5)
+    command = MagicMock()
+    command.args = "quiet"
+
+    with patch.object(
+        commands_module.models, "set_group_mode", new_callable=AsyncMock
+    ) as mock_set:
+        await cmd_groupmode(message, command, db)
+
+    mock_set.assert_not_called()
+    # DMs use a plain answer, not a reply.
     assert message.answer.called
 
 

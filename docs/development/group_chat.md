@@ -78,20 +78,20 @@ reply with a short notice when used outside a group or by a non-admin. Both comm
 env-mappable/disable-able like every other command (see
 [configuration.md](configuration.md#️-commands-rename--disable), keys `groupon` / `groupoff`).
 
-## Group-wide chattiness (`/groupquiet`, `/groupchatty`, `/groupnormal`)
+## Group-wide chattiness (`/groupmode quiet|chatty|normal`)
 
 The per-user `/quiet` and `/chatty` commands only change the bot's behavior toward the **one person
 who ran them**, in that group. To control chattiness for the **whole group at once**, a group admin
-(or an `ADMIN_USER_IDS` operator) uses the group-wide commands, which take **priority over every
-member's personal setting**:
+(or an `ADMIN_USER_IDS` operator) uses the single group-wide command `/groupmode`, which takes
+**priority over every member's personal setting**:
 
-* **`/groupquiet`** — sets the group mode to `quiet`. The bot stops chiming in on its own for
+* **`/groupmode quiet`** — sets the group mode to `quiet`. The bot stops chiming in on its own for
   everyone here (it still replies when addressed or replied-to). This overrides any member's
   personal `/chatty`.
-* **`/groupchatty`** — sets the group mode to `chatty`. The bot joins in more for everyone here,
+* **`/groupmode chatty`** — sets the group mode to `chatty`. The bot joins in more for everyone here,
   overriding any member's personal `/quiet`.
-* **`/groupnormal`** — clears the override (mode `auto`), so each member's own `/quiet` / `/chatty`
-  applies again.
+* **`/groupmode normal`** — clears the override (mode `auto`), so each member's own `/quiet` /
+  `/chatty` applies again. (`/groupmode` with no argument reports the current setting.)
 
 The effective mode used by the ambient gate is resolved in `_maybe_ambient_chime` as:
 
@@ -103,8 +103,8 @@ So a group-level override always wins when set; `auto` defers to the member. The
 stored as `group_mode` in `group_settings` via `models.set_group_mode` and read on the ambient path
 via `models.get_group_mode` (defaulting to `auto`, and degrading to `auto` on any read error). The
 override only affects the **ambient chime-in** path (the same path `/quiet` / `/chatty` affect) — it
-does not change explicit-address or implicit-follow-up replies. All three commands are
-env-mappable/disable-able (keys `groupquiet` / `groupchatty` / `groupnormal`).
+does not change explicit-address or implicit-follow-up replies. The command is
+env-mappable/disable-able (key `groupmode`).
 
 ## Data model
 
@@ -121,8 +121,8 @@ group-aware path serve DMs unchanged.
 * **Affinity** lives in `chat_members` (`_id = "{chat_id}:{user_id}"`): `affinity` (0–1,
   default 0.5), `mode` (`auto` / `quiet` / `chatty`). Cached in memory, written through on change.
 * **Group on/off + group-wide mode** live in `group_settings` (`_id = chat_id`, `enabled: bool`,
-  `group_mode: str`) — the `/groupon` / `/groupoff` kill switch and the `/groupquiet` /
-  `/groupchatty` / `/groupnormal` chattiness override above.
+  `group_mode: str`) — the `/groupbot on|off` kill switch and the `/groupmode quiet|chatty|normal`
+  chattiness override above.
 
 ## Implicit addressing (replying without being tagged)
 

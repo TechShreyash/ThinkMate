@@ -106,16 +106,18 @@ async def handle_message(
     buffer_chars = sum(len(m["content"]) for m in messages)
 
     # History rendering: DMs stay single-party (exact current behavior); groups are
-    # rendered multi-party so the model can distinguish speakers.
+    # rendered multi-party so the model can distinguish speakers. Every turn — including
+    # the bot's own past replies — is prefixed with the speaker's stored name, so the
+    # transcript reads as a consistent named multi-party log ("Alice: …", "Bob: …",
+    # "<bot>: …"). The model is told (in the system prompt's GROUP CHAT section) that the
+    # name before the first colon is attribution, not message text, and that it must not
+    # prefix its own reply with a name.
     if is_group:
         active_history = []
         for m in messages:
-            if m["role"] == "user":
-                name = m.get("sender_name") or ""
-                content = f"{name}: {m['content']}" if name else m["content"]
-                active_history.append({"role": "user", "content": content})
-            else:
-                active_history.append({"role": m["role"], "content": m["content"]})
+            name = m.get("sender_name") or ""
+            content = f"{name}: {m['content']}" if name else m["content"]
+            active_history.append({"role": m["role"], "content": content})
     else:
         active_history = [{"role": m["role"], "content": m["content"]} for m in messages]
 
@@ -168,7 +170,8 @@ async def handle_message(
         # Both blocks are included; the per-user block is added, never replaces the
         # group block (Req 3.3, 3.5). Groups keep an empty time_context.
         system_prompt = build_system_prompt(
-            persona, group_block, time_context="", user_memory_text=user_block
+            persona, group_block, time_context="", user_memory_text=user_block,
+            speaker_name=sender_name, is_group=True, bot_name=config.bot_display_name,
         )
     else:
         # DM path: byte-for-byte unchanged (Req 3.6, 5.2). The single profile read here
