@@ -26,6 +26,8 @@ def make_error_log_sink(bot, loop):
 
     def sink(message):
         # loguru passes a Message whose .record holds structured fields.
+        if not config.LOGS_CHANNEL_ID:
+            return
         try:
             record = message.record
             # 1) Re-entry / self-forward guard (Req 4.9).

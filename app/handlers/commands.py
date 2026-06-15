@@ -875,6 +875,9 @@ async def setup_bot_commands(bot) -> None:
     the rest through the in-chat guide opened from /start. Best-effort: a failure is
     logged and never blocks startup.
     """
+    if not config.TELEGRAM_PUBLISH_COMMANDS:
+        logger.info("Telegram command menu publishing is disabled by config.")
+        return
     try:
         await bot.set_my_commands(_menu_for(_MENU_DM_KEYS), scope=BotCommandScopeDefault())
         logger.info("Published Telegram command menu (start only).")

@@ -27,6 +27,16 @@ def _env_int(key: str, default: int) -> int:
     return int(os.getenv(key, str(default)))
 
 
+def _env_int_or_none(key: str) -> int | None:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _env_float(key: str, default: float) -> float:
     return float(os.getenv(key, str(default)))
 
@@ -109,6 +119,7 @@ def resolve_command_config() -> dict[str, tuple[str, bool]]:
 class Config(BaseModel):
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = Field(default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", ""))
+    TELEGRAM_PUBLISH_COMMANDS: bool = Field(default_factory=lambda: _env_bool("TELEGRAM_PUBLISH_COMMANDS", True))
 
     # --- LLM connection ---
     LLM_BASE_URL: str = Field(default_factory=lambda: _env_str("LLM_BASE_URL", "http://localhost:1234/v1"))
@@ -188,7 +199,7 @@ class Config(BaseModel):
     # restart or crash. <= 0 disables the periodic flush (startup-load and shutdown-flush
     # still run). Cheap single-document upsert, so on by default.
     METRICS_PERSIST_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("METRICS_PERSIST_INTERVAL_SECS", 300.0))
-    LOGS_CHANNEL_ID: int = Field(default_factory=lambda: _env_int("LOGS_CHANNEL_ID", -1003933328659))
+    LOGS_CHANNEL_ID: int | None = Field(default_factory=lambda: _env_int_or_none("LOGS_CHANNEL_ID"))
 
     # --- Configurable commands (trigger name + enabled state per built-in command) ---
     # Resolved once at import; a plain dict {key: (trigger, enabled)}.
@@ -229,4 +240,11 @@ class Config(BaseModel):
         return self.BOT_NAME.strip() or "ThinkMate"
 
 
-config = Config()
+if "config" in globals() and globals()["config"].__class__.__name__ == "Config":
+    _existing_config = globals()["config"]
+    _new_config = Config()
+    for _field in Config.model_fields:
+        setattr(_existing_config, _field, getattr(_new_config, _field))
+    config = _existing_config
+else:
+    config = Config()

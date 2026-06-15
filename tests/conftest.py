@@ -85,3 +85,14 @@ def disable_reactions_by_default():
     yield
     config.ENABLE_MESSAGE_REACTIONS = original
 
+
+@pytest.fixture(autouse=True)
+def setup_test_logs_channel():
+    from app.config import config
+    original = config.LOGS_CHANNEL_ID
+    if config.LOGS_CHANNEL_ID is None:
+        config.LOGS_CHANNEL_ID = -1003933328659
+    yield
+    config.LOGS_CHANNEL_ID = original
+
+

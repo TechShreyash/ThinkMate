@@ -439,6 +439,8 @@ polling begins), which publishes **only the entry-point command** (`CMD_START_NA
 `/chatbot`) in the default scope (`BotCommandScopeDefault`). Every other command is discoverable
 through the in-chat guide opened from `/start`, so the menu stays clean and uncluttered.
 
+This startup publishing can be enabled or disabled via the **`TELEGRAM_PUBLISH_COMMANDS`** environment variable (defaults to `True`). When disabled, the bot skips registering commands with Telegram entirely.
+
 The single entry is built by `_menu_for(_MENU_DM_KEYS)` (`_MENU_DM_KEYS == ("start",)`), which
 honors the command's **resolved trigger and enabled flag** from `config.COMMANDS` (a renamed
 `/start` → `/chatbot` shows as `chatbot`). The whole call is best-effort: a failure is logged at
