@@ -62,3 +62,35 @@ async def test_intro_send_failure_is_swallowed():
     event.bot.send_message.side_effect = Exception("Forbidden: not enough rights")
     # Must not raise.
     await on_added_to_group(event)
+
+
+@pytest.mark.asyncio
+async def test_no_intro_when_disabled_by_config():
+    """When GROUP_INTRO_ON_JOIN is False, a group join sends no intro message."""
+    orig = config.GROUP_INTRO_ON_JOIN
+    config.GROUP_INTRO_ON_JOIN = False
+    try:
+        event = _make_event("supergroup")
+        await on_added_to_group(event)
+        event.bot.send_message.assert_not_called()
+    finally:
+        config.GROUP_INTRO_ON_JOIN = orig
+
+
+@pytest.mark.asyncio
+async def test_intro_sent_when_enabled_by_config():
+    """When GROUP_INTRO_ON_JOIN is True (default), a group join sends the intro."""
+    orig = config.GROUP_INTRO_ON_JOIN
+    config.GROUP_INTRO_ON_JOIN = True
+    try:
+        event = _make_event("supergroup")
+        await on_added_to_group(event)
+        event.bot.send_message.assert_called_once()
+    finally:
+        config.GROUP_INTRO_ON_JOIN = orig
+
+
+def test_group_intro_on_join_defaults_to_true():
+    """The config flag exists and defaults to True."""
+    assert hasattr(config, "GROUP_INTRO_ON_JOIN")
+    assert config.GROUP_INTRO_ON_JOIN is True

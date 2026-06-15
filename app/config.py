@@ -198,6 +198,10 @@ class Config(BaseModel):
     # case-insensitive). Blank -> fall back to the Telegram first name from get_me().
     BOT_NAME: str = Field(default_factory=lambda: _env_str("BOT_NAME", ""))
     ENABLE_MESSAGE_REACTIONS: bool = Field(default_factory=lambda: _env_bool("ENABLE_MESSAGE_REACTIONS", True))
+    # Send the one-time self-introduction when the bot is added to a group. Default True.
+    # Set False to suppress it (e.g. when another bot sharing this account already posts a
+    # join message, so the group only sees one).
+    GROUP_INTRO_ON_JOIN: bool = Field(default_factory=lambda: _env_bool("GROUP_INTRO_ON_JOIN", True))
 
     # --- Observability / ops ---
     ADMIN_USER_IDS: set[int] = Field(default_factory=lambda: _env_int_set("ADMIN_USER_IDS"))

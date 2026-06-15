@@ -64,6 +64,15 @@ async def on_added_to_group(event: ChatMemberUpdated) -> None:
     if event.chat.type not in _GROUP_CHAT_TYPES:
         return
 
+    # Opt-out switch: when GROUP_INTRO_ON_JOIN is False, skip the intro entirely (no
+    # message, no diagnostic). Useful when another bot sharing this account already posts
+    # a join message, so the group only sees one.
+    if not config.GROUP_INTRO_ON_JOIN:
+        logger.info(
+            f"Group intro on join disabled by config; skipping for chat {event.chat.id}"
+        )
+        return
+
     try:
         text = await _intro_text(event.bot)
         await event.bot.send_message(event.chat.id, text, parse_mode="HTML")

@@ -4,6 +4,17 @@ This file is the running history of notable changes to ThinkMate, the self-learn
 
 Entries are listed newest first. Each one is headed by its date and a short title naming the work it belongs to (most often a numbered development phase), and groups its details under conventional headings: **Added** for new capabilities, **Changed** or **Modified** for revisions to existing behavior, and **Fixed** for bug fixes. The version numbers, dates, file and identifier names, and the specifics of every entry below are recorded exactly as they happened.
 
+## [2026-06-15] - Configurable group join intro & command-menu publishing
+
+### Added
+- **`GROUP_INTRO_ON_JOIN` toggle** (`app/config.py`, `app/handlers/membership.py`, `.env.example`) — new boolean config (default `True`) that controls the one-time self-introduction posted when the bot is added to a group/supergroup. When set to `False`, `on_added_to_group` returns early and sends nothing (no message, no diagnostic). Intended for accounts shared by more than one bot, so a group only sees a single join message. Default-True keeps existing behavior unchanged.
+
+### Notes
+- **Command-menu publishing was already configurable** via the existing `TELEGRAM_PUBLISH_COMMANDS` toggle (default `True`); `setup_bot_commands` skips `set_my_commands`/`delete_my_commands` when it is `False`. No code change needed — documented here for discoverability. Because Telegram stores one command list per bot account, when two bots share an account the one publishing last wins; disable publishing on the secondary bot and restart the primary so its menu is authoritative.
+
+### Tests
+- Added `GROUP_INTRO_ON_JOIN` coverage (disabled → no intro, enabled → intro sent, default is True) in `tests/test_membership_intro.py`. Ran with the existing `tests/test_publish_commands.py` suite: 11 passing.
+
 ## [2026-06-15] - Stale guard anchored to startup (fix bot going silent under load)
 
 ### Fixed
