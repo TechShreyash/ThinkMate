@@ -26,6 +26,8 @@ _buffer = []
 _flush_task = None
 _loop = None
 
+LOG_LIMIT_PER_MINUTE = 10
+
 
 def set_bot(bot) -> None:
     global _bot, _loop, _flush_task, _window_start
@@ -36,6 +38,7 @@ def set_bot(bot) -> None:
             import asyncio
             _loop = asyncio.get_running_loop()
             _flush_task = _loop.create_task(_periodic_flush())
+            _log.info("Log clubber: periodic flush task started.")
         except RuntimeError:
             # Running tests outside a running event loop
             pass
@@ -44,7 +47,7 @@ def set_bot(bot) -> None:
 async def _periodic_flush() -> None:
     """Periodically flush buffered logs every 60 seconds."""
     global _window_start, _window_count
-    _window_start = time.time()
+    _log.info("Log clubber: periodic flush loop running.")
     try:
         import asyncio
         while True:
@@ -53,8 +56,11 @@ async def _periodic_flush() -> None:
             _window_start = time.time()
             _window_count = 0
     except asyncio.CancelledError:
+        _log.info("Log clubber: periodic flush loop cancelled; performing final flush.")
         await flush_buffer()
         raise
+    except Exception as e:  # noqa: BLE001
+        _log.exception(f"Log clubber: periodic flush loop crashed: {e}")
 
 
 async def flush_buffer() -> None:
@@ -66,13 +72,17 @@ async def flush_buffer() -> None:
     logs_text = "\n".join(_buffer)
     _buffer = []
 
+    _log.info(f"Log clubber: flushing {len(logs_text.splitlines())} buffered logs to Telegram...")
+
     try:
         from aiogram.types import BufferedInputFile
         target = config.LOGS_CHANNEL_ID
         if not target:
+            _log.warning("Log clubber: LOGS_CHANNEL_ID not configured, aborting flush.")
             return
         b = _bot
         if b is None:
+            _log.warning("Log clubber: bot reference is None, aborting flush.")
             return
 
         await b.send_document(
@@ -80,8 +90,9 @@ async def flush_buffer() -> None:
             document=BufferedInputFile(logs_text.encode("utf-8"), filename="logs.txt"),
             caption=f"📋 Clubbed logs ({len(logs_text.splitlines())} lines) due to rate limit threshold exceeded.",
         )
+        _log.info("Log clubber: flushed buffered logs to Telegram successfully.")
     except Exception as e:  # noqa: BLE001
-        _log.debug(f"log_forwarder flush_buffer failed (discarded): {e}")
+        _log.exception(f"Log clubber: failed to flush buffered logs to Telegram: {e}")
 
 
 async def close() -> None:
@@ -92,7 +103,7 @@ async def close() -> None:
         try:
             await _flush_task
         except Exception as e:  # noqa: BLE001
-            _log.debug(f"Error during log_forwarder task cancellation: {e}")
+            _log.exception(f"Error during log_forwarder task cancellation: {e}")
         _flush_task = None
 
 
@@ -120,13 +131,13 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
 
         _window_count += 1
 
-        if _window_count <= 20 and not _buffer:
+        if _window_count <= LOG_LIMIT_PER_MINUTE and not _buffer:
             await b.send_message(chat_id=target, text=text)
         else:
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
             _buffer.append(f"[{timestamp} UTC] {text}")
     except Exception as e:  # noqa: BLE001 - discard failures (Req 4.8)
-        _log.debug(f"log_forwarder send failed (discarded): {e}")
+        _log.exception(f"log_forwarder send failed (discarded): {e}")
 
 
 async def diagnostic(bot, source_chat_id: int | None, text: str) -> None:

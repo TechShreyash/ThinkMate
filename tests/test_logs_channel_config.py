@@ -130,7 +130,7 @@ async def test_diagnostic_noop_when_channel_unset_even_if_flag_on():
 
 @pytest.mark.asyncio
 async def test_log_forwarder_clubbing_low_load():
-    """Assert log_forwarder sends immediately in low load mode (< 20 logs/minute)."""
+    """Assert log_forwarder sends immediately in low load mode (< 10 logs/minute)."""
     bot = MagicMock()
     bot.send_message = AsyncMock()
     
@@ -155,7 +155,7 @@ async def test_log_forwarder_clubbing_low_load():
 
 @pytest.mark.asyncio
 async def test_log_forwarder_clubbing_high_load():
-    """Assert log_forwarder buffers messages when count exceeds 20 logs/minute."""
+    """Assert log_forwarder buffers messages when count exceeds 10 logs/minute."""
     bot = MagicMock()
     bot.send_message = AsyncMock()
     bot.send_document = MagicMock()  # Mock bot or _bot for flush
@@ -174,12 +174,12 @@ async def test_log_forwarder_clubbing_high_load():
     log_forwarder._bot = bot
     
     try:
-        # Send 22 logs
-        for i in range(22):
+        # Send 12 logs
+        for i in range(12):
             await log_forwarder.send(bot, source_chat_id=123, text=f"log msg {i}")
             
-        # First 20 sent immediately, last 2 buffered
-        assert bot.send_message.call_count == 20
+        # First 10 sent immediately, last 2 buffered
+        assert bot.send_message.call_count == 10
         assert len(log_forwarder._buffer) == 2
         
         # Flush buffer manually
