@@ -237,9 +237,39 @@ async def _extract_and_trim_single(user_id: int):
                     # the segment we processed is the oldest `trim_size` messages, so a
                     # fresh-read oldest-N trim removes exactly those, keeping newer arrivals.
                     await models.delete_oldest_buffer_messages(db, user_id, trim_size)
-                    logger.info(
-                        f"Memory extraction done for user {user_id}; trimmed {trim_size} messages."
-                    )
+                    
+                    has_updates = any([
+                        extraction.profile_updates and (extraction.profile_updates.communication_style or extraction.profile_updates.gender),
+                        extraction.new_facts,
+                        extraction.updated_facts,
+                        extraction.removed_facts,
+                        extraction.new_beliefs,
+                        extraction.updated_beliefs,
+                        extraction.removed_beliefs,
+                        extraction.new_events,
+                        extraction.updated_events,
+                        extraction.removed_events,
+                        extraction.emotional_state,
+                    ])
+                    
+                    if has_updates:
+                        logger.info(
+                            f"Memory extraction done for user {user_id}; updates saved, trimmed {trim_size} messages."
+                        )
+                        await log_forwarder.send(
+                            None,
+                            user_id,
+                            f"memory-extraction-saved: chat={user_id} participant_id={user_id}",
+                        )
+                    else:
+                        logger.info(
+                            f"Memory extraction done for user {user_id}; no new updates (skipped), trimmed {trim_size} messages."
+                        )
+                        await log_forwarder.send(
+                            None,
+                            user_id,
+                            f"memory-extraction-skipped: chat={user_id} participant_id={user_id} (no updates)",
+                        )
                     return
 
             logger.warning(
