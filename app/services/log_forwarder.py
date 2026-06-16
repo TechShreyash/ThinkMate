@@ -25,14 +25,16 @@ _window_count = 0
 _buffer = []
 _flush_task = None
 _loop = None
+_clubber_activated = False
 
 LOG_LIMIT_PER_MINUTE = 10
 
 
 def set_bot(bot) -> None:
-    global _bot, _loop, _flush_task, _window_start
+    global _bot, _loop, _flush_task, _window_start, _clubber_activated
     _bot = bot
     _window_start = time.time()
+    _clubber_activated = False
     if bot is not None:
         try:
             import asyncio
@@ -109,7 +111,7 @@ async def close() -> None:
 
 async def send(bot, source_chat_id: int | None, text: str) -> None:
     """Forward `text` to LOGS_CHANNEL_ID. No-op if disabled, recursive, or bot missing."""
-    global _window_start, _window_count, _buffer
+    global _window_start, _window_count, _buffer, _clubber_activated
     try:
         target = config.LOGS_CHANNEL_ID
         if not target:
@@ -122,6 +124,13 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
             return
 
         now = time.time()
+
+        if _clubber_activated:
+            # Once activated, always buffer all incoming logs
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
+            _buffer.append(f"[{timestamp} UTC] {text}")
+            return
+
         # Reset window if 60 seconds elapsed since the start of the current window
         if now - _window_start >= 60.0:
             if _buffer:
@@ -131,9 +140,11 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
 
         _window_count += 1
 
-        if _window_count <= LOG_LIMIT_PER_MINUTE and not _buffer:
+        if _window_count <= LOG_LIMIT_PER_MINUTE:
             await b.send_message(chat_id=target, text=text)
         else:
+            _clubber_activated = True
+            _log.info("Log clubber: threshold exceeded. Switching permanently to file-only logs mode.")
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
             _buffer.append(f"[{timestamp} UTC] {text}")
     except Exception as e:  # noqa: BLE001 - discard failures (Req 4.8)
