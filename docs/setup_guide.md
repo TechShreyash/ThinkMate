@@ -148,7 +148,7 @@ The table below lists the core settings you are most likely to touch, along with
 | `CHAT_BUFFER_MAX_CHARS` | Integer | `10000` | Max character count allowed in the buffer before extraction triggers. |
 | `NEW_USER_EXTRACTION_CHARS` | Integer | `1000` | Lower buffer-char trigger applied to new/sparse users so their memory profile builds quickly. Capped at `CHAT_BUFFER_MAX_CHARS`. |
 | `NEW_USER_MEMORY_THRESHOLD` | Integer | `5` | A user with fewer than this many stored memory items (facts + beliefs + events) is treated as "new" and uses `NEW_USER_EXTRACTION_CHARS`. |
-| `CHAT_BUFFER_TRIM` | Integer | `10` | The count of oldest messages kept/trimmed from active buffer and summarized. |
+| `CHAT_BUFFER_TRIM` | Integer | `10` | The count of latest messages preserved in active history when a buffer trim is executed. |
 | `USER_MEMORY_BUDGET_CHARS` | Integer | `4000` | Character-budget limit for the compiled memory profile. Exceeding this triggers compression. |
 | `CHARS_PER_TOKEN` | Integer | `4` | Legacy char-to-token ratio; no longer drives output limits (the `max_tokens` cap was removed). |
 | `MESSAGE_BATCH_DELAY_SECS` | Float | `1.5` | Delay in seconds the bot waits after receiving a message to batch rapid messages. |
