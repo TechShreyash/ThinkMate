@@ -147,9 +147,9 @@ the core hardening pass; Phase H captures efficiency and resilience follow-ups.
 
 ### Phase H — Efficiency & resilience follow-ups
 - [x] H1. **Extraction retry + bounded trim.** `extract_and_trim` retries up to 3 times, re-reading the buffer each attempt (mid-call arrivals folded in); `extract_memory` returns `None` on failure (distinct from empty). On total failure it trims anyway so the buffer stays bounded during an outage.
-- [ ] H2. **Compression-failure safety.** `compress_memory` returns `None` on failure and the compressor **skips** `replace_user_memory`, so a failed compression never wipes memory. *(Designed; see [memory_engine.md](memory_engine.md). Apply in code.)*
-- [ ] H3. **Single-pass budget enforcement.** Replace the per-item read/write loop in `_enforce_budget` with a single read + in-memory drop of lowest-priority items + single write. *(Designed; see [performance_and_scaling.md](performance_and_scaling.md). Apply in code.)*
-- [ ] H4. **pyproject hygiene.** Real metadata, runtime deps mirror `requirements.txt`, `requires-python` matches docs, `[tool.pytest.ini_options]` with `pythonpath`/`asyncio_mode`. *(Done in `pyproject.toml`.)*
+- [x] H2. **Compression-failure safety.** `compress_memory` returns `None` on failure and the compressor **skips** `replace_user_memory`, so a failed compression never wipes memory.
+- [x] H3. **Single-pass budget enforcement.** Replaced the per-item read/write loop in `_enforce_budget` with a single read + in-memory drop of lowest-priority items + single write.
+- [x] H4. **pyproject hygiene.** Real metadata, runtime deps mirror `requirements.txt`, `requires-python` matches docs, `[tool.pytest.ini_options]` with `pythonpath`/`asyncio_mode`.
 
 ### Horizontal scale (future, out of scope here)
 The single-instance design is deliberate and handles 50k+ users; the ceiling is LLM throughput.
