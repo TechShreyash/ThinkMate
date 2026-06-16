@@ -103,10 +103,12 @@ def reset_log_forwarder_state():
     log_forwarder._window_count = 0
     log_forwarder._window_start = 0.0
     log_forwarder._clubber_activated = False
+    log_forwarder._recent_send_times = []
     yield
     log_forwarder._buffer = []
     log_forwarder._window_count = 0
     log_forwarder._window_start = 0.0
     log_forwarder._clubber_activated = False
+    log_forwarder._recent_send_times = []
 
 

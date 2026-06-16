@@ -8,6 +8,8 @@ from app.config import config
 from app.database.connection import db_session
 from app.services.metrics import metrics
 from app.services import log_forwarder
+from loguru import logger
+
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -108,27 +110,24 @@ class ThrottlingMiddleware(BaseMiddleware):
         window = [t for t in self.users[user_id] if msg_ts - t < config.RATE_LIMIT_WINDOW_SECS]
 
         if len(window) >= config.RATE_LIMIT_MAX_REQUESTS:
-            # Warn at most once per spam episode, and only in a DM. The per-user "warned"
-            # flag is only ever set for private chats, so group over-limit drops stay
-            # completely silent (no public message, no re-arming flood). It is cleared
-            # below the moment the user falls back under the limit.
-            if is_private and user_id not in self.warned:
+            # Warn at most once per spam episode (tracked via self.warned).
+            # The public message is only sent in DMs to avoid group flood.
+            # The throttle event is logged as a warning so it goes to console and the Logs Channel.
+            if user_id not in self.warned:
                 self.warned.add(user_id)
-                try:
-                    await message.answer(
-                        "⚠️ *Slow down!* You're sending messages too fast. Give me a sec.",
-                        parse_mode="Markdown",
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                # Early-phase visibility: forward the throttle event once per episode.
+                if is_private:
+                    try:
+                        await message.answer(
+                            "⚠️ *Slow down!* You're sending messages too fast. Give me a sec.",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     chat_id = getattr(getattr(message, "chat", None), "id", None)
-                    await log_forwarder.diagnostic(
-                        message.bot,
-                        chat_id,
-                        f"⏳ throttle user={user_id} chat={chat_id} "
-                        f"(>{config.RATE_LIMIT_MAX_REQUESTS}/{config.RATE_LIMIT_WINDOW_SECS:g}s) — warned once",
+                    logger.warning(
+                        f"⏳ User {user_id} throttled in chat {chat_id} "
+                        f"(>{config.RATE_LIMIT_MAX_REQUESTS} requests in {config.RATE_LIMIT_WINDOW_SECS:g}s) — warned once"
                     )
                 except Exception:  # noqa: BLE001
                     pass

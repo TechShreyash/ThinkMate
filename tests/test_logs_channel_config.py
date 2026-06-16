@@ -169,10 +169,12 @@ async def test_log_forwarder_clubbing_high_load():
     import time
     log_forwarder._window_start = time.time()
     
-    # Temporarily override global _bot to avoid dependency issues in flush_buffer
+    # Temporarily override global _bot and burst limit to avoid side effects
     orig_bot = log_forwarder._bot
     log_forwarder._bot = bot
-    
+    orig_burst_count = log_forwarder.BURST_LIMIT_COUNT
+    log_forwarder.BURST_LIMIT_COUNT = 99
+        
     try:
         # Send 12 logs
         for i in range(12):
@@ -187,7 +189,36 @@ async def test_log_forwarder_clubbing_high_load():
         bot.send_document.assert_called_once()
         assert len(log_forwarder._buffer) == 0
     finally:
+        log_forwarder.BURST_LIMIT_COUNT = orig_burst_count
         log_forwarder._bot = orig_bot
+        config.LOGS_CHANNEL_ID = orig_channel
+
+
+@pytest.mark.asyncio
+async def test_log_forwarder_clubbing_burst_load():
+    """Assert log_forwarder buffers messages when a burst of > 3 logs in 5s occurs."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    
+    orig_channel = config.LOGS_CHANNEL_ID
+    config.LOGS_CHANNEL_ID = -100555
+    
+    # Reset state
+    log_forwarder._buffer = []
+    log_forwarder._window_count = 0
+    import time
+    log_forwarder._window_start = time.time()
+    
+    try:
+        # Send 5 logs in rapid succession
+        for i in range(5):
+            await log_forwarder.send(bot, source_chat_id=123, text=f"log msg {i}")
+            
+        # First 3 sent immediately, remaining 2 buffered (burst limit is 3)
+        assert bot.send_message.call_count == 3
+        assert len(log_forwarder._buffer) == 2
+        assert log_forwarder._clubber_activated is True
+    finally:
         config.LOGS_CHANNEL_ID = orig_channel
 
 
@@ -228,3 +259,49 @@ def test_error_log_sink_filters_permission_errors():
         loop.call_soon_threadsafe.assert_not_called()
     finally:
         config.LOGS_CHANNEL_ID = orig_channel
+
+
+@pytest.mark.asyncio
+async def test_throttling_middleware_logs_warning():
+    """Assert ThrottlingMiddleware logs a warning containing user and chat IDs when throttled."""
+    from app.handlers.middlewares import ThrottlingMiddleware
+    from aiogram.types import Message
+
+    
+    # Save original configs
+    original_requests = config.RATE_LIMIT_MAX_REQUESTS
+    original_window = config.RATE_LIMIT_WINDOW_SECS
+    
+    config.RATE_LIMIT_MAX_REQUESTS = 1
+    config.RATE_LIMIT_WINDOW_SECS = 1.0
+    
+    try:
+        middleware = ThrottlingMiddleware()
+        mock_handler = AsyncMock()
+        mock_message = MagicMock(spec=Message)
+        mock_message.from_user = MagicMock()
+        mock_message.from_user.id = 12345
+        mock_message.from_user.is_bot = False
+        mock_message.date = None
+        mock_message.chat = MagicMock()
+        mock_message.chat.type = "private"
+        mock_message.chat.id = 67890
+        mock_message.answer = AsyncMock()
+        
+        # 1st request - should pass
+        await middleware(mock_handler, mock_message, {})
+        assert mock_handler.call_count == 1
+        
+        # 2nd request - should block, warn, and log warning
+        with patch("app.handlers.middlewares.logger.warning") as mock_log_warning:
+            await middleware(mock_handler, mock_message, {})
+            assert mock_handler.call_count == 1
+            mock_log_warning.assert_called_once()
+            log_msg = mock_log_warning.call_args[0][0]
+            assert "12345" in log_msg
+            assert "67890" in log_msg
+            assert "throttled" in log_msg
+    finally:
+        config.RATE_LIMIT_MAX_REQUESTS = original_requests
+        config.RATE_LIMIT_WINDOW_SECS = original_window
+

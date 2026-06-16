@@ -129,7 +129,7 @@ async def test_process_batch_applies_reaction(temp_db):
         with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
             mock_handle.return_value = ("Mocked Response", "🎉")
             await user_task_manager.enqueue_message(mock_bot, user_id, "Hurray!", mock_message)
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.6)
 
             mock_message.react.assert_called_once()
             assert mock_message.react.call_args[1]["reaction"][0].emoji == "🎉"
@@ -153,7 +153,7 @@ async def test_process_batch_no_reaction(temp_db):
         with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
             mock_handle.return_value = ("Mocked Response", None)
             await user_task_manager.enqueue_message(mock_bot, user_id, "Hi", mock_message)
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.6)
 
             mock_message.react.assert_not_called()
             mock_message.answer.assert_called_once_with("Mocked Response")
@@ -176,7 +176,7 @@ async def test_process_batch_reaction_failure_still_answers(temp_db):
         with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
             mock_handle.return_value = ("Mocked Response", "🔥")
             await user_task_manager.enqueue_message(mock_bot, user_id, "Fire!", mock_message)
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.6)
 
             mock_message.react.assert_called_once()
             mock_message.answer.assert_called_once_with("Mocked Response")

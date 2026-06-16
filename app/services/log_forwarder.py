@@ -26,15 +26,19 @@ _buffer = []
 _flush_task = None
 _loop = None
 _clubber_activated = False
+_recent_send_times = []
 
 LOG_LIMIT_PER_MINUTE = 10
+BURST_LIMIT_COUNT = 3
+BURST_LIMIT_WINDOW_SECS = 5.0
 
 
 def set_bot(bot) -> None:
-    global _bot, _loop, _flush_task, _window_start, _clubber_activated
+    global _bot, _loop, _flush_task, _window_start, _clubber_activated, _recent_send_times
     _bot = bot
     _window_start = time.time()
     _clubber_activated = False
+    _recent_send_times = []
     if bot is not None:
         try:
             import asyncio
@@ -111,7 +115,7 @@ async def close() -> None:
 
 async def send(bot, source_chat_id: int | None, text: str) -> None:
     """Forward `text` to LOGS_CHANNEL_ID. No-op if disabled, recursive, or bot missing."""
-    global _window_start, _window_count, _buffer, _clubber_activated
+    global _window_start, _window_count, _buffer, _clubber_activated, _recent_send_times
     try:
         target = config.LOGS_CHANNEL_ID
         if not target:
@@ -131,22 +135,27 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
             _buffer.append(f"[{timestamp} UTC] {text}")
             return
 
-        # Reset window if 60 seconds elapsed since the start of the current window
+        # Clean up recent send times to only count messages in the last window
+        _recent_send_times = [t for t in _recent_send_times if now - t < BURST_LIMIT_WINDOW_SECS]
+
+        # Reset minute window if 60 seconds elapsed since the start of the current window
         if now - _window_start >= 60.0:
             if _buffer:
                 await flush_buffer()
             _window_start = now
             _window_count = 0
 
-        _window_count += 1
-
-        if _window_count <= LOG_LIMIT_PER_MINUTE:
-            await b.send_message(chat_id=target, text=text)
-        else:
+        # Check burst rate limit or minute rate limit
+        if len(_recent_send_times) >= BURST_LIMIT_COUNT or _window_count >= LOG_LIMIT_PER_MINUTE:
             _clubber_activated = True
-            _log.info("Log clubber: threshold exceeded. Switching permanently to file-only logs mode.")
+            reason = "burst detected" if len(_recent_send_times) >= BURST_LIMIT_COUNT else "minute threshold exceeded"
+            _log.info(f"Log clubber: {reason}. Switching permanently to file-only logs mode.")
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
             _buffer.append(f"[{timestamp} UTC] {text}")
+        else:
+            _window_count += 1
+            _recent_send_times.append(now)
+            await b.send_message(chat_id=target, text=text)
     except Exception as e:  # noqa: BLE001 - discard failures (Req 4.8)
         _log.exception(f"log_forwarder send failed (discarded): {e}")
 
