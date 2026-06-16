@@ -305,3 +305,28 @@ async def test_throttling_middleware_logs_warning():
         config.RATE_LIMIT_MAX_REQUESTS = original_requests
         config.RATE_LIMIT_WINDOW_SECS = original_window
 
+
+def test_format_extraction_summary():
+    """Assert _format_extraction_summary formats updates and profiles correctly."""
+    from app.services.memory_extractor import _format_extraction_summary
+    from app.services.schemas import MemoryExtraction, FactExtract, ProfileUpdate, EmotionLog
+
+    # 1. Empty updates -> empty string
+    empty_ext = MemoryExtraction()
+    assert _format_extraction_summary(empty_ext) == ""
+
+    # 2. profile updates
+    prof_ext = MemoryExtraction(profile_updates=ProfileUpdate(communication_style="chill", gender="male"))
+    summary = _format_extraction_summary(prof_ext)
+    assert "profile (communication style, gender)" in summary
+
+    # 3. facts and emotional state
+    fact_ext = MemoryExtraction(
+        new_facts=[FactExtract(category="personal", content="likes tea")],
+        emotional_state=EmotionLog(mood="happy", intensity=0.9)
+    )
+    summary = _format_extraction_summary(fact_ext)
+    assert "facts (+1 new)" in summary
+    assert "mood: happy (intensity: 0.9)" in summary
+
+

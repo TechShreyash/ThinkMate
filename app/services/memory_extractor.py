@@ -53,7 +53,60 @@ def _format_segment(segment: list[dict]) -> str:
     )
 
 
+def _format_extraction_summary(extraction) -> str:
+    """Format a summary of updates inside a MemoryExtraction object."""
+    parts = []
+    if extraction.profile_updates:
+        p_up = []
+        if getattr(extraction.profile_updates, "communication_style", None):
+            p_up.append("communication style")
+        if getattr(extraction.profile_updates, "gender", None):
+            p_up.append("gender")
+        if p_up:
+            parts.append(f"profile ({', '.join(p_up)})")
+
+    # Facts
+    f_parts = []
+    if getattr(extraction, "new_facts", None):
+        f_parts.append(f"+{len(extraction.new_facts)} new")
+    if getattr(extraction, "updated_facts", None):
+        f_parts.append(f"{len(extraction.updated_facts)} updated")
+    if getattr(extraction, "removed_facts", None):
+        f_parts.append(f"-{len(extraction.removed_facts)} removed")
+    if f_parts:
+        parts.append(f"facts ({', '.join(f_parts)})")
+
+    # Beliefs
+    b_parts = []
+    if getattr(extraction, "new_beliefs", None):
+        b_parts.append(f"+{len(extraction.new_beliefs)} new")
+    if getattr(extraction, "updated_beliefs", None):
+        b_parts.append(f"{len(extraction.updated_beliefs)} updated")
+    if getattr(extraction, "removed_beliefs", None):
+        b_parts.append(f"-{len(extraction.removed_beliefs)} removed")
+    if b_parts:
+        parts.append(f"beliefs ({', '.join(b_parts)})")
+
+    # Events
+    e_parts = []
+    if getattr(extraction, "new_events", None):
+        e_parts.append(f"+{len(extraction.new_events)} new")
+    if getattr(extraction, "updated_events", None):
+        e_parts.append(f"{len(extraction.updated_events)} updated")
+    if getattr(extraction, "removed_events", None):
+        e_parts.append(f"-{len(extraction.removed_events)} removed")
+    if e_parts:
+        parts.append(f"events ({', '.join(e_parts)})")
+
+    # Emotional State
+    if getattr(extraction, "emotional_state", None) and getattr(extraction.emotional_state, "mood", None):
+        parts.append(f"mood: {extraction.emotional_state.mood} (intensity: {extraction.emotional_state.intensity})")
+
+    return ", ".join(parts)
+
+
 # --- Multi-party (group) extraction helpers ---------------------------------- #
+
 
 # Name used for the bot's own (assistant) turns; never a memory participant. Sourced from
 # the configured display name so renaming the bot keeps assistant turns correctly skipped.
@@ -256,19 +309,15 @@ async def _extract_and_trim_single(user_id: int):
                         logger.info(
                             f"Memory extraction done for user {user_id}; updates saved, trimmed {trim_size} messages."
                         )
+                        summary = _format_extraction_summary(extraction)
                         await log_forwarder.send(
                             None,
                             user_id,
-                            f"memory-extraction-saved: chat={user_id} participant_id={user_id}",
+                            f"memory-extraction-saved: chat={user_id} participant_id={user_id} | updates: {summary}",
                         )
                     else:
                         logger.info(
                             f"Memory extraction done for user {user_id}; no new updates (skipped), trimmed {trim_size} messages."
-                        )
-                        await log_forwarder.send(
-                            None,
-                            user_id,
-                            f"memory-extraction-skipped: chat={user_id} participant_id={user_id} (no updates)",
                         )
                     return
 
@@ -347,20 +396,32 @@ async def extract_and_trim_group(chat_id: int):
                                 f"Group extraction: participant {update.participant!r} could not be "
                                 f"resolved to a sender in chat {chat_id}; skipping (no misattribution)."
                             )
+                            continue
+                        
+                        p_extraction = update.extraction
+                        has_updates = any([
+                            p_extraction.profile_updates and (p_extraction.profile_updates.communication_style or p_extraction.profile_updates.gender),
+                            p_extraction.new_facts,
+                            p_extraction.updated_facts,
+                            p_extraction.removed_facts,
+                            p_extraction.new_beliefs,
+                            p_extraction.updated_beliefs,
+                            p_extraction.removed_beliefs,
+                            p_extraction.new_events,
+                            p_extraction.updated_events,
+                            p_extraction.removed_events,
+                            p_extraction.emotional_state,
+                        ])
+                        
+                        if has_updates:
+                            await models.save_extracted_memories(db, resolved_id, p_extraction)
+                            saved += 1
+                            summary = _format_extraction_summary(p_extraction)
                             await log_forwarder.send(
                                 None,
                                 chat_id,
-                                f"memory-extraction-skipped: chat={chat_id} "
-                                f"participant={update.participant!r} (unresolved sender)",
+                                f"memory-extraction-saved: chat={chat_id} participant_id={resolved_id} | updates: {summary}",
                             )
-                            continue
-                        await models.save_extracted_memories(db, resolved_id, update.extraction)
-                        saved += 1
-                        await log_forwarder.send(
-                            None,
-                            chat_id,
-                            f"memory-extraction-saved: chat={chat_id} participant_id={resolved_id}",
-                        )
 
                     # Atomic trim of the processed segment (concurrent appends preserved).
                     await models.delete_oldest_buffer_messages(db, chat_id, trim_size)
