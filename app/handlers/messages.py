@@ -310,6 +310,38 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
     await user_task_manager.enqueue_message(message.bot, message.from_user.id, user_text, message)
 
 
+@router.message(
+    F.photo | F.document | F.video | F.voice | F.audio | F.sticker | F.animation | F.video_note
+)
+async def handle_media_message(message: Message):
+    """Deflect non-text media with a friendly text-only explanation.
+
+    In DMs, always reply. In groups, only reply when the media message is a
+    direct reply to the bot (to avoid spamming on every random photo/sticker).
+    """
+    if not message.from_user:
+        return
+
+    chat_type = getattr(getattr(message, "chat", None), "type", None)
+
+    # In groups, only respond if the user replied directly to the bot's message.
+    if chat_type in _GROUP_CHAT_TYPES:
+        reply_to = getattr(message, "reply_to_message", None)
+        if reply_to is None or getattr(reply_to, "from_user", None) is None:
+            return
+        identity = await _get_bot_identity(message)
+        if reply_to.from_user.id != identity["id"] or identity["id"] == 0:
+            return
+
+    # Channels: ignore entirely.
+    if chat_type == "channel":
+        return
+
+    await message.answer(
+        "i can't see photos or files, i'm text-only! tell me about it in words instead 😊"
+    )
+
+
 async def _handle_group_message(
     message: Message,
     db: AsyncIOMotorDatabase,
