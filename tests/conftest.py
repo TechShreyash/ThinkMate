@@ -96,3 +96,15 @@ def setup_test_logs_channel():
     config.LOGS_CHANNEL_ID = original
 
 
+@pytest.fixture(autouse=True)
+def reset_log_forwarder_state():
+    from app.services import log_forwarder
+    log_forwarder._buffer = []
+    log_forwarder._window_count = 0
+    log_forwarder._window_start = 0.0
+    yield
+    log_forwarder._buffer = []
+    log_forwarder._window_count = 0
+    log_forwarder._window_start = 0.0
+
+

@@ -165,6 +165,7 @@ async def main():
             f"🛑 {who} shutting down.\n"
             f"⏱ uptime {_fmt_timedelta(uptime)}",
         )
+        await log_forwarder.close()
         for task in background_tasks:
             task.cancel()
         for task in background_tasks:

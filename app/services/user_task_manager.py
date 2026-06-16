@@ -323,42 +323,48 @@ class UserTaskManager:
                                         implicit_gate.note_bot_spoke(chat_id, time.time())
                                     except Exception as track_err:  # noqa: BLE001
                                         logger.debug(f"note_bot_spoke failed for chat {chat_id}: {track_err}")
-                        except TelegramForbiddenError as e:
-                            # The user blocked the bot (or it was kicked/restricted).
-                            # Sending an apology would just fail again with the same
-                            # Forbidden error, so don't try — log quietly and, for a DM
-                            # (chat_id == sender_id), auto-disable proactive check-ins so
-                            # we stop nagging a user who can no longer receive messages.
-                            logger.info(
-                                f"Bot blocked/forbidden for sender {sender_id} in chat {chat_id}; "
-                                f"skipping reply: {e}"
+                        except (TelegramForbiddenError, TelegramBadRequest) as e:
+                            # Catch blocked users, restricted write permissions, kicks, etc. (Req 4.11)
+                            is_perm = isinstance(e, TelegramForbiddenError) or any(
+                                p in str(e).lower()
+                                for p in ["permission", "write access", "not enough rights", "restricted", "kicked", "blocked"]
                             )
-                            try:
-                                await log_forwarder.diagnostic(
-                                    last_message.bot,
-                                    chat_id,
-                                    f"🚫 blocked: sender={sender_id} chat={chat_id} "
-                                    f"— reply skipped"
-                                    + (", proactive disabled" if chat_type == "private" else ""),
+                            if is_perm:
+                                logger.info(
+                                    f"Bot blocked/forbidden/restricted for sender {sender_id} in chat {chat_id}; "
+                                    f"skipping reply: {e}"
                                 )
-                            except Exception:  # noqa: BLE001
-                                pass
-                            if chat_type == "private":
                                 try:
-                                    await models.set_proactive_enabled(db, sender_id, False)
-                                except Exception as disable_err:  # noqa: BLE001
-                                    logger.debug(
-                                        f"Failed to disable proactive for blocked user {sender_id}: {disable_err}"
+                                    await log_forwarder.diagnostic(
+                                        last_message.bot,
+                                        chat_id,
+                                        f"🚫 blocked/restricted: sender={sender_id} chat={chat_id} "
+                                        f"— reply skipped"
+                                        + (", proactive disabled" if chat_type == "private" else ""),
                                     )
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                if chat_type == "private":
+                                    try:
+                                        await models.set_proactive_enabled(db, sender_id, False)
+                                    except Exception as disable_err:  # noqa: BLE001
+                                        logger.debug(
+                                            f"Failed to disable proactive for blocked user {sender_id}: {disable_err}"
+                                        )
+                            else:
+                                logger.error(f"Error processing sender {sender_id} batch for chat {chat_id}: {e}")
+                                try:
+                                    await _reply_to(last_message, "Sorry, I ran into a problem just now — mind trying again?")
+                                except Exception:  # noqa: BLE001
+                                    pass
                         except Exception as e:  # noqa: BLE001
                             # A failure for one sender group must not abort the rest
                             # of the batch — log, apologize to that group, continue.
                             logger.error(f"Error processing sender {sender_id} batch for chat {chat_id}: {e}")
                             try:
                                 await _reply_to(last_message, "Sorry, I ran into a problem just now — mind trying again?")
-                            except TelegramForbiddenError:
-                                # Blocked between generation and the apology — nothing to do.
-                                logger.info(f"Apology to sender {sender_id} skipped; bot is blocked.")
+                            except Exception:  # noqa: BLE001
+                                pass
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Error processing batch for chat {chat_id}: {e}")
             finally:

@@ -39,6 +39,32 @@ def make_error_log_sink(bot, loop):
             if record["level"].no < 30:  # WARNING == 30
                 return
 
+            # 3) Filter out noisy Telegram permission/blocked messages to avoid log channel spam (Req 4.11)
+            msg_lower = record["message"].lower()
+            exc_lower = ""
+            if record.get("exception"):
+                exc_lower = str(record["exception"]).lower()
+
+            is_noise = False
+            for phrase in [
+                "forbidden",
+                "permission",
+                "write access",
+                "blocked by the user",
+                "kicked",
+                "chat not found",
+                "user is deactivated",
+                "not a member of",
+                "not enough rights",
+                "admin rights",
+                "restricted",
+            ]:
+                if phrase in msg_lower or phrase in exc_lower:
+                    is_noise = True
+                    break
+            if is_noise:
+                return
+
             text = (
                 f"⚠️ {record['level'].name} | {record['name']}:{record['function']} | "
                 f"{record['message']}"
@@ -49,7 +75,8 @@ def make_error_log_sink(bot, loop):
                 async def _send():
                     token = _in_sink.set(True)
                     try:
-                        await bot.send_message(chat_id=config.LOGS_CHANNEL_ID, text=text)
+                        from app.services import log_forwarder
+                        await log_forwarder.send(bot, None, text)
                     except Exception:  # noqa: BLE001 - never propagate (Req 4.7)
                         pass
                     finally:
@@ -60,7 +87,7 @@ def make_error_log_sink(bot, loop):
                 except Exception:  # noqa: BLE001 - loop not running / shutting down
                     pass
 
-            # 3) Hop onto the loop thread without blocking the originating logging call (Req 4.6).
+            # 4) Hop onto the loop thread without blocking the originating logging call (Req 4.6).
             loop.call_soon_threadsafe(_dispatch)
         except Exception:  # noqa: BLE001 - the sink must NEVER raise into logging (Req 4.7)
             pass

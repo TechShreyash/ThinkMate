@@ -676,7 +676,14 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
                 caption=caption,
             )
     except Exception as exc:  # noqa: BLE001 - never block the reset on a backup failure
-        logger.warning(f"reset backup failed for user {user.id}: {exc}")
+        is_perm = any(
+            p in str(exc).lower()
+            for p in ["forbidden", "permission", "write access", "not enough rights", "restricted", "kicked", "blocked"]
+        )
+        if is_perm:
+            logger.info(f"reset backup failed (forbidden/restricted) for user {user.id}: {exc}")
+        else:
+            logger.warning(f"reset backup failed for user {user.id}: {exc}")
 
     await models.reset_user(db, user.id)
     await _reply(message, 

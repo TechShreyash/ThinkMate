@@ -9,6 +9,7 @@ so the Error_Log_Sink will not re-forward them (Req 4.9).
 """
 from loguru import logger
 
+import time
 from app.config import config
 
 # Forwarder logs must never be re-forwarded by the Error_Log_Sink, so bind a marker.
@@ -18,14 +19,86 @@ _log = logger.bind(no_forward=True)
 # extractor). Set once at startup; handlers pass message.bot directly.
 _bot = None
 
+# Log clubber state
+_window_start = 0.0
+_window_count = 0
+_buffer = []
+_flush_task = None
+_loop = None
+
 
 def set_bot(bot) -> None:
-    global _bot
+    global _bot, _loop, _flush_task, _window_start
     _bot = bot
+    _window_start = time.time()
+    if bot is not None:
+        try:
+            import asyncio
+            _loop = asyncio.get_running_loop()
+            _flush_task = _loop.create_task(_periodic_flush())
+        except RuntimeError:
+            # Running tests outside a running event loop
+            pass
+
+
+async def _periodic_flush() -> None:
+    """Periodically flush buffered logs every 60 seconds."""
+    global _window_start, _window_count
+    _window_start = time.time()
+    try:
+        import asyncio
+        while True:
+            await asyncio.sleep(60.0)
+            await flush_buffer()
+            _window_start = time.time()
+            _window_count = 0
+    except asyncio.CancelledError:
+        await flush_buffer()
+        raise
+
+
+async def flush_buffer() -> None:
+    """Flush all currently buffered logs to the logs channel as a single logs.txt file."""
+    global _buffer
+    if not _buffer:
+        return
+
+    logs_text = "\n".join(_buffer)
+    _buffer = []
+
+    try:
+        from aiogram.types import BufferedInputFile
+        target = config.LOGS_CHANNEL_ID
+        if not target:
+            return
+        b = _bot
+        if b is None:
+            return
+
+        await b.send_document(
+            chat_id=target,
+            document=BufferedInputFile(logs_text.encode("utf-8"), filename="logs.txt"),
+            caption=f"📋 Clubbed logs ({len(logs_text.splitlines())} lines) due to rate limit threshold exceeded.",
+        )
+    except Exception as e:  # noqa: BLE001
+        _log.debug(f"log_forwarder flush_buffer failed (discarded): {e}")
+
+
+async def close() -> None:
+    """Cancel the periodic flush task and perform a final log flush."""
+    global _flush_task
+    if _flush_task is not None:
+        _flush_task.cancel()
+        try:
+            await _flush_task
+        except Exception as e:  # noqa: BLE001
+            _log.debug(f"Error during log_forwarder task cancellation: {e}")
+        _flush_task = None
 
 
 async def send(bot, source_chat_id: int | None, text: str) -> None:
     """Forward `text` to LOGS_CHANNEL_ID. No-op if disabled, recursive, or bot missing."""
+    global _window_start, _window_count, _buffer
     try:
         target = config.LOGS_CHANNEL_ID
         if not target:
@@ -36,7 +109,22 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
         b = bot or _bot
         if b is None:
             return
-        await b.send_message(chat_id=target, text=text)
+
+        now = time.time()
+        # Reset window if 60 seconds elapsed since the start of the current window
+        if now - _window_start >= 60.0:
+            if _buffer:
+                await flush_buffer()
+            _window_start = now
+            _window_count = 0
+
+        _window_count += 1
+
+        if _window_count <= 20 and not _buffer:
+            await b.send_message(chat_id=target, text=text)
+        else:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
+            _buffer.append(f"[{timestamp} UTC] {text}")
     except Exception as e:  # noqa: BLE001 - discard failures (Req 4.8)
         _log.debug(f"log_forwarder send failed (discarded): {e}")
 

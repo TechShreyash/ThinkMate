@@ -126,3 +126,105 @@ async def test_diagnostic_noop_when_channel_unset_even_if_flag_on():
         config.FORWARD_DIAGNOSTICS = orig_flag
 
     bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_log_forwarder_clubbing_low_load():
+    """Assert log_forwarder sends immediately in low load mode (< 20 logs/minute)."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    
+    orig_channel = config.LOGS_CHANNEL_ID
+    config.LOGS_CHANNEL_ID = -100555
+    
+    # Reset state
+    log_forwarder._buffer = []
+    log_forwarder._window_count = 0
+    import time
+    log_forwarder._window_start = time.time()
+    
+    try:
+        await log_forwarder.send(bot, source_chat_id=123, text="log msg 1")
+        await log_forwarder.send(bot, source_chat_id=123, text="log msg 2")
+        
+        assert len(log_forwarder._buffer) == 0
+        assert bot.send_message.call_count == 2
+    finally:
+        config.LOGS_CHANNEL_ID = orig_channel
+
+
+@pytest.mark.asyncio
+async def test_log_forwarder_clubbing_high_load():
+    """Assert log_forwarder buffers messages when count exceeds 20 logs/minute."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_document = MagicMock()  # Mock bot or _bot for flush
+    
+    orig_channel = config.LOGS_CHANNEL_ID
+    config.LOGS_CHANNEL_ID = -100555
+    
+    # Reset state
+    log_forwarder._buffer = []
+    log_forwarder._window_count = 0
+    import time
+    log_forwarder._window_start = time.time()
+    
+    # Temporarily override global _bot to avoid dependency issues in flush_buffer
+    orig_bot = log_forwarder._bot
+    log_forwarder._bot = bot
+    
+    try:
+        # Send 22 logs
+        for i in range(22):
+            await log_forwarder.send(bot, source_chat_id=123, text=f"log msg {i}")
+            
+        # First 20 sent immediately, last 2 buffered
+        assert bot.send_message.call_count == 20
+        assert len(log_forwarder._buffer) == 2
+        
+        # Flush buffer manually
+        await log_forwarder.flush_buffer()
+        bot.send_document.assert_called_once()
+        assert len(log_forwarder._buffer) == 0
+    finally:
+        log_forwarder._bot = orig_bot
+        config.LOGS_CHANNEL_ID = orig_channel
+
+
+def test_error_log_sink_filters_permission_errors():
+    """Assert make_error_log_sink ignores logs containing permission-related keywords."""
+    bot = MagicMock()
+    loop = MagicMock()
+    
+    sink = make_error_log_sink(bot, loop)
+    
+    orig_channel = config.LOGS_CHANNEL_ID
+    config.LOGS_CHANNEL_ID = -100555
+    
+    try:
+        # A normal error: should be processed
+        msg_normal = MagicMock()
+        msg_normal.record = {
+            "level": MagicMock(no=40, name="ERROR"),
+            "name": "test_module",
+            "function": "test_func",
+            "message": "Generic DB connection issue",
+            "extra": {}
+        }
+        sink(msg_normal)
+        loop.call_soon_threadsafe.assert_called_once()
+        loop.call_soon_threadsafe.reset_mock()
+        
+        # A forbidden/permission error: should be filtered out
+        msg_forbidden = MagicMock()
+        msg_forbidden.record = {
+            "level": MagicMock(no=40, name="ERROR"),
+            "name": "test_module",
+            "function": "test_func",
+            "message": "Failed to send: Forbidden: bot was blocked by the user",
+            "extra": {}
+        }
+        sink(msg_forbidden)
+        loop.call_soon_threadsafe.assert_not_called()
+    finally:
+        config.LOGS_CHANNEL_ID = orig_channel

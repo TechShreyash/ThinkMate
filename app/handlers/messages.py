@@ -92,7 +92,7 @@ def _truncate(text: str, limit: int = 80) -> str:
 
 
 async def _trace_routing(message: Message, decision: str, detail: str = "") -> None:
-    """Emit a group routing-decision trace to the console (DEBUG) and, when
+    """Emit a group routing-decision trace to the console (INFO or DEBUG) and, when
     ``FORWARD_DIAGNOSTICS`` is on, to the Logs_Channel.
 
     Gives live visibility into WHY the bot did or did not respond to each group
@@ -105,9 +105,28 @@ async def _trace_routing(message: Message, decision: str, detail: str = "") -> N
         f"sender={getattr(message.from_user, 'id', '?')}({sender})"
         f"{(' ' + detail) if detail else ''} | “{preview}”"
     )
-    logger.debug(line)
+
+    # Actionable decisions are logged at INFO level to terminal so developers see the bot reacting.
+    # Drops/skips are logged at DEBUG level so terminal is not spammed under standard settings.
+    # Similarly, when forwarding diagnostics to Telegram, only actionable decisions are sent
+    # to avoid rate-limiting and logs channel spam.
+    is_actionable = decision in (
+        "addressed→reply",
+        "implicit→reply",
+        "ambient→chime",
+        "spam-detected",
+        "blocked",
+        "throttle",
+    )
+
+    if is_actionable:
+        logger.info(line)
+    else:
+        logger.debug(line)
+
     try:
-        await log_forwarder.diagnostic(message.bot, getattr(getattr(message, "chat", None), "id", None), line)
+        if is_actionable:
+            await log_forwarder.diagnostic(message.bot, getattr(getattr(message, "chat", None), "id", None), line)
     except Exception:  # noqa: BLE001 - tracing must never affect routing
         pass
 
@@ -343,11 +362,9 @@ async def _handle_group_message(
             sender_name,
         )
         if change is not None:
-            await log_forwarder.send(
-                message.bot,
-                message.chat.id,
+            logger.info(
                 f"👤 identity {'created' if change['created'] else 'refreshed'} "
-                f"for {message.from_user.id} in chat {message.chat.id}",
+                f"for {message.from_user.id} in chat {message.chat.id}"
             )
     except Exception as e:  # noqa: BLE001 - degrade, never raise on the hot path (Req 1.7)
         logger.debug(f"identity refresh failed for {message.from_user.id}: {e}")

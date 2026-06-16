@@ -78,7 +78,14 @@ async def on_added_to_group(event: ChatMemberUpdated) -> None:
         await event.bot.send_message(event.chat.id, text, parse_mode="HTML")
         logger.info(f"Sent group intro on join to chat {event.chat.id}")
     except Exception as e:  # noqa: BLE001 - a failed intro must never crash the update
-        logger.warning(f"Failed to send group intro for chat {event.chat.id}: {e}")
+        is_perm = any(
+            p in str(e).lower()
+            for p in ["forbidden", "permission", "write access", "not enough rights", "restricted", "kicked", "blocked"]
+        )
+        if is_perm:
+            logger.info(f"Could not send group intro for chat {event.chat.id} (restricted/forbidden): {e}")
+        else:
+            logger.warning(f"Failed to send group intro for chat {event.chat.id}: {e}")
 
     try:
         title = getattr(event.chat, "title", None) or ""
