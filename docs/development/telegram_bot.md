@@ -17,7 +17,7 @@ becomes a single, coherent reply.
 - **Middlewares** — the two outer middlewares (rate limiting and database-session injection) and how they're registered.
 - **Dependency-injected handlers** — the command handlers, the conversational router, and how a reply and its emoji reaction come from one LLM call.
 - **Group chat routing** — how messages in groups are routed by chat type and whether the bot was addressed.
-- **Engagement commands** — the Phase 12 DM commands (`/onboard`, `/pause`, `/resume`) and the `/start`/`/help` enhancements.
+- **Engagement commands** — the Phase 12 DM commands (`/onboard`, `/checkins`, `/reactions`) and the `/start`/`/help` enhancements.
 - **Interactive guide** — the button-driven `/guide` tour and the `callback_query` handler that powers it.
 - **Key architectural guidelines** — the rules that keep the layer thin and predictable.
 
