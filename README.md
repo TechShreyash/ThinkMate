@@ -1,5 +1,7 @@
 # ThinkMate — Self-Learning Telegram AI Chatbot
 
+> 🤖 **Try the live demo:** [@ThinkMate_AIBot](https://t.me/ThinkMate_AIBot) on Telegram.
+
 ThinkMate is a self-learning, long-term memory Telegram AI companion — a chatbot that keeps remembering you across conversations instead of forgetting everything the moment a session ends. Inspired by concepts like Hermes Agent and Hindsight, it runs entirely on infrastructure you own: there are no third-party memory SaaS providers in the loop, so you keep full ownership and control over its database.
 
 Most chatbots either drop their context when a session times out or lean on expensive vector databases to fake recall. ThinkMate takes a different route. It pairs a **Sliding Window Chat Buffer** — a rolling window that keeps only the most recent messages in active context — with a custom memory model stored in MongoDB. As older messages slide out of that window, the bot extracts the facts, events, and emotional states worth keeping and injects them back into the LLM's (Large Language Model's) system prompt as structured, long-term memory. The payoff is continuity: the bot recalls what matters without paying to store every message forever.
