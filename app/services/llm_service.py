@@ -40,10 +40,8 @@ T = TypeVar("T", bound=BaseModel)
 # Transient errors worth retrying; 4xx (e.g. BadRequest) are not retried.
 _RETRYABLE = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
 
-# Cap on the size of any single string stored in the audit log, to bound storage growth.
-_MAX_LOG_FIELD = 4000
-
-
+# ponytail: To prevent MongoDB bloat and eventual quota errors, we only save the length
+# of the inputs and outputs (metadata) instead of storing the whole text.
 class LLMService:
     def __init__(self):
         # max_retries=0: our _with_retries is the single, intentional retry policy.
@@ -57,19 +55,6 @@ class LLMService:
     # ------------------------------------------------------------------ #
     # Audit logging
     # ------------------------------------------------------------------ #
-    @classmethod
-    def _truncate(cls, obj):
-        """Recursively cap long strings so audit documents stay small."""
-        if isinstance(obj, str):
-            if len(obj) <= _MAX_LOG_FIELD:
-                return obj
-            return obj[:_MAX_LOG_FIELD] + f"...[+{len(obj) - _MAX_LOG_FIELD} chars]"
-        if isinstance(obj, dict):
-            return {k: cls._truncate(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [cls._truncate(v) for v in obj]
-        return obj
-
     async def _log_llm_call(
         self,
         user_id: int,
@@ -82,11 +67,21 @@ class LLMService:
         """Insert one audit record. ``timestamp`` is a real datetime so a TTL index applies."""
         try:
             db = get_db()
+            
+            input_summary = {k: (len(str(v)) if v is not None else 0) for k, v in inputs.items()}
+            
+            output_summary = {"raw_text": 0, "parsed_json": 0}
+            if outputs:
+                if "raw_text" in outputs and outputs["raw_text"] is not None:
+                    output_summary["raw_text"] = len(str(outputs["raw_text"]))
+                if "parsed_json" in outputs and outputs["parsed_json"] is not None:
+                    output_summary["parsed_json"] = len(str(outputs["parsed_json"]))
+
             await db["llm_audit_log"].insert_one({
                 "user_id": user_id,
                 "call_type": call_type,
-                "inputs": self._truncate(inputs),
-                "outputs": self._truncate(outputs) if outputs else {"raw_text": None, "parsed_json": None},
+                "inputs": input_summary,
+                "outputs": output_summary,
                 "status": status,
                 "error": error,
                 "timestamp": datetime.now(timezone.utc),

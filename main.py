@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from loguru import logger
 from app.config import config
 from app.handlers import main_router
-from app.handlers.commands import setup_bot_commands
+from app.handlers.commands import setup_bot_commands, _fmt_uptime
 from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db, ping_db
 from app.services import log_forwarder
@@ -23,23 +23,7 @@ from app.services.health import (
 )
 
 
-def _fmt_timedelta(delta) -> str:
-    """Render a timedelta as a compact ``2d 3h 4m 5s`` string (zero units trimmed)."""
-    total = max(0, int(delta.total_seconds()))
-    days, rem = divmod(total, 86400)
-    hours, rem = divmod(rem, 3600)
-    mins, secs = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if mins:
-        parts.append(f"{mins}m")
-    parts.append(f"{secs}s")
-    return " ".join(parts)
-
-
+# ponytail: Removed duplicate _fmt_timedelta function; we now import _fmt_uptime from commands.
 async def main():
     logger.info("Verifying MongoDB connection...")
     try:
@@ -163,7 +147,7 @@ async def main():
             bot,
             None,
             f"🛑 {who} shutting down.\n"
-            f"⏱ uptime {_fmt_timedelta(uptime)}",
+            f"⏱ uptime {_fmt_uptime(uptime.total_seconds())}",
         )
         await log_forwarder.close()
         for task in background_tasks:
