@@ -2,7 +2,10 @@
 import pytest
 import os
 import importlib
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from loguru import logger
 
 from app.config import config
 from app.services import log_forwarder
@@ -129,6 +132,59 @@ async def test_diagnostic_noop_when_channel_unset_even_if_flag_on():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("diagnostics", "decision", "expected_level", "expected_forwards"),
+    [
+        (False, "blocked", "INFO", 0),
+        (False, "not-implicit", "DEBUG", 0),
+        (True, "blocked", "INFO", 1),
+        (True, "not-implicit", "INFO", 1),
+    ],
+)
+async def test_trace_routing_console_and_channel_matrix(
+    diagnostics,
+    decision,
+    expected_level,
+    expected_forwards,
+):
+    """Routing traces are local always; diagnostics mode mirrors all of them to Telegram."""
+    from app.handlers import messages as messages_module
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    message = SimpleNamespace(
+        bot=bot,
+        chat=SimpleNamespace(id=-200123),
+        from_user=SimpleNamespace(id=42, full_name="Alice"),
+        text="hello from the group",
+    )
+
+    orig_channel = config.LOGS_CHANNEL_ID
+    orig_flag = config.FORWARD_DIAGNOSTICS
+    config.LOGS_CHANNEL_ID = -100555
+    config.FORWARD_DIAGNOSTICS = diagnostics
+
+    records = []
+    sink_id = logger.add(lambda m: records.append(m.record), level="DEBUG")
+    try:
+        await messages_module._trace_routing(message, decision, "matrix check")
+    finally:
+        logger.remove(sink_id)
+        config.LOGS_CHANNEL_ID = orig_channel
+        config.FORWARD_DIAGNOSTICS = orig_flag
+
+    matching = [r for r in records if f"route={decision}" in r["message"]]
+    assert matching
+    assert matching[-1]["level"].name == expected_level
+
+    assert bot.send_message.await_count == expected_forwards
+    if expected_forwards:
+        sent = bot.send_message.await_args.kwargs
+        assert sent["chat_id"] == -100555
+        assert f"route={decision}" in sent["text"]
+
+
+@pytest.mark.asyncio
 async def test_log_forwarder_clubbing_low_load():
     """Assert log_forwarder sends immediately in low load mode (< 10 logs/minute)."""
     bot = MagicMock()
@@ -158,7 +214,7 @@ async def test_log_forwarder_clubbing_high_load():
     """Assert log_forwarder buffers messages when count exceeds 10 logs/minute."""
     bot = MagicMock()
     bot.send_message = AsyncMock()
-    bot.send_document = MagicMock()  # Mock bot or _bot for flush
+    bot.send_document = AsyncMock()  # Mock bot or _bot for flush
     
     orig_channel = config.LOGS_CHANNEL_ID
     config.LOGS_CHANNEL_ID = -100555
@@ -186,7 +242,7 @@ async def test_log_forwarder_clubbing_high_load():
         
         # Flush buffer manually
         await log_forwarder.flush_buffer()
-        bot.send_document.assert_called_once()
+        bot.send_document.assert_awaited_once()
         assert len(log_forwarder._buffer) == 0
     finally:
         log_forwarder.BURST_LIMIT_COUNT = orig_burst_count
@@ -219,6 +275,48 @@ async def test_log_forwarder_clubbing_burst_load():
         assert len(log_forwarder._buffer) == 2
         assert log_forwarder._clubber_activated is True
     finally:
+        config.LOGS_CHANNEL_ID = orig_channel
+
+
+@pytest.mark.asyncio
+async def test_log_forwarder_clubber_recovers_after_flush():
+    """A burst clubs the current window, then direct channel sends resume after flush."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.send_document = AsyncMock()
+
+    orig_channel = config.LOGS_CHANNEL_ID
+    orig_bot = log_forwarder._bot
+    config.LOGS_CHANNEL_ID = -100555
+    log_forwarder._bot = bot
+
+    import time
+    log_forwarder._buffer = []
+    log_forwarder._window_count = 0
+    log_forwarder._window_start = time.time()
+    log_forwarder._clubber_activated = False
+    log_forwarder._recent_send_times = []
+
+    try:
+        for i in range(4):
+            await log_forwarder.send(bot, source_chat_id=123, text=f"burst log {i}")
+
+        assert bot.send_message.await_count == 3
+        assert len(log_forwarder._buffer) == 1
+        assert log_forwarder._clubber_activated is True
+
+        await log_forwarder.flush_buffer()
+
+        bot.send_document.assert_awaited_once()
+        assert log_forwarder._buffer == []
+        assert log_forwarder._clubber_activated is False
+
+        await log_forwarder.send(bot, source_chat_id=123, text="post-flush log")
+
+        assert bot.send_message.await_count == 4
+        assert log_forwarder._buffer == []
+    finally:
+        log_forwarder._bot = orig_bot
         config.LOGS_CHANNEL_ID = orig_channel
 
 
@@ -328,5 +426,4 @@ def test_format_extraction_summary():
     summary = _format_extraction_summary(fact_ext)
     assert "facts (+1 new)" in summary
     assert "mood: happy (intensity: 0.9)" in summary
-
 

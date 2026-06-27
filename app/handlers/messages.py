@@ -106,10 +106,9 @@ async def _trace_routing(message: Message, decision: str, detail: str = "") -> N
         f"{(' ' + detail) if detail else ''} | “{preview}”"
     )
 
-    # Actionable decisions are logged at INFO level to terminal so developers see the bot reacting.
-    # Drops/skips are logged at DEBUG level so terminal is not spammed under standard settings.
-    # Similarly, when forwarding diagnostics to Telegram, only actionable decisions are sent
-    # to avoid rate-limiting and logs channel spam.
+    # Actionable decisions are logged at INFO level so developers see the bot reacting.
+    # Drops/skips stay DEBUG under normal settings, but diagnostics mode deliberately
+    # promotes every routing trace to INFO and mirrors it to Telegram.
     is_actionable = decision in (
         "addressed→reply",
         "implicit→reply",
@@ -119,14 +118,13 @@ async def _trace_routing(message: Message, decision: str, detail: str = "") -> N
         "throttle",
     )
 
-    if is_actionable:
+    if is_actionable or config.FORWARD_DIAGNOSTICS:
         logger.info(line)
     else:
         logger.debug(line)
 
     try:
-        if is_actionable:
-            await log_forwarder.diagnostic(message.bot, getattr(getattr(message, "chat", None), "id", None), line)
+        await log_forwarder.diagnostic(message.bot, getattr(getattr(message, "chat", None), "id", None), line)
     except Exception:  # noqa: BLE001 - tracing must never affect routing
         pass
 

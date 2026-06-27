@@ -9,6 +9,7 @@ so the Error_Log_Sink will not re-forward them (Req 4.9).
 """
 from loguru import logger
 
+import asyncio
 import time
 from app.config import config
 
@@ -33,15 +34,26 @@ BURST_LIMIT_COUNT = 3
 BURST_LIMIT_WINDOW_SECS = 5.0
 
 
-def set_bot(bot) -> None:
-    global _bot, _loop, _flush_task, _window_start, _clubber_activated, _recent_send_times
-    _bot = bot
-    _window_start = time.time()
+def _reset_clubber_window(now: float | None = None) -> None:
+    """Start a fresh direct-send window after a flush or long quiet period."""
+    global _window_start, _window_count, _clubber_activated, _recent_send_times
+    _window_start = now if now is not None else time.time()
+    _window_count = 0
     _clubber_activated = False
     _recent_send_times = []
+
+
+def _buffer_log(now: float, text: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
+    _buffer.append(f"[{timestamp} UTC] {text}")
+
+
+def set_bot(bot) -> None:
+    global _bot, _loop, _flush_task
+    _bot = bot
+    _reset_clubber_window()
     if bot is not None:
         try:
-            import asyncio
             _loop = asyncio.get_running_loop()
             _flush_task = _loop.create_task(_periodic_flush())
             _log.info("Log clubber: periodic flush task started.")
@@ -52,15 +64,12 @@ def set_bot(bot) -> None:
 
 async def _periodic_flush() -> None:
     """Periodically flush buffered logs every 60 seconds."""
-    global _window_start, _window_count
     _log.info("Log clubber: periodic flush loop running.")
     try:
-        import asyncio
         while True:
             await asyncio.sleep(60.0)
             await flush_buffer()
-            _window_start = time.time()
-            _window_count = 0
+            _reset_clubber_window()
     except asyncio.CancelledError:
         _log.info("Log clubber: periodic flush loop cancelled; performing final flush.")
         await flush_buffer()
@@ -76,15 +85,17 @@ async def flush_buffer() -> None:
         return
 
     logs_text = "\n".join(_buffer)
-    _buffer = []
+    line_count = len(logs_text.splitlines())
 
-    _log.info(f"Log clubber: flushing {len(logs_text.splitlines())} buffered logs to Telegram...")
+    _log.info(f"Log clubber: flushing {line_count} buffered logs to Telegram...")
 
     try:
         from aiogram.types import BufferedInputFile
         target = config.LOGS_CHANNEL_ID
         if not target:
             _log.warning("Log clubber: LOGS_CHANNEL_ID not configured, aborting flush.")
+            _buffer = []
+            _reset_clubber_window()
             return
         b = _bot
         if b is None:
@@ -94,8 +105,10 @@ async def flush_buffer() -> None:
         await b.send_document(
             chat_id=target,
             document=BufferedInputFile(logs_text.encode("utf-8"), filename="logs.txt"),
-            caption=f"📋 Clubbed logs ({len(logs_text.splitlines())} lines) due to rate limit threshold exceeded.",
+            caption=f"📋 Clubbed logs ({line_count} lines) due to rate limit threshold exceeded.",
         )
+        _buffer = []
+        _reset_clubber_window()
         _log.info("Log clubber: flushed buffered logs to Telegram successfully.")
     except Exception as e:  # noqa: BLE001
         _log.exception(f"Log clubber: failed to flush buffered logs to Telegram: {e}")
@@ -108,6 +121,8 @@ async def close() -> None:
         _flush_task.cancel()
         try:
             await _flush_task
+        except asyncio.CancelledError:
+            pass
         except Exception as e:  # noqa: BLE001
             _log.exception(f"Error during log_forwarder task cancellation: {e}")
         _flush_task = None
@@ -115,7 +130,7 @@ async def close() -> None:
 
 async def send(bot, source_chat_id: int | None, text: str) -> None:
     """Forward `text` to LOGS_CHANNEL_ID. No-op if disabled, recursive, or bot missing."""
-    global _window_start, _window_count, _buffer, _clubber_activated, _recent_send_times
+    global _window_start, _window_count, _clubber_activated, _recent_send_times
     try:
         target = config.LOGS_CHANNEL_ID
         if not target:
@@ -128,12 +143,15 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
             return
 
         now = time.time()
+        if _window_start <= 0:
+            _reset_clubber_window(now)
 
         if _clubber_activated:
-            # Once activated, always buffer all incoming logs
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
-            _buffer.append(f"[{timestamp} UTC] {text}")
-            return
+            if now - _window_start < 60.0:
+                _buffer_log(now, text)
+                return
+            await flush_buffer()
+            _reset_clubber_window(now)
 
         # Clean up recent send times to only count messages in the last window
         _recent_send_times = [t for t in _recent_send_times if now - t < BURST_LIMIT_WINDOW_SECS]
@@ -142,16 +160,14 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
         if now - _window_start >= 60.0:
             if _buffer:
                 await flush_buffer()
-            _window_start = now
-            _window_count = 0
+            _reset_clubber_window(now)
 
         # Check burst rate limit or minute rate limit
         if len(_recent_send_times) >= BURST_LIMIT_COUNT or _window_count >= LOG_LIMIT_PER_MINUTE:
             _clubber_activated = True
             reason = "burst detected" if len(_recent_send_times) >= BURST_LIMIT_COUNT else "minute threshold exceeded"
-            _log.info(f"Log clubber: {reason}. Switching permanently to file-only logs mode.")
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
-            _buffer.append(f"[{timestamp} UTC] {text}")
+            _log.info(f"Log clubber: {reason}. Buffering logs until the next flush window.")
+            _buffer_log(now, text)
         else:
             _window_count += 1
             _recent_send_times.append(now)
