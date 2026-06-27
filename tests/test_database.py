@@ -1,6 +1,12 @@
+from datetime import timezone
+
 import pytest
+
 from app.database import connection, models
 from app.services.schemas import MemoryExtraction, FactExtract, EventExtract, EmotionLog, ProfileUpdate
+
+ORIGINAL_GET_DB = connection.get_db
+
 
 @pytest.mark.asyncio
 async def test_db_initialization():
@@ -11,6 +17,28 @@ async def test_db_initialization():
     # Assert collection index can be retrieved from mock database
     indexes = db["llm_audit_log"]._collection.index_information()
     assert any(k.startswith("user_id_1_timestamp_-1") for k in indexes.keys())
+
+
+def test_get_db_requests_timezone_aware_utc_codec(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.db = object()
+            self.calls = []
+
+        def get_database(self, name, *, codec_options=None):
+            self.calls.append((name, codec_options))
+            return self.db
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(connection, "get_db_client", lambda: fake_client)
+
+    db = ORIGINAL_GET_DB()
+
+    assert db is fake_client.db
+    assert len(fake_client.calls) == 1
+    _, codec_options = fake_client.calls[0]
+    assert codec_options.tz_aware is True
+    assert codec_options.tzinfo is timezone.utc
 
 @pytest.mark.asyncio
 async def test_ensure_user_and_buffer():

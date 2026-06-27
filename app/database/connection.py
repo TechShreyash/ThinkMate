@@ -1,13 +1,18 @@
 """MongoDB client lifecycle: a lazily-created async client singleton, a session context
 manager for handler injection, a connectivity probe, and index initialization.
 """
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from contextlib import asynccontextmanager
+from datetime import timezone
+
+from bson.codec_options import CodecOptions
 from loguru import logger
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
 from app.config import config
 
 # Global client singleton
 _client: AsyncIOMotorClient | None = None
+_UTC_CODEC_OPTIONS = CodecOptions(tz_aware=True, tzinfo=timezone.utc)
 
 
 def get_db_client() -> AsyncIOMotorClient:
@@ -19,7 +24,9 @@ def get_db_client() -> AsyncIOMotorClient:
 
 
 def get_db() -> AsyncIOMotorDatabase:
-    return get_db_client()[config.MONGODB_DB]
+    return get_db_client().get_database(
+        config.MONGODB_DB, codec_options=_UTC_CODEC_OPTIONS
+    )
 
 
 @asynccontextmanager

@@ -64,6 +64,9 @@ class AsyncMockClient:
     def __getitem__(self, name):
         return AsyncMockDatabase(self._client[name])
 
+    def get_database(self, name, *args, **kwargs):
+        return self[name]
+
     async def drop_database(self, name):
         self._client.drop_database(name)
 
@@ -110,5 +113,4 @@ def reset_log_forwarder_state():
     log_forwarder._window_start = 0.0
     log_forwarder._clubber_activated = False
     log_forwarder._recent_send_times = []
-
 

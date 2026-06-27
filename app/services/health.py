@@ -286,14 +286,17 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
     from app.database import models
     from app.services.memory_loader import build_memory_block
     from app.services.llm_service import llm_service
-    from app.services.chat_manager import _load_persona
+    from app.services.chat_manager import _load_persona, build_time_context
     from app.prompts.system_prompt import build_system_prompt
 
     async with db_session() as db:
         memory_text, _ = await build_memory_block(db, user_id)
         # Always hold the window for this attempt.
         await models.set_last_proactive(db, user_id, now=now)
-        system_prompt = build_system_prompt(_load_persona(), memory_text)
+        time_context = build_time_context(now, None)
+        system_prompt = build_system_prompt(
+            _load_persona(), memory_text, time_context=time_context
+        )
         text = await llm_service.generate_checkin(user_id, system_prompt, memory_text)
         if not text:
             return "skipped"

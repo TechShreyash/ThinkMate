@@ -242,6 +242,29 @@ async def _seed_user_with_memory(user_id: int):
         )
 
 
+async def test_send_proactive_checkin_includes_time_context(restore_proactive_config, monkeypatch):
+    """The proactive LLM prompt includes current UTC time, without a fabricated gap."""
+    user_id = 90000
+    await _seed_user_with_memory(user_id)
+
+    generate_checkin = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin",
+        generate_checkin,
+    )
+    bot = AsyncMock()
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+
+    outcome = await health._send_proactive_checkin(bot, user_id, now=now)
+
+    assert outcome == "skipped"
+    generate_checkin.assert_awaited_once()
+    system_prompt = generate_checkin.await_args.args[1]
+    assert "## ⏰ TIME CONTEXT" in system_prompt
+    assert "Current time (UTC): 2024-06-01 14:30" in system_prompt
+    assert "Last talked" not in system_prompt
+
+
 async def test_send_proactive_checkin_sent(restore_proactive_config, monkeypatch):
     """A non-empty opener is delivered, recorded in the buffer, and the window is held."""
     user_id = 90001

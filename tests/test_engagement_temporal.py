@@ -58,6 +58,14 @@ def test_build_time_context_days_gap_is_coarse():
     assert "second" not in result.lower()
 
 
+def test_build_time_context_treats_naive_previous_timestamp_as_utc():
+    """Mongo-style naive datetimes still render the gap instead of being swallowed."""
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    prev = (now - timedelta(hours=2)).replace(tzinfo=None)
+    result = chat_manager.build_time_context(now, prev)
+    assert "Last talked with this user: 2 hour(s) ago" in result
+
+
 def test_build_time_context_minutes_boundary():
     """A gap under an hour renders coarse minutes (secs < 3600)."""
     now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)

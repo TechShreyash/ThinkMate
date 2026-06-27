@@ -47,6 +47,11 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
     lines.append("For any other region, derive the local time from UTC.")
     if last_interaction_at is not None:
         try:
+            if (
+                isinstance(last_interaction_at, datetime)
+                and last_interaction_at.tzinfo is None
+            ):
+                last_interaction_at = last_interaction_at.replace(tzinfo=timezone.utc)
             delta = now - last_interaction_at
             secs = max(0, int(delta.total_seconds()))
             if secs < 3600:
