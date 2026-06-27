@@ -38,12 +38,13 @@ def test_build_time_context_always_has_current_time_line():
 
 
 def test_build_time_context_first_contact_has_no_gap_line():
-    """With ``prev=None`` only the current-time line is rendered, no 'Last talked'."""
+    """With ``prev=None`` only the current-time and local-times lines are rendered, no 'Last talked'."""
     now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
     result = chat_manager.build_time_context(now, None)
     assert "Last talked" not in result
-    # Exactly the single current-time line.
-    assert result.count("\n") == 0
+    # Current-time line + local-times line + derivation hint, no gap line.
+    assert result.count("\n") == 2
+    assert "Local times:" in result
 
 
 def test_build_time_context_days_gap_is_coarse():

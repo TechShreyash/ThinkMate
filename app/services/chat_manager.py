@@ -7,7 +7,7 @@ compression (rate-limited) when the memory profile outgrows its budget.
 """
 import os
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import config
@@ -18,12 +18,33 @@ from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block, load_profile_doc, compile_memory_block
 from app.prompts.system_prompt import build_system_prompt
 
+# Representative UTC offsets so the model never needs to do its own timezone math.
+# Covers: South Asia, US East/West, UK, Central Europe, Gulf, East Asia.
+# Standard offsets are close enough — the model can handle minor DST shifts.
+_REFERENCE_ZONES: list[tuple[str, float]] = [
+    ("India", 5.5),
+    ("US-East", -5),
+    ("US-West", -8),
+    ("UK", 0),
+    ("Europe-Central", 1),
+    ("Dubai", 4),
+    ("Japan", 9),
+]
+
 
 def build_time_context(now: datetime, last_interaction_at) -> str:
-    """A short time-context string for the system prompt: current UTC time, and a coarse
-    'last talked' gap when a previous interaction exists (never raw seconds, never a gap on
-    first contact)."""
+    """A short time-context string for the system prompt: current UTC time, reference
+    local times for major zones, and a coarse 'last talked' gap when a previous
+    interaction exists (never raw seconds, never a gap on first contact)."""
     lines = [f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M')}"]
+    # Compact local-time references so the model can answer date/time questions
+    # from users worldwide without doing timezone arithmetic.
+    refs = []
+    for label, offset_hours in _REFERENCE_ZONES:
+        local = now + timedelta(hours=offset_hours)
+        refs.append(f"{label} {local.strftime('%H:%M %b %d')}")
+    lines.append("Local times: " + " · ".join(refs))
+    lines.append("For any other region, derive the local time from UTC.")
     if last_interaction_at is not None:
         try:
             delta = now - last_interaction_at
@@ -145,6 +166,7 @@ async def handle_message(
 
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()
+    now = datetime.now(timezone.utc)
 
     # Whether the bot may add an emoji reaction to THIS sender's message (/reactions
     # opt-out, default enabled). Read for free from the sender's profile doc that the
@@ -168,9 +190,10 @@ async def handle_message(
             logger.debug(f"per-user memory load failed for sender {sender_id}: {e}")
             user_block = ""
         # Both blocks are included; the per-user block is added, never replaces the
-        # group block (Req 3.3, 3.5). Groups keep an empty time_context.
+        # group block (Req 3.3, 3.5).
+        time_context = build_time_context(now, None)
         system_prompt = build_system_prompt(
-            persona, group_block, time_context="", user_memory_text=user_block,
+            persona, group_block, time_context=time_context, user_memory_text=user_block,
             speaker_name=sender_name, is_group=True, bot_name=config.bot_display_name,
         )
     else:
@@ -179,10 +202,9 @@ async def handle_message(
         dm_doc = await load_profile_doc(db, chat_id)
         memory_block, needs_compression = compile_memory_block(dm_doc)
         sender_reactions_enabled = dm_doc.get("reactions_enabled", True)
-        # Temporal context: DM path only. Record the user's last-interaction time and
-        # compute a concise "now + last talked" string in a single combined round-trip
+        # Temporal context: record the user's last-interaction time and compute a
+        # concise "now + last talked" string in a single combined round-trip
         # (no extra LLM call, no upsert).
-        now = datetime.now(timezone.utc)
         prev = await models.touch_and_get_last_interaction(db, chat_id, now=now)
         time_context = build_time_context(now, prev)
         system_prompt = build_system_prompt(persona, memory_block, time_context=time_context)
