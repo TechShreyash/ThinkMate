@@ -174,7 +174,7 @@ respect live in [performance_and_scaling.md](development/performance_and_scaling
   then DB session), include routers, start long-polling.
 - `DbSessionMiddleware` injects the shared `db`. Typing is owned by `UserTaskManager`, not a
   middleware.
-- Commands: `/start`, `/onboard`, `/checkins`, `/profile`, `/reset` (confirm-gated), and
+- Commands: `/start`, `/help`, `/onboard`, `/checkins`, `/profile`, `/reset` (confirm-gated), and
   `/reactions`. Group commands `/quiet`, `/chatty`, `/groupbot`, and `/groupmode` arrive in
   later phases.
 - `messages.py`: ignore senderless posts, enforce `MAX_INPUT_CHARS`, enqueue for batching.

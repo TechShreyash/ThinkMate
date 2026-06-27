@@ -1,11 +1,11 @@
-"""Slash-command handlers: /start, /onboard, /profile, /reset, etc.
+"""Slash-command handlers: /start, /help, /onboard, /profile, /reset, etc.
 
 Beyond the plain slash commands, this module also powers an interactive, button-driven
 **guide**. The guide is a small set of screens — memory, privacy, groups, check-ins, and
 the full command list — that users page through with Telegram inline buttons
-(``InlineKeyboardMarkup``). There are no separate guide/help slash commands: the single
-``/start`` command is the entry point, and its inline buttons open
-the guide and the command list. A single ``callback_query`` handler
+(``InlineKeyboardMarkup``). ``/start`` is the warm welcome and guide entry point, while
+``/help`` jumps straight to the command list for users who expect a familiar help command.
+A single ``callback_query`` handler
 (:func:`on_guide_nav`) edits the message in place as the user taps between screens, so
 newcomers can learn what the bot does without leaving the chat. See
 ``docs/development/telegram_bot.md`` for the design overview.
@@ -342,7 +342,7 @@ def _kb_onboard() -> InlineKeyboardMarkup:
 
 
 def _build_help_text(is_admin: bool) -> str:
-    """Render the grouped command list shown from the /start guide."""
+    """Render the grouped command list shown from /help and the /start guide."""
     resolved = config.COMMANDS
 
     def section(title: str, keys: tuple[str, ...]) -> list[str]:
@@ -360,13 +360,22 @@ def _build_help_text(is_admin: bool) -> str:
             return []
         return [html.bold(title), *rows, ""]
 
-    lines = [f"{html.bold('Here is what I can do:')}", ""]
-    lines += section("The basics", ("start", "onboard", "profile"))
-    lines += section("Check-ins & memory", ("checkins", "reset", "reactions"))
-    lines += section("In group chats", ("quiet", "chatty", "groupbot", "groupmode"))
+    lines = [
+        f"📋 {html.bold('Command cheat sheet')}",
+        "",
+        "You can skip commands and just talk to me normally. Use these when you want "
+        "a specific shortcut or setting:",
+        "",
+    ]
+    lines += section("Start here", ("start", "help", "onboard", "profile"))
+    lines += section("Your controls", ("checkins", "reactions", "reset"))
+    lines += section("Group chats", ("quiet", "chatty", "groupbot", "groupmode"))
     if is_admin:
         lines += section("Admin", ("health", "metrics"))
-    lines += ["Mostly though, just talk to me. 🙂"]
+    lines += [
+        f"New here? Try /{_trigger('onboard')} for starter questions, or send any "
+        "normal message like “help me plan my week”."
+    ]
     return "\n".join(lines)
 
 
@@ -376,6 +385,8 @@ def _guide_home_text() -> str:
         "I'm not your usual bot. I'm an AI companion who actually "
         f"{html.bold('remembers')} you — our chats, the things you care about, how "
         "you've been doing — and picks up right where we left off.\n\n"
+        "The easiest way to use me is simple: say what is on your mind, ask for help "
+        "with a task, or tell me what you want me to remember.\n\n"
         "Pick a topic to see how I work 👇"
     )
 
@@ -394,8 +405,9 @@ def _guide_screen(screen: str, is_admin: bool) -> tuple[str, InlineKeyboardMarku
             "As we talk, I quietly pick out the things worth keeping — facts about you, "
             "what's going on in your life, what you're into — and tuck them away. Next "
             "time, I already know them, so you never have to repeat yourself.\n\n"
-            "There's nothing to set up and no special format. Just talk to me normally "
-            "and my memory builds itself over time. The more we chat, the better I get.\n\n"
+            "There's nothing to set up and no special format. Just talk to me normally: "
+            "goals, preferences, plans, people, projects, moods, half-formed thoughts. "
+            "The more we chat, the better I get.\n\n"
             f"• See what I've remembered → /{_trigger('profile')}\n"
             f"• Start completely fresh → /{_trigger('reset')}"
         )
@@ -492,10 +504,11 @@ def _onboard_text() -> str:
         f"hey, glad you're here. i'm {config.bot_display_name} — think of me less like an "
         "app and more like a friend who actually remembers your stuff. the more we talk, "
         "the better i get at it.\n\n"
-        "to kick things off, tell me a little about you whenever you feel like it. what "
-        "should i call you? what do your days usually look like? and what's something "
-        "you've been into lately that you could talk about for hours?\n\n"
-        "no rush and no forms. just talk to me like you would anyone else."
+        "easy way to start: send me one message with anything you want me to know. what "
+        "should i call you, what do your days usually look like, and what are you working "
+        "on or excited about lately?\n\n"
+        f"after that, just talk to me normally. use /{_trigger('help')} anytime for "
+        "commands, settings, memory controls, or group chat tips."
     )
 
 
@@ -513,7 +526,7 @@ async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
         msg = (
             f"Hey {name}! 👋 Good to see you again.\n\n"
             "Want a refresher on what I can do, or to peek at what I remember about you? "
-            "Tap below — or just pick up right where we left off."
+            f"Tap below, use /{_trigger('help')}, or just pick up right where we left off."
         )
     else:
         msg = (
@@ -521,10 +534,24 @@ async def cmd_start(message: Message, db: AsyncIOMotorDatabase):
             f"I'm {html.bold(config.bot_display_name)}, an AI companion who actually "
             "remembers you — our chats, what you care about, how things are going. The "
             "more we talk, the better I get to know you.\n\n"
-            "New here? Tap 📖 below to see how I work, or just say hi and start chatting. "
-            f"To help me learn about you faster, try /{_trigger('onboard')}."
+            f"{html.bold('Quick start:')} say anything you want help with, or try "
+            f"/{_trigger('onboard')} if you want starter questions. Use "
+            f"/{_trigger('help')} anytime for commands, settings, and memory controls."
         )
     await _reply(message, msg, parse_mode="HTML", reply_markup=_kb_welcome(onboarded))
+
+
+async def cmd_help(message: Message, db: AsyncIOMotorDatabase):
+    """Show the command cheat sheet directly, without making users enter the guide first."""
+    _ = db
+    user_id = message.from_user.id if message.from_user else None
+    chat_type = getattr(getattr(message, "chat", None), "type", None)
+    await _reply(
+        message,
+        _build_help_text(_is_admin(user_id, chat_type)),
+        parse_mode="HTML",
+        reply_markup=_kb_topic("commands"),
+    )
 
 
 async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
@@ -887,16 +914,17 @@ async def cmd_metrics(message: Message, db: AsyncIOMotorDatabase):
 
 # Static map: command_key -> (handler, help description). Order follows _BUILTIN_COMMANDS.
 _COMMANDS: dict[str, tuple] = {
-    "start":   (cmd_start,   "Open the menu — a quick guide to what I do, your saved memories, and your settings"),
-    "onboard": (cmd_onboard, "a quick intro so I can get to know you faster"),
-    "checkins": (cmd_checkins, "turn my occasional check-ins on or off — /checkins on|off"),
-    "profile": (cmd_profile, "see the memories I've saved about you"),
-    "reset":   (cmd_reset,   "make me forget everything about you — needs /reset confirm"),
-    "reactions": (cmd_reactions, "turn the emoji reactions on your messages on or off — /reactions on|off"),
-    "quiet":   (cmd_quiet,   "your personal setting: I'll chime in less with you in this group (group-only)"),
-    "chatty":  (cmd_chatty,  "your personal setting: I'll chime in more with you in this group (group-only)"),
-    "groupbot": (cmd_groupbot, "turn me on or off for this whole group — /groupbot on|off (group admin only)"),
-    "groupmode": (cmd_groupmode, "set how chatty I am for the whole group — /groupmode quiet|chatty|normal (group admin only)"),
+    "start":   (cmd_start,   "open the welcome menu and quick guide"),
+    "help":    (cmd_help,    "show commands, examples, settings, and group tips"),
+    "onboard": (cmd_onboard, "answer starter questions so I can learn your basics"),
+    "checkins": (cmd_checkins, "view or change occasional check-ins — /checkins on|off"),
+    "profile": (cmd_profile, "see what I've remembered about you"),
+    "reset":   (cmd_reset,   "erase your saved memories — requires /reset confirm"),
+    "reactions": (cmd_reactions, "view or change emoji reactions — /reactions on|off"),
+    "quiet":   (cmd_quiet,   "personal group setting: I chime in less around you"),
+    "chatty":  (cmd_chatty,  "personal group setting: I chime in more around you"),
+    "groupbot": (cmd_groupbot, "group admin: turn me on or off here — /groupbot on|off"),
+    "groupmode": (cmd_groupmode, "group admin: set group chattiness — /groupmode quiet|chatty|normal"),
     "health":  (cmd_health,  "ops health + readiness report (admin-only)"),
     "metrics": (cmd_metrics, "ops metrics snapshot, incl. LLM-by-task (admin-only)"),
 }
@@ -906,6 +934,7 @@ _COMMANDS: dict[str, tuple] = {
 # startup). DMs get the most useful self-service commands; groups get group-safe controls.
 _MENU_DM_KEYS: tuple[str, ...] = (
     "start",
+    "help",
     "onboard",
     "checkins",
     "profile",
@@ -915,6 +944,7 @@ _MENU_DM_KEYS: tuple[str, ...] = (
 
 _MENU_GROUP_KEYS: tuple[str, ...] = (
     "start",
+    "help",
     "quiet",
     "chatty",
     "groupbot",

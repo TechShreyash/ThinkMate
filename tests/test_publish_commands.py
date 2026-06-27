@@ -56,10 +56,10 @@ async def test_setup_bot_commands_when_enabled():
         type(call.kwargs.get("scope")): [cmd.command for cmd in call.args[0]]
         for call in bot.set_my_commands.call_args_list
     }
-    assert {"start", "onboard", "checkins", "profile", "reset", "reactions"}.issubset(
+    assert {"start", "help", "onboard", "checkins", "profile", "reset", "reactions"}.issubset(
         set(published[BotCommandScopeDefault])
     )
-    assert {"start", "quiet", "chatty", "groupbot", "groupmode"}.issubset(
+    assert {"start", "help", "quiet", "chatty", "groupbot", "groupmode"}.issubset(
         set(published[BotCommandScopeAllGroupChats])
     )
     bot.delete_my_commands.assert_not_called()

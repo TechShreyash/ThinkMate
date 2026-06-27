@@ -168,7 +168,7 @@ configuration drives the native Telegram **"/" command menu**, which is publishe
 personal commands are scoped to DMs and group moderation toggles to group chats, while admin-only
 `/health` and `/metrics` are omitted from the public menu.
 
-**The built-in command keys** (in help-display order) are: `start`, `onboard`, `checkins`,
+**The built-in command keys** (in help-display order) are: `start`, `help`, `onboard`, `checkins`,
 `profile`, `reset`, `reactions`, `quiet`, `chatty`, `groupbot`, `groupmode`, `health`, `metrics`.
 
 | Parameter | Type | Default | Description & How to Adjust |
@@ -180,6 +180,7 @@ personal commands are scoped to DMs and group moderation toggles to group chats,
 
 ```dotenv
 CMD_START_NAME=chatbot      # /start is now /chatbot (the bot's main entry point)
+CMD_HELP_NAME=commands      # /help is now /commands
 CMD_PROFILE_NAME=memories   # /profile is now /memories
 CMD_RESET_ENABLED=False     # /reset is removed entirely
 ```

@@ -11,9 +11,11 @@ handlers (they take ``db`` as a parameter). No real LLM or network.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.config import config
 from app.database import models
 from app.handlers.commands import (
     cmd_checkins,
+    cmd_help,
     cmd_onboard,
     cmd_start,
 )
@@ -95,7 +97,9 @@ async def test_start_nudges_onboard_for_fresh_user(mock_mongodb):
     await cmd_start(message, db)
 
     message.answer.assert_called_once()
-    assert "/onboard" in _answered_text(message)
+    text = _answered_text(message)
+    assert "/onboard" in text
+    assert "/help" in text
 
 
 @pytest.mark.asyncio
@@ -111,6 +115,27 @@ async def test_start_does_not_nudge_onboard_once_onboarded(mock_mongodb):
 
     message.answer.assert_called_once()
     assert "/onboard" not in _answered_text(message)
+
+
+# --- 2b. /help direct command list ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_help_shows_beginner_command_sheet_without_admin_commands(mock_mongodb):
+    db = mock_mongodb
+    message = _make_command_message(user_id=5106)
+
+    with patch.object(config, "ADMIN_USER_IDS", {999999}):
+        await cmd_help(message, db)
+
+    message.answer.assert_called_once()
+    text = _answered_text(message)
+    assert "Command cheat sheet" in text
+    assert "/start" in text
+    assert "/help" in text
+    assert "/onboard" in text
+    assert "help me plan my week" in text
+    assert "/health" not in text
+    assert "/metrics" not in text
 
 
 # --- 3. /checkins on / off / status -----------------------------------------------------

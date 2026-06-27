@@ -51,7 +51,7 @@ The rules by chat type:
 | **Channel** | Ignored. |
 
 > **Bot commands in DMs are never treated as conversation.** Registered commands
-> (`/start`, `/onboard`, `/checkins`, `/profile`, `/reset`, `/reactions`) are handled by their dedicated command
+> (`/start`, `/help`, `/onboard`, `/checkins`, `/profile`, `/reset`, `/reactions`) are handled by their dedicated command
 > handlers. Any unregistered slash command (e.g. `/foo`) falls through to the catch-all
 > text handler, which ignores it — no LLM reply and no memory enqueue. Normal
 > conversational messages are still replied to as before.

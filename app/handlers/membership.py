@@ -43,8 +43,14 @@ async def _intro_text(bot) -> str:
             name = "ThinkMate"
 
     handle = f"@{username}" if username else name
-    # Resolved start-command trigger (e.g. "start" or "chatbot") for the DM guide pointer.
+    # Resolved command triggers (e.g. "start" or "chatbot") for the DM guide pointer.
     start_trigger = config.COMMANDS.get("start", ("start", True))[0]
+    help_trigger, help_enabled = config.COMMANDS.get("help", ("help", True))
+    help_hint = (
+        f" or /{html.quote(help_trigger)} for the command cheat sheet"
+        if help_enabled
+        else ""
+    )
 
     return (
         f"👋 Hey everyone, I'm {html.bold(name)} — your group's AI companion.\n\n"
@@ -53,8 +59,8 @@ async def _intro_text(bot) -> str:
         f"💬 {html.bold('To talk to me directly')}, mention me ({html.quote(handle)}) "
         "or reply to one of my messages — I'll always answer. Otherwise I mostly stay "
         "out of the way and only chime in now and then.\n\n"
-        f"📖 DM me /{html.quote(start_trigger)} for the full rundown of what I can do "
-        "and how your data is handled."
+        f"📖 DM me /{html.quote(start_trigger)} for the quick guide{help_hint}, including "
+        "memory controls and group settings."
     )
 
 

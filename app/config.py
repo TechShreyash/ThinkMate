@@ -61,7 +61,7 @@ def _env_int_set(key: str, default: set[int] | None = None) -> set[int]:
 # Canonical built-in command keys, in help-display order. The key is also the DEFAULT
 # trigger name for that command.
 _BUILTIN_COMMANDS: tuple[str, ...] = (
-    "start", "onboard", "checkins",
+    "start", "help", "onboard", "checkins",
     "profile", "reset", "reactions", "quiet", "chatty",
     "groupbot", "groupmode",
     "health", "metrics",
