@@ -17,8 +17,8 @@ becomes a single, coherent reply.
 - **Middlewares** — the two outer middlewares (rate limiting and database-session injection) and how they're registered.
 - **Dependency-injected handlers** — the command handlers, the conversational router, and how a reply and its emoji reaction come from one LLM call.
 - **Group chat routing** — how messages in groups are routed by chat type and whether the bot was addressed.
-- **Engagement commands** — the Phase 12 DM commands (`/onboard`, `/checkins`, `/reactions`) and the `/start`/`/help` enhancements.
-- **Interactive guide** — the button-driven `/guide` tour and the `callback_query` handler that powers it.
+- **Engagement commands** — the Phase 12 DM commands (`/onboard`, `/checkins`, `/reactions`) and the `/start` inline guide/menu.
+- **Interactive guide** — the button-driven tour opened from `/start` and the `callback_query` handler that powers it.
 - **Key architectural guidelines** — the rules that keep the layer thin and predictable.
 
 ---
@@ -121,7 +121,7 @@ client of their own — the middleware hands it over as a parameter.
 
 ### 1. Commands (`app/handlers/commands.py`)
 
-`/start`, `/help`, `/profile`, and `/reset` are implemented. `/reset` requires explicit
+`/start`, `/onboard`, `/checkins`, `/profile`, `/reset`, and `/reactions` are implemented. `/reset` requires explicit
 confirmation (`/reset confirm`) before wiping a user's stored state, which guards against an
 accidental, irreversible erase. Two group-only commands — `/quiet` and `/chatty` — set the
 speaker's ambient `mode` via `affinity_cache.set_mode`; in a DM
@@ -311,7 +311,7 @@ design and the no-LLM ambient funnel are in [group_chat.md](group_chat.md).
 
 ## 💞 Engagement commands *(Phase 12, implemented)*
 
-Phase 12 adds three small, DM-oriented commands plus light enhancements to `/start` and `/help`.
+Phase 12 adds three small, DM-oriented commands plus light enhancements to `/start` and its inline guide.
 They follow the exact same patterns as the existing commands — aiogram `Command`, the injected
 `db`, and `models` CRUD — and none of them makes an LLM call, so they stay fast and predictable.
 
@@ -327,8 +327,7 @@ ordinary extraction pipeline like any other message.
 ### `/checkins` — proactive opt-out / opt-in
 
 `/checkins` controls whether the user receives [proactive check-ins](configuration.md#-proactive-check-ins-phase-12) —
-the occasional messages the bot sends on its own initiative. It replaces the former
-`/pause` + `/resume` pair with a single status-aware toggle:
+the occasional messages the bot sends on its own initiative. It uses a single status-aware toggle:
 
 - **`/checkins`** (no argument) reports the current setting using `models.get_proactive_enabled`.
 - **`/checkins off`** → `models.set_proactive_enabled(db, user_id, False)` — "I won't reach out on
@@ -362,8 +361,7 @@ user turn those off just for themselves:
 
 ### `/groupbot` — group on/off kill switch
 
-`/groupbot` turns the bot on or off for an entire group. It replaces the former `/groupon` + `/groupoff`
-pair with a single status-aware toggle:
+`/groupbot` turns the bot on or off for an entire group with a single status-aware toggle:
 
 - **`/groupbot`** (no argument) reports the group's current state via `models.is_group_enabled` — open
   to anyone in the chat.
@@ -375,7 +373,7 @@ pair with a single status-aware toggle:
 
 **`/start`** upserts the profile and checks the `onboarded` flag, **nudging `/onboard` only when the
 user has not onboarded yet**. Its inline buttons open the interactive guide (*How I work*) and the full
-command list (*Commands*), so there is no separate `/help` or `/guide` command — `/start` is the one
+command list (*Commands*), so there is no separate help or guide slash command — `/start` is the one
 discoverable entry point.
 
 ```python
@@ -409,7 +407,7 @@ Because ThinkMate behaves differently from a typical command bot — it remember
 across conversations — newcomers benefit from a short, plain-language tour rather than a
 wall of slash commands. The guide provides exactly that: a small set of screens the user
 pages through with Telegram **inline buttons** (`InlineKeyboardMarkup`), all inside a
-single message. There is no dedicated `/guide` or `/help` command — the guide is opened
+single message. There is no dedicated guide/help slash command — the guide is opened
 from the buttons attached to `/start`.
 
 ### How it works

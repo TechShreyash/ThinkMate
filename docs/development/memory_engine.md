@@ -145,7 +145,7 @@ async def extract_and_trim(user_id: int):
 ## 🧹 Memory Compression (`memory_compressor.py`)
 
 To prevent profile bloat and respect context limits, `memory_compressor.py` runs when the
-compiled memory block exceeds `USER_MEMORY_BUDGET_CHARS` (default `4000`). It runs as a
+compiled memory block exceeds `USER_MEMORY_BUDGET_CHARS` (default `10000`). It runs as a
 background task (off the hot path) and uses the shared `llm_service` singleton.
 
 Two correctness/efficiency properties matter here:
@@ -203,7 +203,9 @@ To prevent data corruption, a unified `memory_lock = asyncio.Lock()` is initiali
 ## 👥 Multi-Party Extraction in Groups *(Phase 9, implemented)*
 
 In group chats the buffer is shared (`chat_id`-keyed) and each message carries `sender_id` +
-`sender_name`, but **memory stays per `user_id`**. The single entry point
+`sender_name`. Memory has two layers: a **shared group profile** keyed by `chat_id` for
+group-level norms, recurring topics, decisions, and plans, plus **participant profiles** keyed by
+`user_id` for personal facts/beliefs/events. The single entry point
 `extract_and_trim(chat_id)` dispatches DM vs. group with a distinct-human-sender heuristic
 (`_is_group_buffer`: more than one distinct human `sender_id` among the buffered user turns ⇒
 group), so no caller has to change — a DM has exactly one human sender and takes the original
@@ -216,13 +218,17 @@ The group path, `extract_and_trim_group(chat_id)`:
    `MAX_EXTRACTION_ATTEMPTS` attempts so messages arriving mid-call fold into the next attempt.
 2. Makes **one** `llm_service.extract_group_memory` call over the whole segment (rendered as
    `"SenderName: content"` lines), not one call per participant. It returns a
-   `GroupMemoryExtraction` whose `updates` are tagged by participant **name**.
-3. Maps each tagged name back to a `sender_id` using the segment's **own** normalized name→id
+   `GroupMemoryExtraction` with an optional `group_extraction` block and participant `updates`
+   tagged by participant **name**.
+3. Ensures a shared group profile exists (`user_profiles._id = chat_id`) and records the latest
+   group-extraction status. When `group_extraction` contains durable group-level updates, those are
+   saved into that shared profile.
+4. Maps each tagged name back to a `sender_id` using the segment's **own** normalized name→id
    map (`_build_name_id_map`). On duplicate display names, **first id wins**; names that can't be
    resolved are **skipped** rather than misattributed.
-4. Saves each resolved update into that participant's profile via the same normalized, deduped
+5. Saves each resolved update into that participant's profile via the same normalized, deduped
    `save_extracted_memories` CRUD, then **atomically trims** the processed segment.
-5. If every attempt fails, the oldest messages are trimmed anyway (all-fail-still-trim), matching
+6. If every attempt fails, the oldest messages are trimmed anyway (all-fail-still-trim), matching
    the DM contract, so an outage can't grow the buffer unbounded.
 
 DMs are unchanged (a single participant). See [group_chat.md](group_chat.md) and the
@@ -241,7 +247,8 @@ across the entire history.
 
 It is modeled directly on compression: **one LLM call, a single-write apply, never-wipe-on-failure,
 deterministic budget enforcement, and metrics**. It runs entirely off the hot path and is
-**disabled by default** (see [configuration.md](configuration.md#-consolidation-phase-11)).
+**enabled by default** on a daily cadence (see
+[configuration.md](configuration.md#-consolidation-phase-11)).
 
 ### Pipeline
 
@@ -252,8 +259,8 @@ The flow is: **scheduler → `run_consolidator` (under `memory_lock`) → one `c
    starts a periodic loop (`_consolidation_loop`) when enabled, mirroring the Phase 10 metrics
    logger. It is:
    - **Periodic** — every `CONSOLIDATION_SCAN_INTERVAL_SECS` (default `3600`) it runs one scan.
-   - **Disabled by default** — when `CONSOLIDATION_INTERVAL_SECS <= 0` the starter is a no-op and
-     returns `None`, so the feature is entirely off unless explicitly enabled. `main.py` starts the
+   - **Opt-out by interval** — when `CONSOLIDATION_INTERVAL_SECS <= 0` the starter is a no-op and
+     returns `None`, so the feature is entirely off when explicitly disabled. `main.py` starts the
      scheduler after `init_db()`, under the same asyncio loop.
    - **Bounded per scan** — each `_run_consolidation_scan` processes at most
      `CONSOLIDATION_MAX_USERS_PER_SCAN` (default `50`) due users.
@@ -441,4 +448,4 @@ is exactly the desired default.
 
 > See [configuration.md](configuration.md#-engagement--mood-history-phase-12) for `MAX_MOOD_HISTORY`
 > and the proactive keys, and [telegram_bot.md](telegram_bot.md#-engagement-commands-phase-12-implemented)
-> for the `/onboard`, `/pause`, and `/resume` commands.
+> for the `/onboard` and `/checkins` commands.

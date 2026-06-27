@@ -75,7 +75,7 @@ Validates the database accessors inside `app/database/models.py`:
 ### 3. `tests/test_guards_and_compression.py` (Memory Constraints & Budgets)
 Validates limits, formatted system prompts, and memory compression (the step that condenses a user's stored memory when it grows too large):
 
-*   **`test_input_guard_config`**: Confirms all default limits are configured correctly (e.g. `USER_MEMORY_BUDGET_CHARS = 4000`).
+*   **`test_input_guard_config`**: Confirms all default limits are configured correctly (e.g. `USER_MEMORY_BUDGET_CHARS = 10000`).
 *   **`test_build_memory_block_and_compression_flag`**: Ensures the prompt context block compiling structures Facts, Subjective Beliefs, Events, and Mood correctly, and sets the `needs_compression` flag if the compiled length breaches the character budget.
 *   **`test_replace_user_memory`**: Validates the atomic memory replacement method, confirming that compression successfully overwrites facts, beliefs, events, summaries, and communication styles.
 

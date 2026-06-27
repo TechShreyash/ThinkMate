@@ -313,8 +313,9 @@ Telegram ids. To keep the casual DM-only behavior, leave it unset.
 
 ## Reading the `llm_audit_log`
 
-When you need per-call detail (the exact prompt, raw output, parsed JSON, status, and error) the
-in-memory metrics aren't enough — that's what the `llm_audit_log` collection is for. Its full
+When you need per-call operational detail (call type, input/output lengths, status, timestamp, and
+error tracebacks), the in-memory metrics aren't enough — that's what the `llm_audit_log`
+collection is for. It intentionally does not store full prompts or raw model outputs. Its full
 schema lives in [database.md](database.md#3-llm_audit_log-collection).
 
 **Indexes that make reads fast:**

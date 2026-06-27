@@ -174,8 +174,9 @@ respect live in [performance_and_scaling.md](development/performance_and_scaling
   then DB session), include routers, start long-polling.
 - `DbSessionMiddleware` injects the shared `db`. Typing is owned by `UserTaskManager`, not a
   middleware.
-- Commands: `/start`, `/help`, `/profile`, `/reset` (confirm-gated). Group commands `/quiet`,
-  `/chatty` arrive in Phase 9.
+- Commands: `/start`, `/onboard`, `/checkins`, `/profile`, `/reset` (confirm-gated), and
+  `/reactions`. Group commands `/quiet`, `/chatty`, `/groupbot`, and `/groupmode` arrive in
+  later phases.
 - `messages.py`: ignore senderless posts, enforce `MAX_INPUT_CHARS`, enqueue for batching.
 - Reaction (already normalized) is applied to the user's message; failures never block delivery.
 
@@ -254,8 +255,8 @@ ambient-gate logic in `user_task_manager.py`/a new `group_gate.py`, `/quiet` `/c
   `sender_id`+`sender_name` for multi-party context.
 - Reply when addressed (mention / name / reply-to-bot); otherwise run the **ambient gate**:
   per-chat cooldown → cheap keyword scan (no LLM) → affinity-weighted dice roll → ≤1 LLM call.
-- Memory stays per `user_id`; group extraction is multi-party (one call, updates tagged by
-  participant, mapped back via the segment's name→id map).
+- Memory has two layers: group-level updates saved under the `chat_id`, and participant updates
+  saved under each `user_id`; group extraction remains one multi-party call.
 - Affinity in `chat_members` (read-through cache); signals: mentions/engagement up, "stop/quiet"
   keywords down, plus `affinity_delta` piggybacked on the reply JSON. `/quiet` and `/chatty`
   set mode.
@@ -295,7 +296,8 @@ Prometheus/OTel sink can be added later if a metrics backend is introduced.
 
 A scheduled background pass that reviews facts/beliefs/events across the user's whole profile to
 synthesize behavioral trends and durable profile insights — beyond what localized per-overflow
-extraction can see. Runs under `memory_lock`, fully off the hot path, and is disabled by default.
+extraction can see. Runs under `memory_lock`, fully off the hot path, and is enabled by default
+on a daily cadence.
 
 **Status: implemented.** Delivered as a periodic scheduler (`start_consolidation_scheduler` in
 `app/services/health.py`, started from `main.py` after `init_db()`) that finds due users
@@ -305,8 +307,8 @@ extraction can see. Runs under `memory_lock`, fully off the hot path, and is dis
 reuses the deterministic budget enforcer — never wiping memory on failure and not advancing
 `last_consolidated_at` when a run fails. Synthesized **behavioral insights** live in a dedicated,
 bounded `insights` list (capped at `MAX_INSIGHTS`), rendered in the
-`=== BEHAVIORAL INSIGHTS ===` section and never dropped by budget enforcement. Disabled by default
-(`CONSOLIDATION_INTERVAL_SECS=0`). Full design in
+`=== BEHAVIORAL INSIGHTS ===` section and never dropped by budget enforcement. Enabled by default
+(`CONSOLIDATION_INTERVAL_SECS=86400`); set the interval to `0` to disable. Full design in
 [memory_engine.md](development/memory_engine.md#-phase-11--periodic-consolidation-the-dreaming-pass-implemented);
 keys in [configuration.md](development/configuration.md#-consolidation-phase-11).
 
@@ -316,7 +318,7 @@ keys in [configuration.md](development/configuration.md#-consolidation-phase-11)
 
 A set of small, additive engagement features that make ThinkMate feel more present and personable
 between conversations. Everything is built on patterns already proven in earlier phases, adds no
-required config, and is **off by default** wherever it could change behavior.
+required config, and uses conservative defaults wherever it can message first.
 
 **Status: implemented.** Four features ship in this phase:
 
@@ -332,12 +334,13 @@ required config, and is **off by default** wherever it could change behavior.
    line in the `=== CURRENT MOOD ===` block. The list is exempt from budget-driven shedding.
 3. **Onboarding command** — a static, no-LLM `/onboard` that sends a persona-consistent intro,
    seeds the profile, and sets an `onboarded` flag; `/start` nudges `/onboard` only for
-   un-onboarded users, and `/help` lists the new commands.
+   un-onboarded users, and the inline command list shows the available commands.
 4. **Proactive check-ins** — an optional background scheduler (`start_proactive_scheduler(bot)` in
    `app/services/health.py`, mirroring the consolidation scheduler but taking the aiogram `bot`)
    that occasionally sends a single, memory-grounded nudge to inactive users. It is opt-outable
-   (`/pause` / `/resume`), quiet-hours-aware (UTC-only), rate-limited and bounded per scan, never
-   sends empty/fabricated content, and is **disabled by default** (`PROACTIVE_INTERVAL_SECS = 0`).
+   (`/checkins off` / `/checkins on`), quiet-hours-aware (UTC-only), rate-limited and bounded per
+   scan, never sends empty/fabricated content, and is enabled by default with an hourly scan
+   (`PROACTIVE_INTERVAL_SECS = 3600`); set the interval to `0` to disable.
 
 All new profile fields (`last_interaction_at`, `mood_history`, `onboarded`, `last_proactive_at`,
 `proactive_enabled`) are additive and read defensively — **no migration**. Full design in

@@ -36,7 +36,7 @@ def test_telegram_publish_commands_reads_from_env():
 
 @pytest.mark.asyncio
 async def test_setup_bot_commands_when_enabled():
-    """When TELEGRAM_PUBLISH_COMMANDS is True, set_my_commands is called."""
+    """When publishing is enabled, default and group menus are registered."""
     bot = MagicMock()
     bot.set_my_commands = AsyncMock()
     bot.delete_my_commands = AsyncMock()
@@ -48,14 +48,21 @@ async def test_setup_bot_commands_when_enabled():
     finally:
         config.TELEGRAM_PUBLISH_COMMANDS = original
         
-    bot.set_my_commands.assert_called_once()
-    args, kwargs = bot.set_my_commands.call_args
-    assert isinstance(kwargs.get("scope"), BotCommandScopeDefault)
-
-    # The stale group-scoped menu from earlier versions must be cleared.
-    bot.delete_my_commands.assert_called_once()
-    _, del_kwargs = bot.delete_my_commands.call_args
-    assert isinstance(del_kwargs.get("scope"), BotCommandScopeAllGroupChats)
+    assert bot.set_my_commands.call_count == 2
+    scopes = [call.kwargs.get("scope") for call in bot.set_my_commands.call_args_list]
+    assert any(isinstance(scope, BotCommandScopeDefault) for scope in scopes)
+    assert any(isinstance(scope, BotCommandScopeAllGroupChats) for scope in scopes)
+    published = {
+        type(call.kwargs.get("scope")): [cmd.command for cmd in call.args[0]]
+        for call in bot.set_my_commands.call_args_list
+    }
+    assert {"start", "onboard", "checkins", "profile", "reset", "reactions"}.issubset(
+        set(published[BotCommandScopeDefault])
+    )
+    assert {"start", "quiet", "chatty", "groupbot", "groupmode"}.issubset(
+        set(published[BotCommandScopeAllGroupChats])
+    )
+    bot.delete_my_commands.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_setup_bot_commands_when_disabled():

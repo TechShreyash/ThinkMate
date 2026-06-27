@@ -126,7 +126,7 @@ the core hardening pass; Phase H captures efficiency and resilience follow-ups.
 - [x] C3. Combine buffer write+read via `find_one_and_update` to cut round-trips.
 
 ### Phase D — Telegram layer
-- [x] D1. Implement `/help` and `/reset` (reset wipes that user's profile + buffer).
+- [x] D1. Implement the `/start` inline command list and `/reset` (reset wipes that user's profile + buffer).
 - [x] D2. Remove dead `AutoTypingMiddleware` (manual typing loop is the real path).
 - [x] D3. Null guards (`from_user`, null LLM content). Bound throttling dict (evict stale users).
 - [x] D4. Use `generate_reply_bundle` in the batch processor (one call).

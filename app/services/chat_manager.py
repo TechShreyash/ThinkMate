@@ -68,11 +68,32 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
 
 _DEFAULT_PERSONA = f"You are {config.bot_display_name}, a warm, witty AI companion."
 _persona_cache: dict = {"path": None, "mtime": None, "content": _DEFAULT_PERSONA}
+_warned_missing_persona_paths: set[str] = set()
 
 # Affinity-down step applied to the speaker when a cheap "back off" keyword
 # (stop / quiet / spam / annoying / shut up) is detected in their message
 # (Requirement 4.5). AffinityCache.bump clamps the result to [0, 1].
 _NEGATIVE_AFFINITY_STEP = -0.1
+
+
+def validate_persona_file() -> bool:
+    """Warn once when ``PERSONA_FILE`` points at a missing/unreadable file."""
+    path = config.PERSONA_FILE
+    try:
+        os.path.getmtime(path)
+    except OSError as exc:
+        abspath = os.path.abspath(path)
+        if abspath not in _warned_missing_persona_paths:
+            _warned_missing_persona_paths.add(abspath)
+            logger.warning(
+                "Configured PERSONA_FILE {!r} could not be read at {!r}; using fallback "
+                "default persona instead. Fix PERSONA_FILE or create the file. Error: {}",
+                path,
+                abspath,
+                exc,
+            )
+        return False
+    return True
 
 
 def _load_persona() -> str:
@@ -81,6 +102,7 @@ def _load_persona() -> str:
     try:
         mtime = os.path.getmtime(path)
     except OSError:
+        validate_persona_file()
         return _DEFAULT_PERSONA
     if _persona_cache["path"] != path or _persona_cache["mtime"] != mtime:
         try:

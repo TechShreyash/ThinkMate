@@ -14,6 +14,7 @@ patched with ``AsyncMock`` so no network is touched. The extractor calls
 ``app.services.memory_extractor``; we patch that exact reference.
 """
 import pytest
+from pydantic import ValidationError
 from unittest.mock import AsyncMock, patch
 
 from app.config import config
@@ -31,6 +32,15 @@ from app.services.schemas import (
 GROUP_CHAT_ID = -100
 ALICE_ID, ALICE_NAME = 111, "Alice"
 BOB_ID, BOB_NAME = 222, "Bob"
+
+
+def test_group_extraction_rejects_single_user_top_level_shape():
+    """A plain MemoryExtraction JSON must not validate as an empty group extraction."""
+    with pytest.raises(ValidationError):
+        GroupMemoryExtraction.model_validate({
+            "new_facts": [{"category": "relationship", "content": "The group plans lunch"}],
+            "updates": [],
+        })
 
 
 async def _seed_group_buffer(db, *, trim: int):
@@ -97,9 +107,55 @@ async def test_two_speaker_segment_attributes_facts_to_correct_users():
         async with connection.db_session() as db:
             alice_facts = [f["content"] for f in await models.get_active_facts(db, ALICE_ID)]
             bob_facts = [f["content"] for f in await models.get_active_facts(db, BOB_ID)]
+            group_doc = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
 
         assert alice_facts == ["Alice has a cat named Miso"]
         assert bob_facts == ["Bob is a teacher"]
+        assert group_doc["profile_type"] == "group"
+        assert group_doc["last_group_extraction"]["group_saved"] is False
+        assert group_doc["last_group_extraction"]["participant_updates"] == 2
+    finally:
+        config.CHAT_BUFFER_TRIM = original_trim
+
+
+@pytest.mark.asyncio
+async def test_group_extraction_saves_shared_group_memory_to_chat_profile():
+    """Shared group facts are stored under the chat id, separate from participant profiles."""
+    original_trim = config.CHAT_BUFFER_TRIM
+    config.CHAT_BUFFER_TRIM = 2
+    try:
+        async with connection.db_session() as db:
+            await _seed_group_buffer(db, trim=2)
+
+        group_result = GroupMemoryExtraction(
+            group_extraction=MemoryExtraction(
+                new_facts=[
+                    FactExtract(
+                        category="relationship",
+                        content="The group often coordinates lunch plans together",
+                    )
+                ]
+            ),
+            updates=[],
+        )
+
+        with patch.object(
+            memory_extractor.llm_service,
+            "extract_group_memory",
+            new_callable=AsyncMock,
+            return_value=group_result,
+        ):
+            await extract_and_trim_group(GROUP_CHAT_ID)
+
+        async with connection.db_session() as db:
+            group_facts = [f["content"] for f in await models.get_active_facts(db, GROUP_CHAT_ID)]
+            group_doc = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
+            assert group_facts == ["The group often coordinates lunch plans together"]
+            assert group_doc["profile_type"] == "group"
+            assert group_doc["last_group_extraction"]["group_saved"] is True
+            assert group_doc["last_group_extraction"]["participant_updates"] == 0
+            assert await db["user_profiles"].find_one({"_id": ALICE_ID}) is None
+            assert await db["user_profiles"].find_one({"_id": BOB_ID}) is None
     finally:
         config.CHAT_BUFFER_TRIM = original_trim
 
@@ -140,8 +196,13 @@ async def test_unresolved_participant_is_skipped():
             # got nothing (the only update was unresolved).
             assert await db["user_profiles"].find_one({"_id": ALICE_ID}) is None
             assert await db["user_profiles"].find_one({"_id": BOB_ID}) is None
-            # Crucially, no profile was fabricated under the chat id either.
-            assert await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID}) is None
+            # The group profile exists as an extraction status marker, but has no shared facts.
+            group_doc = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
+            assert group_doc["profile_type"] == "group"
+            assert group_doc["last_group_extraction"]["group_saved"] is False
+            assert group_doc["last_group_extraction"]["participant_updates"] == 0
+            assert group_doc["last_group_extraction"]["skipped_updates"] == 1
+            assert group_doc["facts"] == []
     finally:
         config.CHAT_BUFFER_TRIM = original_trim
 

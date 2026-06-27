@@ -40,8 +40,8 @@ T = TypeVar("T", bound=BaseModel)
 # Transient errors worth retrying; 4xx (e.g. BadRequest) are not retried.
 _RETRYABLE = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
 
-# ponytail: To prevent MongoDB bloat and eventual quota errors, we only save the length
-# of the inputs and outputs (metadata) instead of storing the whole text.
+# To prevent MongoDB bloat and reduce sensitive-content retention, audit logs store
+# input/output length metadata instead of full prompt or completion text.
 class LLMService:
     def __init__(self):
         # max_retries=0: our _with_retries is the single, intentional retry policy.
@@ -162,8 +162,9 @@ class LLMService:
                 'Respond with ONLY a JSON object: {"reply": "<message>", "reaction": "<emoji or empty>", '
                 '"affinity_delta": <number or omit>}.\n'
                 '- "reply": your natural conversational message, obeying every style rule above. '
-                "Plain text only — no markdown or code fences. Emojis within the reply are fine if "
-                "they fit your persona.\n"
+                "Telegram text only. Minimal bullets, numbered steps, or short code snippets are "
+                "okay when the user asks or the task clearly needs them; avoid heavy markdown. "
+                "Emojis within the reply are fine if they fit your persona.\n"
                 '- "reaction": INDEPENDENTLY of the reply, optionally pick a SINGLE emoji to react to '
                 "the user's latest message with (this is applied as a Telegram reaction on THEIR "
                 "message, separate from your reply). Choose ONLY from this list, or an empty string "
@@ -180,8 +181,9 @@ class LLMService:
                 "\n\n---\n## RESPONSE FORMAT (STRICT)\n"
                 'Respond with ONLY a JSON object: {"reply": "<message>", "reaction": "<emoji or empty>"}.\n'
                 '- "reply": your natural conversational message, obeying every style rule above. '
-                "Plain text only — no markdown or code fences. Emojis within the reply are fine if "
-                "they fit your persona.\n"
+                "Telegram text only. Minimal bullets, numbered steps, or short code snippets are "
+                "okay when the user asks or the task clearly needs them; avoid heavy markdown. "
+                "Emojis within the reply are fine if they fit your persona.\n"
                 '- "reaction": INDEPENDENTLY of the reply, optionally pick a SINGLE emoji to react to '
                 "the user's latest message with (this is applied as a Telegram reaction on THEIR "
                 "message, separate from your reply). Choose ONLY from this list, or an empty string "

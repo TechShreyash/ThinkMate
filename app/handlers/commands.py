@@ -3,8 +3,8 @@
 Beyond the plain slash commands, this module also powers an interactive, button-driven
 **guide**. The guide is a small set of screens — memory, privacy, groups, check-ins, and
 the full command list — that users page through with Telegram inline buttons
-(``InlineKeyboardMarkup``). There is no longer a dedicated ``/guide`` or ``/help`` slash
-command: the single ``/start`` command is the entry point, and its inline buttons open
+(``InlineKeyboardMarkup``). There are no separate guide/help slash commands: the single
+``/start`` command is the entry point, and its inline buttons open
 the guide and the command list. A single ``callback_query`` handler
 (:func:`on_guide_nav`) edits the message in place as the user taps between screens, so
 newcomers can learn what the bot does without leaving the chat. See
@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 
 from aiogram import F, Router, html
 from aiogram.filters import Command, CommandObject
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
@@ -34,6 +33,7 @@ from app.services.affinity import affinity_cache
 from app.services.health import liveness, readiness
 from app.services.memory_loader import build_memory_block
 from app.services.metrics import metrics, LLM_TASK_TYPES
+from app.services.telegram_text import send_message_text
 
 router = Router(name="commands")
 
@@ -57,12 +57,13 @@ async def _reply(message: Message, text: str, **kwargs):
     (threading is needless there). Falls back to a plain answer if the original message
     can no longer be replied to (e.g. it was deleted).
     """
-    if getattr(getattr(message, "chat", None), "type", None) in ("group", "supergroup"):
-        try:
-            return await message.reply(text, **kwargs)
-        except TelegramBadRequest:
-            return await message.answer(text, **kwargs)
-    return await message.answer(text, **kwargs)
+    return await send_message_text(
+        message,
+        text,
+        prefer_reply=getattr(getattr(message, "chat", None), "type", None)
+        in ("group", "supergroup"),
+        **kwargs,
+    )
 
 
 def _parse_toggle(arg: str | None) -> bool | None:
@@ -341,7 +342,7 @@ def _kb_onboard() -> InlineKeyboardMarkup:
 
 
 def _build_help_text(is_admin: bool) -> str:
-    """Render the grouped command list (shared by /help and the guide)."""
+    """Render the grouped command list shown from the /start guide."""
     resolved = config.COMMANDS
 
     def section(title: str, keys: tuple[str, ...]) -> list[str]:
@@ -541,8 +542,8 @@ async def cmd_onboard(message: Message, db: AsyncIOMotorDatabase):
 async def cmd_checkins(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
     """Turn my occasional proactive check-ins on/off, or report the setting when used alone.
 
-    Replaces the old ``/pause`` + ``/resume`` pair: ``/checkins`` reports the current state,
-    ``/checkins on`` re-enables nudges, ``/checkins off`` stops me from messaging first.
+    ``/checkins`` reports the current state, ``/checkins on`` re-enables nudges, and
+    ``/checkins off`` stops me from messaging first.
     """
     if not message.from_user:
         return
@@ -752,8 +753,8 @@ async def _is_group_admin(message: Message) -> bool:
 async def cmd_groupbot(message: Message, command: CommandObject, db: AsyncIOMotorDatabase):
     """Turn me on/off for the whole group, or report the current state when used alone.
 
-    Replaces the old ``/groupon`` + ``/groupoff`` pair. Group-only. Viewing the state is
-    open to anyone in the chat; changing it is admin-gated (same authorization as before).
+    Group-only. Viewing the state is open to anyone in the chat; changing it is
+    admin-gated.
     """
     if message.chat.type not in ("group", "supergroup"):
         await _reply(message, 
@@ -901,12 +902,23 @@ _COMMANDS: dict[str, tuple] = {
 }
 
 
-# Public command menu surfaced in Telegram's "/" menu (published via set_my_commands at
-# startup). Only the entry-point command (CMD_START_NAME) is published: every other
-# command is discoverable through the in-chat guide opened from /start, keeping the native
-# menu clean and uncluttered.
+# Public command menus surfaced in Telegram's "/" menu (published via set_my_commands at
+# startup). DMs get the most useful self-service commands; groups get group-safe controls.
 _MENU_DM_KEYS: tuple[str, ...] = (
     "start",
+    "onboard",
+    "checkins",
+    "profile",
+    "reset",
+    "reactions",
+)
+
+_MENU_GROUP_KEYS: tuple[str, ...] = (
+    "start",
+    "quiet",
+    "chatty",
+    "groupbot",
+    "groupmode",
 )
 
 
@@ -924,26 +936,20 @@ def _menu_for(keys: tuple[str, ...]) -> list[BotCommand]:
 
 
 async def setup_bot_commands(bot) -> None:
-    """Publish only the entry-point command (CMD_START_NAME) to Telegram's "/" menu.
+    """Publish DM and group command menus to Telegram's "/" menu.
 
-    Every other command is intentionally kept out of the published menu — users discover
-    the rest through the in-chat guide opened from /start. Best-effort: a failure is
-    logged and never blocks startup.
-
-    Also clears any group-scoped menu published by earlier versions: Telegram stores
-    command menus per scope, so setting the default scope alone leaves a stale
-    ``BotCommandScopeAllGroupChats`` menu visible in groups. Deleting it ensures only the
-    entry-point command remains anywhere.
+    The menus honor command renames/disables from config and stay best-effort: a failure
+    is logged and never blocks startup.
     """
     if not config.TELEGRAM_PUBLISH_COMMANDS:
         logger.info("Telegram command menu publishing is disabled by config.")
         return
     try:
         await bot.set_my_commands(_menu_for(_MENU_DM_KEYS), scope=BotCommandScopeDefault())
-        # Drop any group-scoped menu left over from previous versions so groups don't show
-        # stale toggle commands; the default scope then applies everywhere.
-        await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
-        logger.info("Published Telegram command menu (start only); cleared group scope.")
+        await bot.set_my_commands(
+            _menu_for(_MENU_GROUP_KEYS), scope=BotCommandScopeAllGroupChats()
+        )
+        logger.info("Published Telegram command menus for default and group scopes.")
     except Exception as exc:  # noqa: BLE001 - cosmetic; never block startup
         logger.warning(f"set_my_commands failed (command menu not published): {exc}")
 

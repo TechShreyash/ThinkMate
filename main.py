@@ -88,6 +88,11 @@ async def main():
         enqueue=False,
     )
 
+    # Validate the configured persona file after the warning sink is installed so a
+    # broken PERSONA_FILE is visible in logs and forwarded to the Logs_Channel.
+    from app.services.chat_manager import validate_persona_file
+    validate_persona_file()
+
     # Optional proactive check-in scheduler (Phase 12). Needs the aiogram bot to
     # send, so it starts after `bot` is created. No-op unless
     # config.PROACTIVE_INTERVAL_SECS > 0; runs under this asyncio loop.

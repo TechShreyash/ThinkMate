@@ -105,6 +105,28 @@ def _format_extraction_summary(extraction) -> str:
     return ", ".join(parts)
 
 
+def _extraction_has_updates(extraction) -> bool:
+    """True when a MemoryExtraction contains at least one write-worthy update."""
+    if extraction is None:
+        return False
+    return any([
+        extraction.profile_updates and (
+            extraction.profile_updates.communication_style
+            or extraction.profile_updates.gender
+        ),
+        extraction.new_facts,
+        extraction.updated_facts,
+        extraction.removed_facts,
+        extraction.new_beliefs,
+        extraction.updated_beliefs,
+        extraction.removed_beliefs,
+        extraction.new_events,
+        extraction.updated_events,
+        extraction.removed_events,
+        extraction.emotional_state,
+    ])
+
+
 # --- Multi-party (group) extraction helpers ---------------------------------- #
 
 
@@ -195,7 +217,14 @@ def _build_name_id_map(segment: list[dict]) -> dict[str, int]:
 _GROUP_EXTRACTION_NOTE = (
     "=== GROUP CONVERSATION (MULTI-PARTY) ===\n"
     "This is a multi-party group conversation. Each line is prefixed with the speaker's "
-    "name as 'Name: message'. Produce a list of per-participant updates: for each person "
+    "name as 'Name: message'. This group instruction overrides any single-user wording "
+    "above. The top-level JSON MUST contain BOTH keys: group_extraction and updates.\n"
+    "Produce BOTH kinds of memory when useful:\n"
+    "1. group_extraction: shared group memory about the chat itself, such as the group's "
+    "purpose, recurring topics, collective decisions, norms, plans, inside references, "
+    "or group-level events. Never put private participant facts here. If there is no "
+    "shared group memory to save, return an empty MemoryExtraction object for this key.\n"
+    "2. updates: per-participant updates. For each person "
     "you have something worth remembering about, output one entry tagging that participant "
     "by the EXACT name shown, paired with their own memory extraction. Attribute every "
     "fact, belief, and event to the correct speaker — never mix people, and ignore "
@@ -291,19 +320,7 @@ async def _extract_and_trim_single(user_id: int):
                     # fresh-read oldest-N trim removes exactly those, keeping newer arrivals.
                     await models.delete_oldest_buffer_messages(db, user_id, trim_size)
                     
-                    has_updates = any([
-                        extraction.profile_updates and (extraction.profile_updates.communication_style or extraction.profile_updates.gender),
-                        extraction.new_facts,
-                        extraction.updated_facts,
-                        extraction.removed_facts,
-                        extraction.new_beliefs,
-                        extraction.updated_beliefs,
-                        extraction.removed_beliefs,
-                        extraction.new_events,
-                        extraction.updated_events,
-                        extraction.removed_events,
-                        extraction.emotional_state,
-                    ])
+                    has_updates = _extraction_has_updates(extraction)
                     
                     if has_updates:
                         logger.info(
@@ -388,6 +405,19 @@ async def extract_and_trim_group(chat_id: int):
 
                 if result is not None:
                     saved = skipped = 0
+                    group_saved = False
+
+                    group_extraction = getattr(result, "group_extraction", None)
+                    if _extraction_has_updates(group_extraction):
+                        await models.save_extracted_memories(db, chat_id, group_extraction)
+                        group_saved = True
+                        summary = _format_extraction_summary(group_extraction)
+                        await log_forwarder.send(
+                            None,
+                            chat_id,
+                            f"group-memory-extraction-saved: chat={chat_id} | updates: {summary}",
+                        )
+
                     for update in result.updates:
                         resolved_id = name_to_id.get(_normalize_name(update.participant))
                         if resolved_id is None:
@@ -399,19 +429,7 @@ async def extract_and_trim_group(chat_id: int):
                             continue
                         
                         p_extraction = update.extraction
-                        has_updates = any([
-                            p_extraction.profile_updates and (p_extraction.profile_updates.communication_style or p_extraction.profile_updates.gender),
-                            p_extraction.new_facts,
-                            p_extraction.updated_facts,
-                            p_extraction.removed_facts,
-                            p_extraction.new_beliefs,
-                            p_extraction.updated_beliefs,
-                            p_extraction.removed_beliefs,
-                            p_extraction.new_events,
-                            p_extraction.updated_events,
-                            p_extraction.removed_events,
-                            p_extraction.emotional_state,
-                        ])
+                        has_updates = _extraction_has_updates(p_extraction)
                         
                         if has_updates:
                             await models.save_extracted_memories(db, resolved_id, p_extraction)
@@ -423,11 +441,20 @@ async def extract_and_trim_group(chat_id: int):
                                 f"memory-extraction-saved: chat={chat_id} participant_id={resolved_id} | updates: {summary}",
                             )
 
+                    await models.mark_group_memory_extraction(
+                        db,
+                        chat_id,
+                        group_saved=group_saved,
+                        participant_updates=saved,
+                        skipped_updates=skipped,
+                    )
+
                     # Atomic trim of the processed segment (concurrent appends preserved).
                     await models.delete_oldest_buffer_messages(db, chat_id, trim_size)
                     logger.info(
-                        f"Group memory extraction done for chat {chat_id}; saved {saved} "
-                        f"participant update(s), skipped {skipped}, trimmed {trim_size} messages."
+                        f"Group memory extraction done for chat {chat_id}; "
+                        f"group_saved={group_saved}, saved {saved} participant update(s), "
+                        f"skipped {skipped}, trimmed {trim_size} messages."
                     )
                     return
 

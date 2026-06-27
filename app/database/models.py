@@ -141,6 +141,53 @@ async def _ensure_memory_skeleton(db: AsyncIOMotorDatabase, user_id: int):
     )
 
 
+async def mark_group_memory_extraction(
+    db: AsyncIOMotorDatabase,
+    chat_id: int,
+    *,
+    group_saved: bool,
+    participant_updates: int,
+    skipped_updates: int,
+):
+    """Ensure a group-profile document exists and record the latest extraction outcome.
+
+    Shared group memory is stored in ``user_profiles`` under the Telegram ``chat_id``.
+    Even when the model only returns participant updates, this marker makes the group
+    document visible in Compass and explains why there may be no shared facts yet.
+    """
+    now = _utcnow()
+    await db["user_profiles"].update_one(
+        {"_id": chat_id},
+        {
+            "$setOnInsert": {
+                "profile_summary": "",
+                "communication_style": "",
+                "gender": None,
+                "emotional_state": None,
+                "facts": [],
+                "beliefs": [],
+                "events": [],
+                "insights": [],
+                "mood_history": [],
+                "onboarded": False,
+                "created_at": now,
+            },
+            "$set": {
+                "profile_type": "group",
+                "group_chat_id": chat_id,
+                "last_group_extraction_at": now,
+                "last_group_extraction": {
+                    "group_saved": group_saved,
+                    "participant_updates": participant_updates,
+                    "skipped_updates": skipped_updates,
+                },
+                "updated_at": now,
+            },
+        },
+        upsert=True,
+    )
+
+
 async def export_user_data(db: AsyncIOMotorDatabase, user_id: int) -> dict | None:
     """Return a JSON-serializable snapshot of everything stored for ``user_id``.
 
@@ -826,7 +873,7 @@ async def upsert_chat_member(
 async def is_group_enabled(db: AsyncIOMotorDatabase, chat_id: int) -> bool:
     """Return whether the bot is enabled in ``chat_id`` (default: enabled).
 
-    A group is "on" unless an admin has explicitly turned it off via ``/groupoff``.
+    A group is "on" unless an admin has explicitly turned it off via ``/groupbot off``.
     An absent document means the group was never toggled, so the bot is active. This is
     read on every group message, so it must be cheap and never raise — the caller treats
     any failure as "enabled" so a transient DB hiccup can never silence the bot.
@@ -838,7 +885,7 @@ async def is_group_enabled(db: AsyncIOMotorDatabase, chat_id: int) -> bool:
 
 
 async def set_group_enabled(db: AsyncIOMotorDatabase, chat_id: int, enabled: bool):
-    """Upsert the per-chat enabled flag (the ``/groupon`` / ``/groupoff`` kill switch)."""
+    """Upsert the per-chat enabled flag used by the ``/groupbot on|off`` kill switch."""
     now = _utcnow()
     await db["group_settings"].update_one(
         {"_id": chat_id},

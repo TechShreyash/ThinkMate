@@ -368,14 +368,14 @@ async def _handle_group_message(
     if len(user_text) > config.MAX_INPUT_CHARS:
         return
 
-    # Group kill switch: when an admin has turned the bot off in this chat (/groupoff),
+    # Group kill switch: when an admin has turned the bot off in this chat (/groupbot off),
     # ignore the message COMPLETELY — no reply, no ambient chime, no memory, no buffer
     # write. Slash commands never reach here (they're handled by commands.py), so
-    # /groupon can always re-enable the bot. Read defensively: any failure degrades to
+    # /groupbot on can always re-enable the bot. Read defensively: any failure degrades to
     # "enabled" so a transient DB hiccup can never silently mute the bot.
     try:
         if not await models.is_group_enabled(db, message.chat.id):
-            await _trace_routing(message, "group-disabled", "kill switch on (/groupoff)")
+            await _trace_routing(message, "group-disabled", "kill switch on (/groupbot off)")
             return
     except Exception as e:  # noqa: BLE001
         logger.debug(f"group-enabled check failed; treating as enabled: {e}")

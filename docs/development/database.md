@@ -19,7 +19,11 @@ ThinkMate stores all state inside three MongoDB collections. Rather than splitti
 ### 1. `user_profiles` Collection
 Tracks biographical profiles, communication preferences, direct emotional states, and consolidated memory arrays (`facts`, `beliefs`, `events`) in a single self-contained document per user.
 
-* **Primary Key (`_id`)**: Telegram User ID (`int`)
+* **Primary Key (`_id`)**: Telegram User ID (`int`) for personal profiles. Group-level memory uses
+  the Telegram group `chat_id` as `_id`, storing only shared group context such as norms,
+  recurring topics, decisions, and plans. Group docs are marked with `profile_type: "group"` and
+  `last_group_extraction` metadata so Compass can show when extraction ran even if the model saved
+  only participant-specific memories.
 * **Index**: Since the document matches on `_id`, no secondary indices are required for lookup.
 
 #### Example Document Schema:
@@ -69,7 +73,7 @@ Tracks biographical profiles, communication preferences, direct emotional states
 
 > **Additive preference flags.** A few optional fields toggle per-user behavior and are read
 > defensively (absent → default), so no migration is needed: `onboarded` (bool), `proactive_enabled`
-> (bool — set by `/pause`/`/resume`), and `reactions_enabled` (bool — set by `/reactions`; absent or
+> (bool — set by `/checkins on|off`), and `reactions_enabled` (bool — set by `/reactions`; absent or
 > `true` means the bot may add emoji reactions to that user's messages). See
 > [telegram_bot.md](telegram_bot.md#reactions--per-user-emoji-reaction-opt-out).
 
@@ -110,7 +114,7 @@ optimize high-frequency chat reads and writes.
 ---
 
 ### 3. `llm_audit_log` Collection
-A centralized audit log collection to trace all inputs, prompts, API parameters, raw response text, parsed outputs, and latency/error information for LLM executions. The audit log is an append-only diagnostic trail: it records what was sent to and received from the language model so failures can be traced after the fact.
+A centralized audit log collection to trace LLM executions without storing full prompt or completion text. The audit log is an append-only diagnostic trail: it records per-field input/output lengths, call type, status, timestamp, and failure tracebacks so failures can be traced while limiting sensitive-content retention.
 
 * **Primary Key (`_id`)**: Auto-generated `ObjectId`
 * **Compound Index**: `("user_id", 1), ("timestamp", -1)` to optimize log inspection and chronological query lookups per user.
@@ -120,14 +124,14 @@ A centralized audit log collection to trace all inputs, prompts, API parameters,
 {
   "_id": ObjectId("6e3b2e..."),
   "user_id": 12345678,
-  "call_type": "chat_reply",  // "chat_reply" | "memory_extraction" | "group_memory_extraction" | "memory_compression"
+  "call_type": "chat_reply",  // "chat_reply" | "proactive_checkin" | "memory_extraction" | "group_memory_extraction" | "memory_compression" | "memory_consolidation"
   "inputs": {
-    "system_prompt": "...",
-    "messages": [...]
+    "system_prompt": 8472,
+    "messages": 531
   },
   "outputs": {
-    "raw_text": "...",
-    "parsed_json": {...}  // structured JSON dictionary, or null
+    "raw_text": 248,
+    "parsed_json": 96
   },
   "status": "success",  // "success" | "failed"
   "error": null,        // Traceback error string if status is "failed"
@@ -174,7 +178,7 @@ the DB on the hot path.
 
 Stores per-group settings controlled by group admins:
 
-1. **On/off kill switch** (`enabled`) — `/groupoff` / `/groupon`. When a group is disabled,
+1. **On/off kill switch** (`enabled`) — `/groupbot off` / `/groupbot on`. When a group is disabled,
    `_handle_group_message` returns at the top — no reply, no ambient/implicit reply, no identity
    capture, no memory extraction, and no buffer write.
 2. **Group-wide ambient mode** (`group_mode`) — `/groupmode quiet|chatty|normal`. This

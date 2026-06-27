@@ -22,6 +22,7 @@ from app.services.metrics import metrics
 from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector
 from app.services.affinity import affinity_cache
 from app.services import log_forwarder
+from app.services.telegram_text import send_message_text
 
 # Telegram chat.type values that map to the multi-party group path.
 _GROUP_CHAT_TYPES = ("group", "supergroup")
@@ -39,11 +40,12 @@ async def _reply_to(message: Message, text: str):
     blocked the bot) is intentionally NOT caught here — it propagates to the
     caller's blocked-user handling.
     """
-    try:
-        return await message.reply(text)
-    except TelegramBadRequest:
-        # The message to reply to is gone / cannot be replied to — send standalone.
-        return await message.answer(text)
+    return await send_message_text(
+        message,
+        text,
+        prefer_reply=True,
+        enforce_app_limit=True,
+    )
 
 
 class UserState:
@@ -313,7 +315,11 @@ class UserTaskManager:
                                 if chat_type in _GROUP_CHAT_TYPES:
                                     await _reply_to(last_message, reply_text)
                                 else:
-                                    await last_message.answer(reply_text)
+                                    await send_message_text(
+                                        last_message,
+                                        reply_text,
+                                        enforce_app_limit=True,
+                                    )
 
                                 # Record that the bot genuinely spoke in this group so
                                 # the implicit-address recency window reopens from now

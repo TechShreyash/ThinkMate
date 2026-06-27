@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal, Optional
 
 # --- CONVERSATIONAL OUTPUT SCHEMA ---
@@ -110,6 +110,16 @@ class GroupMemoryUpdate(BaseModel):
     extraction: MemoryExtraction = Field(description="The memory extraction attributed to this participant.")
 
 class GroupMemoryExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    group_extraction: Optional[MemoryExtraction] = Field(
+        None,
+        description=(
+            "Optional memory extraction for the shared group itself: group purpose, "
+            "recurring topics, collective decisions, norms, and group-level events. "
+            "Do not put participant-specific personal facts here."
+        ),
+    )
     updates: list[GroupMemoryUpdate] = Field(default_factory=list)
 
 # --- COMPRESSION SCHEMAS ---

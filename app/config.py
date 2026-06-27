@@ -145,26 +145,26 @@ class Config(BaseModel):
     AUDIT_LOG_RETENTION_DAYS: int = Field(default_factory=lambda: _env_int("AUDIT_LOG_RETENTION_DAYS", 30))
 
     # --- Memory tuning ---
-    CHAT_BUFFER_MAX_CHARS: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_MAX_CHARS", 10000))
+    CHAT_BUFFER_MAX_CHARS: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_MAX_CHARS", 4000))
     # New/sparse users (few stored memory items) extract sooner so their profile builds
     # quickly: when a user's stored memory-item count is below NEW_USER_MEMORY_THRESHOLD,
     # extraction triggers at NEW_USER_EXTRACTION_CHARS instead of CHAT_BUFFER_MAX_CHARS.
     NEW_USER_EXTRACTION_CHARS: int = Field(default_factory=lambda: _env_int("NEW_USER_EXTRACTION_CHARS", 1000))
-    NEW_USER_MEMORY_THRESHOLD: int = Field(default_factory=lambda: _env_int("NEW_USER_MEMORY_THRESHOLD", 5))
-    CHAT_BUFFER_TRIM: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_TRIM", 10))
+    NEW_USER_MEMORY_THRESHOLD: int = Field(default_factory=lambda: _env_int("NEW_USER_MEMORY_THRESHOLD", 10))
+    CHAT_BUFFER_TRIM: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_TRIM", 8))
     CHAT_BUFFER_HARD_CAP: int = Field(default_factory=lambda: _env_int("CHAT_BUFFER_HARD_CAP", 200))
-    USER_MEMORY_BUDGET_CHARS: int = Field(default_factory=lambda: _env_int("USER_MEMORY_BUDGET_CHARS", 4000))
+    USER_MEMORY_BUDGET_CHARS: int = Field(default_factory=lambda: _env_int("USER_MEMORY_BUDGET_CHARS", 10000))
     COMPRESSION_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("COMPRESSION_COOLDOWN_SECS", 300.0))
     CHARS_PER_TOKEN: int = Field(default_factory=lambda: _env_int("CHARS_PER_TOKEN", 4))
 
     # --- Batching / responsiveness ---
-    MESSAGE_BATCH_DELAY_SECS: float = Field(default_factory=lambda: _env_float("MESSAGE_BATCH_DELAY_SECS", 1.5))
-    MAX_BATCH_DELAY_SECS: float = Field(default_factory=lambda: _env_float("MAX_BATCH_DELAY_SECS", 5.0))
+    MESSAGE_BATCH_DELAY_SECS: float = Field(default_factory=lambda: _env_float("MESSAGE_BATCH_DELAY_SECS", 2.0))
+    MAX_BATCH_DELAY_SECS: float = Field(default_factory=lambda: _env_float("MAX_BATCH_DELAY_SECS", 6.0))
     USER_STATE_TTL_SECS: float = Field(default_factory=lambda: _env_float("USER_STATE_TTL_SECS", 1800.0))
 
     # --- Input/Output guards ---
-    RATE_LIMIT_MAX_REQUESTS: int = Field(default_factory=lambda: _env_int("RATE_LIMIT_MAX_REQUESTS", 5))
-    RATE_LIMIT_WINDOW_SECS: float = Field(default_factory=lambda: _env_float("RATE_LIMIT_WINDOW_SECS", 10.0))
+    RATE_LIMIT_MAX_REQUESTS: int = Field(default_factory=lambda: _env_int("RATE_LIMIT_MAX_REQUESTS", 10))
+    RATE_LIMIT_WINDOW_SECS: float = Field(default_factory=lambda: _env_float("RATE_LIMIT_WINDOW_SECS", 5.0))
     # Drop messages that predate the process start by more than this many seconds — i.e.
     # backlog that piled up while the bot was DOWN (anchored to startup, not a rolling
     # age, so live traffic on a lagging/high-throughput bot is never dropped). On
@@ -173,19 +173,19 @@ class Config(BaseModel):
     # safety net. 0 disables.
     STALE_MESSAGE_SECS: float = Field(default_factory=lambda: _env_float("STALE_MESSAGE_SECS", 60.0))
     MAX_QUEUED_MESSAGES: int = Field(default_factory=lambda: _env_int("MAX_QUEUED_MESSAGES", 10))
-    MAX_INPUT_CHARS: int = Field(default_factory=lambda: _env_int("MAX_INPUT_CHARS", 2500))
-    MAX_RESPONSE_CHARS: int = Field(default_factory=lambda: _env_int("MAX_RESPONSE_CHARS", 2000))
+    MAX_INPUT_CHARS: int = Field(default_factory=lambda: _env_int("MAX_INPUT_CHARS", 4000))
+    MAX_RESPONSE_CHARS: int = Field(default_factory=lambda: _env_int("MAX_RESPONSE_CHARS", 4000))
 
     # --- Group chat / ambient replies ---
-    GROUP_AMBIENT_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("GROUP_AMBIENT_COOLDOWN_SECS", 90.0))
+    GROUP_AMBIENT_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("GROUP_AMBIENT_COOLDOWN_SECS", 30.0))
     GROUP_AMBIENT_BASE_RATE: float = Field(default_factory=lambda: _env_float("GROUP_AMBIENT_BASE_RATE", 0.25))
     GROUP_CONTEXT_SCAN_EVERY: int = Field(default_factory=lambda: _env_int("GROUP_CONTEXT_SCAN_EVERY", 12))
     AFFINITY_DEFAULT: float = Field(default_factory=lambda: _env_float("AFFINITY_DEFAULT", 0.5))
 
     # --- Group chat / implicit addressing & spam ---
     GROUP_IMPLICIT_RECENCY_SECS: float = Field(default_factory=lambda: _env_float("GROUP_IMPLICIT_RECENCY_SECS", 120.0))
-    GROUP_IMPLICIT_RECENCY_MAX_MSGS: int = Field(default_factory=lambda: _env_int("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 4))
-    GROUP_IMPLICIT_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("GROUP_IMPLICIT_COOLDOWN_SECS", 30.0))
+    GROUP_IMPLICIT_RECENCY_MAX_MSGS: int = Field(default_factory=lambda: _env_int("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 5))
+    GROUP_IMPLICIT_COOLDOWN_SECS: float = Field(default_factory=lambda: _env_float("GROUP_IMPLICIT_COOLDOWN_SECS", 15.0))
     GROUP_MASS_TAG_SPAM_THRESHOLD: int = Field(default_factory=lambda: _env_int("GROUP_MASS_TAG_SPAM_THRESHOLD", 5))
     GROUP_SPAM_BURST_SIMILARITY: float = Field(default_factory=lambda: _env_float("GROUP_SPAM_BURST_SIMILARITY", 0.85))
     GROUP_SPAM_BURST_COUNT: int = Field(default_factory=lambda: _env_int("GROUP_SPAM_BURST_COUNT", 3))
@@ -223,7 +223,7 @@ class Config(BaseModel):
     COMMANDS: dict[str, tuple[str, bool]] = Field(default_factory=resolve_command_config)
 
     # --- Consolidation (Phase 11) ---
-    CONSOLIDATION_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("CONSOLIDATION_INTERVAL_SECS", 0.0))
+    CONSOLIDATION_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("CONSOLIDATION_INTERVAL_SECS", 86400.0))
     CONSOLIDATION_SCAN_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("CONSOLIDATION_SCAN_INTERVAL_SECS", 3600.0))
     CONSOLIDATION_MAX_USERS_PER_SCAN: int = Field(default_factory=lambda: _env_int("CONSOLIDATION_MAX_USERS_PER_SCAN", 50))
     CONSOLIDATION_MIN_ITEMS: int = Field(default_factory=lambda: _env_int("CONSOLIDATION_MIN_ITEMS", 8))
@@ -233,18 +233,18 @@ class Config(BaseModel):
     MAX_MOOD_HISTORY: int = Field(default_factory=lambda: _env_int("MAX_MOOD_HISTORY", 10))
 
     # --- Proactive check-ins (Phase 12) ---
-    PROACTIVE_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_INTERVAL_SECS", 0.0))
-    PROACTIVE_INACTIVITY_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_INACTIVITY_SECS", 172800.0))
-    PROACTIVE_MIN_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_MIN_INTERVAL_SECS", 259200.0))
-    PROACTIVE_MAX_PER_SCAN: int = Field(default_factory=lambda: _env_int("PROACTIVE_MAX_PER_SCAN", 20))
+    PROACTIVE_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_INTERVAL_SECS", 3600.0))
+    PROACTIVE_INACTIVITY_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_INACTIVITY_SECS", 86400.0))
+    PROACTIVE_MIN_INTERVAL_SECS: float = Field(default_factory=lambda: _env_float("PROACTIVE_MIN_INTERVAL_SECS", 172800.0))
+    PROACTIVE_MAX_PER_SCAN: int = Field(default_factory=lambda: _env_int("PROACTIVE_MAX_PER_SCAN", 50))
     PROACTIVE_MIN_ITEMS: int = Field(default_factory=lambda: _env_int("PROACTIVE_MIN_ITEMS", 3))
     # Auto-pause proactive DMs for an unresponsive user: after this many consecutive
     # delivered check-ins with no reply (no chat message or command in between), the user
     # is skipped by the scan until they engage again, which resets the streak. 0 disables
     # the auto-pause (check-ins keep going regardless of silence).
     PROACTIVE_MAX_UNANSWERED: int = Field(default_factory=lambda: _env_int("PROACTIVE_MAX_UNANSWERED", 3))
-    PROACTIVE_QUIET_START_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_START_HOUR", 22))
-    PROACTIVE_QUIET_END_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 7))
+    PROACTIVE_QUIET_START_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_START_HOUR", 16))
+    PROACTIVE_QUIET_END_HOUR: int = Field(default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 2))
 
     @property
     def bot_display_name(self) -> str:

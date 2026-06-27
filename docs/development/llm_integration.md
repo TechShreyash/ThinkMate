@@ -105,13 +105,13 @@ user always gets an answer. If that raw fallback is itself empty/blank, the batc
 substitutes a short graceful line so Telegram never rejects an empty send (see
 [telegram_bot.md](telegram_bot.md)).
 
-> **No `max_tokens` cap.** Reply length is governed entirely by the persona/system-prompt
-> "Length" rule ("there is no fixed length limit; mirror the user"), not by a hard token
-> ceiling. An earlier build derived `max_tokens` from `MAX_RESPONSE_CHARS / CHARS_PER_TOKEN`;
-> that risked cutting the JSON envelope off mid-string (invalid JSON → raw-text fallback, and
-> occasionally an empty send), so the cap was removed from both `generate_reply_bundle` and
-> `generate_checkin`. `MAX_RESPONSE_CHARS` and `CHARS_PER_TOKEN` no longer drive any output
-> limit.
+> **No `max_tokens` cap.** The LLM request does not derive a token ceiling from
+> `MAX_RESPONSE_CHARS / CHARS_PER_TOKEN`; doing that risked cutting the JSON envelope off
+> mid-string (invalid JSON → raw-text fallback, and occasionally an empty send). Instead,
+> `MAX_RESPONSE_CHARS` is applied after generation as an app-level cap for LLM replies and
+> proactive check-ins, then the Telegram sender splits delivery into chunks below Telegram's
+> 4096-character message limit. Set `MAX_RESPONSE_CHARS <= 0` to disable the app cap while
+> keeping Telegram-safe chunking.
 
 > **Group chats (Phase 9, implemented):** calling `generate_reply_bundle(..., with_affinity=True)`
 > (the group path) switches the return contract to `(reply, reaction, affinity_delta)` and asks the
@@ -209,22 +209,25 @@ Three additions support group chat without disturbing the DM contract:
   populated only on the group path (`with_affinity=True`) and ignored in DMs.
 * **`GroupMemoryUpdate`** — pairs a `participant` name (exactly as rendered in the group segment)
   with a standard `MemoryExtraction` attributed to that person.
-* **`GroupMemoryExtraction`** — `{ updates: list[GroupMemoryUpdate] }`, the result of the
-  multi-party extraction call.
+* **`GroupMemoryExtraction`** — `{ group_extraction?: MemoryExtraction, updates: list[GroupMemoryUpdate] }`,
+  the result of the multi-party extraction call. `group_extraction` is for shared group context;
+  `updates` is for participant-specific memory.
 
 `extract_group_memory(chat_id_or_user_id, system_prompt, user_history_text)` mirrors
 `extract_memory` exactly — same model selection, retry / `json_object` / `native_parse` handling,
 temperature, timeout, and `None`-on-failure contract — but validates against
-`GroupMemoryExtraction`. Its first argument is used only for audit logging; attribution is resolved
-by the caller from the segment's own name→id map (see [memory_engine.md](memory_engine.md)).
+`GroupMemoryExtraction`. The first argument is also the key for shared group memory on the group
+path; participant attribution is resolved by the caller from the segment's own name→id map (see
+[memory_engine.md](memory_engine.md)).
 
 ---
 
 ## 🔎 Centralized Database Audit Trail (`llm_audit_log`)
 
-The four LLM call types — `chat_reply` (reply **and** reaction), `memory_extraction`,
-`group_memory_extraction` (multi-party group extraction), and `memory_compression` — are traced
-in `LLMService`, recording prompt inputs, outputs, parsed JSON, status, and error tracebacks.
+The LLM call types — `chat_reply` (reply **and** reaction), `proactive_checkin`,
+`memory_extraction`, `group_memory_extraction` (multi-party group extraction),
+`memory_compression`, and `memory_consolidation` — are traced in `LLMService`, recording
+input/output lengths, status, and error tracebacks.
 Centralizing this trace in one service means every call type is logged the same way, with no
 per-caller bookkeeping.
 
@@ -235,8 +238,9 @@ Three properties keep this safe at scale:
 2. **TTL-friendly timestamp.** `timestamp` is stored as a real `datetime` (not an ISO string)
    so the TTL index in `init_db` (`AUDIT_LOG_RETENTION_DAYS`) actually expires old entries.
    (TTL — "time to live" — is MongoDB's mechanism for auto-deleting documents after an age.)
-3. **Bounded size.** Long strings (prompts, histories) are truncated via `_truncate` before
-   insertion, so a single document can't balloon.
+3. **Bounded size and better privacy.** Prompts, histories, model completions, and parsed JSON are
+   summarized as string lengths before insertion, so a single document can't balloon and routine
+   audit rows do not retain conversation text.
 
 ```python
 def _fire_log(self, *args, **kwargs):
@@ -246,7 +250,7 @@ def _fire_log(self, *args, **kwargs):
     task.add_done_callback(self._bg_tasks.discard)
 ```
 
-* **Success**: `status = "success"`, raw completion text, parsed JSON, `error = None`.
+* **Success**: `status = "success"`, input/output length metadata, `error = None`.
 * **Failure**: captures the traceback, logs `status = "failed"`. Chat replies re-raise (the
   batch processor sends a friendly fallback message); **`extract_memory` and `compress_memory`
   return `None`** so the caller can tell a failed call from a legitimately empty one. The

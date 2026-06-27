@@ -288,6 +288,7 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
     from app.services.llm_service import llm_service
     from app.services.chat_manager import _load_persona, build_time_context
     from app.prompts.system_prompt import build_system_prompt
+    from app.services.telegram_text import send_bot_text
 
     async with db_session() as db:
         memory_text, _ = await build_memory_block(db, user_id)
@@ -301,7 +302,7 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
         if not text:
             return "skipped"
         try:
-            await bot.send_message(chat_id=user_id, text=text)
+            await send_bot_text(bot, user_id, text, enforce_app_limit=True)
         except Exception as e:  # Forbidden / blocked / network — stop nagging this user.
             logger.warning(f"Proactive send failed for user {user_id}: {e}; disabling for them.")
             await models.set_proactive_enabled(db, user_id, False)

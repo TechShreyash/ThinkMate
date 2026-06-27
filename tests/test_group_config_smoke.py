@@ -15,8 +15,8 @@ from app.config import config
 # (attribute name, documented default, caster, sample env-override value)
 _KNOBS = [
     ("GROUP_IMPLICIT_RECENCY_SECS", 120.0, float, "200.5"),
-    ("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 4, int, "7"),
-    ("GROUP_IMPLICIT_COOLDOWN_SECS", 30.0, float, "45.0"),
+    ("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 5, int, "7"),
+    ("GROUP_IMPLICIT_COOLDOWN_SECS", 15.0, float, "45.0"),
     ("GROUP_MASS_TAG_SPAM_THRESHOLD", 5, int, "8"),
     ("GROUP_SPAM_BURST_SIMILARITY", 0.85, float, "0.9"),
     ("GROUP_SPAM_BURST_COUNT", 3, int, "6"),

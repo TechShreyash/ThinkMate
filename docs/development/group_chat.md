@@ -51,22 +51,22 @@ The rules by chat type:
 | **Channel** | Ignored. |
 
 > **Bot commands in DMs are never treated as conversation.** Registered commands
-> (`/start`, `/help`, `/profile`, `/reset`) are handled by their dedicated command
+> (`/start`, `/onboard`, `/checkins`, `/profile`, `/reset`, `/reactions`) are handled by their dedicated command
 > handlers. Any unregistered slash command (e.g. `/foo`) falls through to the catch-all
 > text handler, which ignores it — no LLM reply and no memory enqueue. Normal
 > conversational messages are still replied to as before.
 
-## Group kill switch (`/groupon` and `/groupoff`)
+## Group kill switch (`/groupbot on|off`)
 
 Any group admin (or a globally-configured `ADMIN_USER_IDS` operator) can turn the bot completely
 on or off for a whole group:
 
-* **`/groupoff`** — the bot goes fully silent in that chat. `_handle_group_message` checks the
+* **`/groupbot off`** — the bot goes fully silent in that chat. `_handle_group_message` checks the
   per-chat flag at the very top and returns immediately when the group is disabled: **no reply, no
   ambient chime, no implicit reply, no identity capture, no memory extraction, and no buffer
   write.** It is as if the bot were not in the group at all.
-* **`/groupon`** — re-enables the bot. Because slash commands are handled by
-  [`commands.py`](../../app/handlers/commands.py) (not the conversational text handler), `/groupon`
+* **`/groupbot on`** — re-enables the bot. Because slash commands are handled by
+  [`commands.py`](../../app/handlers/commands.py) (not the conversational text handler), `/groupbot on`
   always works even while the group is disabled.
 
 The flag is stored in the `group_settings` collection (`_id = chat_id`, `enabled: bool`) via
@@ -76,7 +76,7 @@ degrades to "enabled" on any DB error, so a transient hiccup can never silently 
 Authorization uses `bot.get_chat_member` to confirm administrator/creator status; the commands
 reply with a short notice when used outside a group or by a non-admin. Both commands are
 env-mappable/disable-able like every other command (see
-[configuration.md](configuration.md#️-commands-rename--disable), keys `groupon` / `groupoff`).
+[configuration.md](configuration.md#️-commands-rename--disable), key `groupbot`).
 
 ## Group-wide chattiness (`/groupmode quiet|chatty|normal`)
 
@@ -115,9 +115,11 @@ group-aware path serve DMs unchanged.
 * **Buffers are keyed by `chat_id`** (in a DM, `chat_id == user_id`, so DMs are unchanged).
   Each buffered message carries `sender_id` + `sender_name`, so group context is multi-party
   ("Alice: …", "Bob: …") and memory can be attributed to the right person.
-* **Memory (facts/beliefs/events) stays per `user_id`.** In groups, extraction is multi-party:
-  one LLM call over the segment returns updates tagged by participant name, which are mapped
-  back to each `sender_id` (using the segment's own name→id map) and saved to each profile.
+* **Memory has a shared layer and a personal layer.** Group extraction makes one LLM call over the
+  segment. Shared group-level facts, norms, recurring topics, decisions, and plans are saved to a
+  group profile keyed by `chat_id`; personal facts/beliefs/events are tagged by participant name,
+  mapped back to each `sender_id` (using the segment's own name→id map), and saved to that
+  person's profile.
 * **Affinity** lives in `chat_members` (`_id = "{chat_id}:{user_id}"`): `affinity` (0–1,
   default 0.5), `mode` (`auto` / `quiet` / `chatty`). Cached in memory, written through on change.
 * **Group on/off + group-wide mode** live in `group_settings` (`_id = chat_id`, `enabled: bool`,
@@ -341,8 +343,8 @@ default):
 | Knob | Default | What it tunes |
 |---|---|---|
 | `GROUP_IMPLICIT_RECENCY_SECS` | `120.0` | Bot_Recency_Window elapsed-time bound — max seconds since the bot spoke for a follow-up to be implicit. |
-| `GROUP_IMPLICIT_RECENCY_MAX_MSGS` | `4` | Bot_Recency_Window intervening-message bound — max human messages since the bot spoke. |
-| `GROUP_IMPLICIT_COOLDOWN_SECS` | `30.0` | Implicit_Cooldown — at most one implicit direct reply per chat per window. |
+| `GROUP_IMPLICIT_RECENCY_MAX_MSGS` | `5` | Bot_Recency_Window intervening-message bound — max human messages since the bot spoke. |
+| `GROUP_IMPLICIT_COOLDOWN_SECS` | `15.0` | Implicit_Cooldown — at most one implicit direct reply per chat per window. |
 | `GROUP_MASS_TAG_SPAM_THRESHOLD` | `5` | Distinct-@mention count above which a single message is mass-tag spam (strict `>`). |
 | `GROUP_SPAM_BURST_SIMILARITY` | `0.85` | `difflib` ratio at/above which two mention-stripped contents are near-identical. |
 | `GROUP_SPAM_BURST_COUNT` | `3` | Near-identical messages within the window that classify a greeting burst. |

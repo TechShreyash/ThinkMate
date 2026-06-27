@@ -37,7 +37,7 @@ ThinkMate/
 ├── app/                            # Source code directory
 │   ├── config.py                   # Environment validation & settings schemas
 │   ├── handlers/                   # aiogram event dispatch routers
-│   │   ├── commands.py             # Slash commands (/start, /guide, /health, /metrics)
+│   │   ├── commands.py             # Slash commands, inline guide, Telegram command menus
 │   │   ├── membership.py           # Group join transition greetings
 │   │   ├── messages.py             # Chat-type router & ambient gate handoff
 │   │   └── middlewares.py          # Rate limiting middleware & session injects
