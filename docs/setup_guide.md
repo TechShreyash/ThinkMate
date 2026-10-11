@@ -9,7 +9,8 @@ You will move through five stages — checking prerequisites, cloning and prepar
 ## 📋 Prerequisites
 
 Before starting, ensure your system meets the following requirements:
-*   **Python**: Version `3.12` or higher installed (matches `pyproject.toml`'s `requires-python`).
+*   **Python**: Version `3.14` or higher (matches `pyproject.toml`'s `requires-python`). Development and Docker use Python `3.14.8` for compatibility with official Docker images and dependency wheels.
+*   **uv**: Use a current version to download the pinned Python release. Update an existing standalone installation with `uv self update`.
 *   **Git**: Installed (for cloning the repository and managing version control).
 *   **MongoDB**: An active MongoDB server or connection string (Atlas or local instance).
 *   **LLM Provider**: Either an active API key (OpenAI, OpenRouter, Groq) or a running local inference server (LM Studio, Ollama).
@@ -30,8 +31,9 @@ ThinkMate uses the high-performance Python package manager **`uv`** for managing
     ```
 
 2.  **Create a virtual environment**:
-    A virtual environment isolates ThinkMate's dependencies from the rest of your system, so project versions never clash with other Python tools. Using `uv`, create the virtual environment:
+    A virtual environment isolates ThinkMate's dependencies from the rest of your system, so project versions never clash with other Python tools. Install the version pinned in `.python-version`, then create the virtual environment:
     ```bash
+    uv python install
     uv venv
     ```
 
@@ -47,9 +49,9 @@ ThinkMate uses the high-performance Python package manager **`uv`** for managing
         ```
 
 4.  **Install dependencies**:
-    This pulls in every package ThinkMate needs, pinned in `requirements.txt`:
+    This installs runtime and development dependencies using the versions pinned in `uv.lock`:
     ```bash
-    uv pip install -r requirements.txt
+    uv sync --extra dev --locked
     ```
 
 4.  **Copy the configuration file**:

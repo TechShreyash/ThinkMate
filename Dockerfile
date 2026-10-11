@@ -4,7 +4,7 @@
 # MongoDB is external (Atlas), so this image runs the bot process only:
 # no exposed ports, no bundled database.
 
-FROM python:3.12-slim
+FROM python:3.14.8-slim
 
 # - PYTHONUNBUFFERED: stream logs straight to stdout (Coolify/Docker capture them)
 # - PYTHONDONTWRITEBYTECODE: no .pyc clutter

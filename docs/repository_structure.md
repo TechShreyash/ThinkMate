@@ -75,7 +75,7 @@ ThinkMate/
 
 ThinkMate is built on an async-first Python stack, optimized for single-process high-performance polling:
 
-*   **Runtime**: Python 3.12+
+*   **Runtime**: Python 3.14+ (Python 3.14.8 pinned for development and Docker)
 *   **Telegram Handler**: `aiogram` (v3.x) with custom middleware for database injection, rate-limiting, and concurrent user locking.
 *   **Database**: `MongoDB` utilizing the `motor` asynchronous driver.
 *   **LLM Client**: `openai` SDK compatible with any provider (OpenAI, OpenRouter, Groq, LM Studio, Ollama).

@@ -3,12 +3,12 @@
 > 🚀 **Live Demo:** Chat with the bot on Telegram: [@ThinkMate_AIBot](https://t.me/ThinkMate_AIBot)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Python: 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Python: 3.14+](https://img.shields.io/badge/Python-3.14+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Database: MongoDB](https://img.shields.io/badge/Database-MongoDB-47A248.svg?logo=mongodb&logoColor=white)](https://www.mongodb.com/)
 
 ThinkMate is a self-learning, long-term memory Telegram AI companion. Instead of forgetting everything the moment a session ends, ThinkMate continuously tracks your life events, conversational vibe, and ongoing context. It is designed to feel less like a bot and more like chatting with a highly observant, long-term friend.
 
-Designed for self-hosted deployment, ThinkMate runs entirely on infrastructure you own (Python 3.12, MongoDB, and any OpenAI-compatible API or local LLM like Llama-3/Gemini), guaranteeing absolute data ownership and multi-tenant isolation with zero reliance on third-party memory SaaS platforms.
+Designed for self-hosted deployment, ThinkMate runs entirely on infrastructure you own (Python 3.14, MongoDB, and any OpenAI-compatible API or local LLM like Llama-3/Gemini), guaranteeing absolute data ownership and multi-tenant isolation with zero reliance on third-party memory SaaS platforms.
 
 ---
 
