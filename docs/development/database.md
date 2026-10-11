@@ -85,7 +85,7 @@ An illustrative exported buffer is valid JSON; its timestamps represent BSON dat
 
 `get_chat_buffer` returns only `{role, content}`. Extraction reads the raw document directly for timestamps and group identity.
 
-The normal trim helper reads the current array and removes entries older than a timestamp cutoff with `$pull`. Message timestamps use a process-local monotonic millisecond clock. The legacy missing-timestamp fallback and removing the entire buffer use array replacement. See [memory concurrency limits](memory_engine.md#concurrency-and-retention-limits) for snapshot and multi-process caveats.
+New messages carry a unique `message_id`. Extraction passes its original raw buffer snapshot to the trim helper, which removes only those processed IDs with `$pull`. Concurrent appends and hard-cap eviction cannot change the removal set. Legacy messages without IDs use array replacement conditioned on the entire array still matching the snapshot; concurrent changes defer that trim until a later extraction. Observation timestamps retain a process-local monotonic millisecond clock.
 
 ### `llm_audit_log`
 
@@ -103,22 +103,24 @@ Each logical LLM operation records `user_id`, `call_type`, `inputs`, `outputs`, 
 
 ## Memory update semantics
 
-`save_extracted_memories` loads the current profile, mutates arrays in Python, and writes all changed fields with one `$set`:
+`save_extracted_memories` loads the current profile, builds updated arrays in Python, and applies one conditional `$set`. The write matches the memory fields of the read snapshot; if another conversation changed them, it retries against the latest profile up to five times. Repeated conflicts leave messages available for a later extraction instead of trimming after an unsuccessful save.
 
 - Fact/belief removals and updates compare case-folded text with collapsed whitespace. This matches casing/spacing differences, not paraphrases.
-- New facts/beliefs/events and updated facts/beliefs are deduplicated by normalized content. Updated events are appended without the same deduplication check.
+- New and updated facts/beliefs/events are deduplicated by normalized content.
 - Event updates keep the original date and significance when their replacement values are null, and preserve original emotional context and creation time when the old entry is found.
 - Mood updates also append a bounded mood-history entry. Non-null style/gender updates do not clear earlier values when omitted.
 
 `replace_user_memory` and `apply_consolidation` replace the fact/belief/event arrays with the model's returned lists. They rebuild item timestamps and clear event emotional context. Consolidation also replaces insights and advances its timestamp. Null summary/style fields preserve the corresponding previous values. Both helpers always preserve the recorded mood, its observation time, and mood history; maintenance output cannot establish a new mood. A valid result with empty lists empties the arrays; callers skip replacement only for `None`.
 
-Individual MongoDB writes are atomic. Loading, transforming, and saving a profile is not one atomic transaction. The conversation lock reduces overlapping writes for a single ID in one process, but does not protect a participant profile against simultaneous extraction from another group or DM. Group writes and history trim are separate operations. See [memory engine](memory_engine.md).
+Compression and consolidation capture the profile before the LLM call and apply their results only if its memory fields still match. A concurrent memory change or reset skips replacement, preserving the newer data. The budget post-pass also conditions its write on the profile snapshot. Identity and engagement updates do not invalidate these memory writes. Group writes and history trim remain separate operations rather than a transaction. See [memory engine](memory_engine.md).
+
+Each profile carries a UUID `memory_generation`, assigned at creation or conditionally initialized for legacy profiles. Extraction captures it before the LLM call and requires the same generation at save time. Deleted or recreated profiles reject stale output without recreating the old profile; group status markers also require their captured generation. Known owners whose profiles are initially absent receive identity-free empty skeletons before the call, including participants omitted from the memory context budget. Unresolved names never create profiles. The token is deleted with its profile and leaves no tombstone. Direct `save_extracted_memories` callers may omit the expected generation to retain their existing create-if-absent behavior.
 
 ## Reset and data retention
 
 `export_user_data(db, user_id)` returns the full personal `user_profiles` document and the same-ID DM `chat_buffers` document, plus `user_id` and `exported_at`. It returns `None` when the profile is absent, even if a buffer exists. BSON/Python values require serialization such as `json.dumps(..., default=str)`.
 
-The [reset handler](../../app/handlers/commands.py) requires `/reset confirm` (or the configured reset trigger) and attempts to send that snapshot as `backup_<user_id>.json` to `LOGS_CHANNEL_ID` before deletion. The backup operation is awaited but best effort: an unset channel, missing permissions, or a send failure does not prevent deletion. There is no built-in restore command, and the handler's success text does not establish that a backup was delivered.
+The [reset handler](../../app/handlers/commands.py) requires `/reset confirm` (or the configured reset trigger). It stops prior owned DM work and holds new DM messages through snapshot export and deletion. If prior work does not stop within 10 seconds, deletion does not proceed. It attempts to send the snapshot as `backup_<user_id>.json` to `LOGS_CHANNEL_ID` before deletion. The backup operation is awaited but best effort: an unset channel, missing permissions, or a send failure does not prevent deletion. There is no built-in restore command; the success text mentions a backup only after its upload succeeds.
 
 `reset_user` performs two separate deletions: the personal profile and the same-ID DM buffer. It does **not** delete:
 
@@ -127,7 +129,7 @@ The [reset handler](../../app/handlers/commands.py) requires `/reset confirm` (o
 - Audit entries, metrics, local logs, or files/messages already sent to the logs channel.
 - Data held by Telegram, the configured LLM provider, or external database backups.
 
-It also does not cancel queued chat work or in-flight extraction. That work, or later group extraction from retained messages, can recreate a profile. Reset is therefore a local profile/DM-buffer reset, not complete account-data erasure.
+Shared group work continues. Captured generation tokens reject obsolete extraction results, but later group extraction from retained messages or new DM activity can create a profile again. Reset is therefore a local profile/DM-buffer reset, not complete account-data erasure.
 
 Profiles, active buffers, and other non-audit collections have no automatic age-based retention in this implementation. Mood and insight lists have item caps; memory compression is a content-reduction mechanism, not a deletion policy for all records. Restrict access to MongoDB and the logs channel because profiles and reset snapshots contain personal conversation data. A person's global profile is also included when replying to them in a group, so there is no enforced separation of DM memories from group reply context.
 

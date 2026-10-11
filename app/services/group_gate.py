@@ -10,11 +10,10 @@ group message *before* any LLM call is considered:
 - :func:`scan_negative_signal` — cheap "back off" detector (stop / quiet / spam /
   annoying / shut up) used as an affinity-down signal.
 
-Everything here accepts plain values (``str``, ``bool``, simple objects) and has
-**no aiogram or DB imports**, so it is directly unit-testable and side-effect
-free. The stateful ambient funnel (``AmbientGate``) and the affinity cache
-(``AffinityCache``) live in later tasks (4.1 and 5.1) and are intentionally not
-implemented here.
+The stateless helpers accept plain values (``str``, ``bool``, simple objects)
+and have **no aiogram or DB imports**, so they are directly unit-testable.
+This module also owns the bounded, in-memory ambient, implicit-address, and
+spam-burst gates; the affinity cache lives in ``affinity.py``.
 
 All matching is case-insensitive and uses word boundaries where appropriate. The
 helpers are defensive: malformed input never raises — it degrades to ``False``.
@@ -39,6 +38,25 @@ _MENTION_ENTITY_TYPES: frozenset[str] = frozenset({"mention", "text_mention"})
 # Fallback @mention token matcher, used when entity offsets are absent or
 # malformed so similarity comparison still excludes obvious @mentions.
 _MENTION_TOKEN_RE: re.Pattern[str] = re.compile(r"@\w+")
+
+
+def _entity_range(text: str, offset: int, length: int) -> tuple[int, int] | None:
+    """Convert Telegram's UTF-16 entity offsets to Python string indices."""
+    if offset < 0 or length <= 0:
+        return None
+    encoded = text.encode("utf-16-le")
+    start, end = offset * 2, (offset + length) * 2
+    if end > len(encoded):
+        return None
+    try:
+        return (
+            len(encoded[:start].decode("utf-16-le")),
+            len(encoded[:end].decode("utf-16-le")),
+        )
+    except UnicodeError:
+        # An offset inside a surrogate pair is a malformed entity.
+        return None
+
 
 # Cheap-trigger patterns. Each entry is a pre-compiled, case-insensitive regex.
 # Kept conservative but reasonable; word boundaries avoid matching inside words.
@@ -182,9 +200,8 @@ def _has_mention_entity(entities, text: str, handle: str) -> bool:
 
     Tolerant of ``None``/empty and of objects missing the expected attributes.
     For a plain ``mention`` entity, the referenced slice of ``text`` is compared
-    against ``@handle``; ``text_mention`` entities (which carry a user object) are
-    treated as a positive signal only when their slice matches as well. Never
-    raises.
+    against ``@handle``; ``text_mention`` entities identify the linked user's
+    username. Their editable display text cannot establish the linked identity.
     """
     if not entities:
         return False
@@ -203,11 +220,19 @@ def _has_mention_entity(entities, text: str, handle: str) -> bool:
             continue
         if offset < 0 or length <= 0:
             continue
-        fragment = text[offset : offset + length]
         if not handle:
             # No username to compare against; presence of a mention entity is
             # itself a weak positive signal.
             return True
+        if etype == "text_mention":
+            username = getattr(getattr(entity, "user", None), "username", None)
+            if isinstance(username, str) and username.casefold() == handle.casefold():
+                return True
+            continue
+        indices = _entity_range(text, offset, length)
+        if indices is None:
+            continue
+        fragment = text[indices[0] : indices[1]]
         if fragment.lstrip("@").lower() == handle.lower():
             return True
     return False
@@ -228,7 +253,8 @@ def count_distinct_mentions(text, entities) -> int:
     - ``text_mention`` entities (inline name links carrying a ``user`` object):
       distinct by the carried ``user.id``.
 
-    Tagging the same person twice counts once. The function is tolerant of
+    Tagging the same person twice counts once, including mixed mention kinds
+    when the linked user's username is known. The function is tolerant of
     ``None``/empty/malformed entities (it skips anything it cannot read) and
     never raises — returning ``0`` on total failure.
 
@@ -249,6 +275,7 @@ def count_distinct_mentions(text, entities) -> int:
             return 0
 
         handles: set[str] = set()
+        linked_handles: set[str] = set()
         user_ids: set[object] = set()
         for entity in iterator:
             etype = getattr(entity, "type", None)
@@ -259,6 +286,9 @@ def count_distinct_mentions(text, entities) -> int:
                 uid = getattr(user, "id", None)
                 if uid is not None:
                     user_ids.add(uid)
+                    username = getattr(user, "username", None)
+                    if isinstance(username, str) and username:
+                        linked_handles.add(username.casefold())
                 continue
             # Plain ``mention`` entity: distinct by sliced, case-folded handle.
             offset = getattr(entity, "offset", None)
@@ -267,10 +297,13 @@ def count_distinct_mentions(text, entities) -> int:
                 continue
             if offset < 0 or length <= 0:
                 continue
-            fragment = safe_text[offset : offset + length].lstrip("@").casefold()
+            indices = _entity_range(safe_text, offset, length)
+            if indices is None:
+                continue
+            fragment = safe_text[indices[0] : indices[1]].lstrip("@").casefold()
             if fragment:
                 handles.add(fragment)
-        return len(handles) + len(user_ids)
+        return len(handles - linked_handles) + len(user_ids)
     # Routing must degrade gracefully on malformed input.
     except Exception:  # noqa: BLE001
         return 0
@@ -840,7 +873,9 @@ class SpamBurstDetector:
                     continue
                 if offset < 0 or length <= 0:
                     continue
-                ranges.append((offset, offset + length))
+                indices = _entity_range(safe_text, offset, length)
+                if indices is not None:
+                    ranges.append(indices)
         if ranges:
             ranges.sort()
             kept: list[str] = []

@@ -3,11 +3,13 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 
 from app.config import config
 from app.services.telegram_text import (
     SAFE_CHUNK_CHARS,
+    _split_text,
     apply_response_cap,
     send_bot_text,
     send_message_text,
@@ -72,3 +74,39 @@ async def test_send_message_text_strips_parse_mode_before_splitting_oversized_ht
         assert "parse_mode" not in call.kwargs
         assert "<b>" not in call.args[0]
         assert len(call.args[0]) <= SAFE_CHUNK_CHARS
+
+
+@pytest.mark.asyncio
+async def test_html_between_chunk_size_and_telegram_limit_keeps_tags_intact():
+    message = MagicMock(answer=AsyncMock(return_value="sent"))
+    await send_message_text(message, "<b>" + "x" * 4000 + "</b>", parse_mode="HTML")
+    message.answer.assert_awaited_once_with("x" * 4000)
+
+
+@pytest.mark.asyncio
+async def test_oversized_markdown_preserves_literal_comparisons():
+    message = MagicMock(answer=AsyncMock(return_value="sent"))
+    text = "compare <left> and <right> " * 200
+    await send_message_text(message, text, parse_mode="Markdown")
+    chunks = [call.args[0] for call in message.answer.await_args_list]
+    assert "<left>" in " ".join(chunks)
+    assert all(
+        "parse_mode" not in call.kwargs for call in message.answer.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_oversized_html_enum_is_delivered_without_literal_tags():
+    message = MagicMock(answer=AsyncMock(return_value="sent"))
+    await send_message_text(
+        message, "<b>" + "x" * 4000 + "</b>", parse_mode=ParseMode.HTML
+    )
+    message.answer.assert_awaited_once_with("x" * 4000)
+
+
+def test_text_chunks_preserve_code_indentation_and_content():
+    text = "x" * 3998 + "\n    return True\n\nnext paragraph"
+    chunks = _split_text(text)
+    assert "".join(chunks) == text
+    assert chunks[1].startswith("    return True")
+    assert all(0 < len(chunk) <= SAFE_CHUNK_CHARS for chunk in chunks)

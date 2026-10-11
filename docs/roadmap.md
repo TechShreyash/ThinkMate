@@ -12,7 +12,7 @@ This page separates what exists in the repository from possible improvements. It
 | Memory | Structured extraction, mood history, compression, and periodic consolidation with insights. | [Memory](development/memory_engine.md) |
 | Engagement | Onboarding, temporal context, and optional proactive check-ins with opt-out and quiet hours. | [Telegram](development/telegram_bot.md) and [memory](development/memory_engine.md) |
 | Operations | Health/metrics commands, rotating logs, optional forwarding, and Docker/Compose configuration with runtime dependencies installed from `uv.lock`. | [Operations](operations.md) and [observability](development/observability.md) |
-| Verification | Unit, regression, and property tests with database mocks; a separate manual live LLM script. | [Testing](development/testing_guide.md) |
+| Verification | Unit, regression, and property tests with database/transport mocks and a TCP-connect guard; CI runs formatting, lint, and tests. A separate manual live LLM script is available. | [Testing](development/testing_guide.md) |
 
 These capabilities do not imply that every historical acceptance target was met. The repository does not provide a production load benchmark, a formal data-isolation guarantee, or universal LLM endpoint compatibility.
 
@@ -23,11 +23,11 @@ These are recommendations based on the present implementation, not features alre
 | Priority | Improvement | Why it matters |
 | --- | --- | --- |
 | 1 | Define personal/group memory-sharing rules and add a private scope for profile inspection. | The group prompt currently includes the triggering sender's global profile, and `/profile` can publish it to the group. |
-| 1 | Define complete deletion/export semantics and coordinate resets with background work. | Current reset leaves group records, audit/log data, optional Telegram backups, and work in flight. |
-| 1 | Coordinate profile writes across DM and group conversations. | Per-chat memory locks do not serialize all writers to a participant's global profile. |
+| 1 | Define complete deletion/export semantics for retained group history and external copies. | Reset stops prior DM work and generation guards reject obsolete memory results, but shared records, audit/log data, and optional Telegram backups remain. |
+| 1 | Define conflict reporting and durable replay for participant memory. | Snapshot-conditional writes prevent stale overwrites, but bounded retries or skipped maintenance can defer work. |
 | 1 | Reject destructive empty memory replacements and strengthen schema/content checks. | A syntactically valid empty result can clear arrays; parse success alone does not prove a useful extraction or compression. |
-| 2 | Validate configuration ranges, modes, and relationships at startup. | Current type parsing does not reject every unusable or unsafe combination. |
-| 2 | Add bounded global LLM concurrency and explicit task draining at shutdown. | Per-conversation guards do not impose a process-wide request ceiling or ensure all detached work completes. |
+| 2 | Extend startup validation to endpoint/model support and remaining modes. | Numeric bounds and memory-window relationships are validated; provider capabilities are checked only during use. |
+| 2 | Add bounded global LLM concurrency and durable work admission. | Per-conversation guards and bounded shutdown drains do not impose a process-wide request ceiling or preserve pending jobs after crashes. |
 | 2 | Add realistic MongoDB/provider integration checks and measured load tests. | In-memory fixtures cannot validate all database, transport, or deployment behavior. |
 | 3 | Rank memories by relevance and recency. | The current reply prompt compiles stored memory without semantic selection. |
 | 3 | Evaluate retrieval over trimmed conversation history. | Details not extracted into memory may be lost once old buffer entries are removed. |

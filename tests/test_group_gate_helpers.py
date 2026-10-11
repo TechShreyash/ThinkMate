@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from app.services.group_gate import (
     count_distinct_mentions,
+    is_addressed,
     is_directed_at_other,
     is_mass_tag_spam,
 )
@@ -56,6 +57,24 @@ def test_count_distinct_mentions_mixed_mention_and_text_mention():
         _text_mention(12, 5, 7),  # carol (user 7)
     ]
     assert count_distinct_mentions(text, entities) == 3
+
+
+def test_count_distinct_mentions_dedups_handle_and_link_for_same_user():
+    linked = _text_mention(7, 5, 42)
+    linked.user.username = "ALICE"
+    assert count_distinct_mentions("@alice Alice", [_mention(0, 6), linked]) == 1
+
+
+def test_linked_user_display_text_does_not_impersonate_bot_username():
+    linked = _text_mention(0, 12, 42)
+    linked.user.username = "another_user"
+    assert not is_addressed(
+        text="ThinkMateBot",
+        entities=[linked],
+        reply_to_bot=False,
+        bot_username="ThinkMateBot",
+        bot_name="ThinkMate",
+    )
 
 
 def test_count_distinct_mentions_counts_bot_mention():

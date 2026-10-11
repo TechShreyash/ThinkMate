@@ -73,7 +73,7 @@ or semantic reply quality.
 | `consolidation.runs` / `.success` / `.failure` | Consolidation pipeline entries and apply outcomes; separate from LLM call outcomes. |
 | `proactive.runs` | Scans entered, including scans skipped for quiet hours. |
 | `proactive.sent` | Check-ins delivered and subsequent bookkeeping completed. |
-| `proactive.skipped` | Due-user attempts whose generation returned no usable text. |
+| `proactive.skipped` | Due-user attempts without usable text or with an opt-out, reset, or user activity before delivery. |
 | `proactive.failed` | Failed attempts, including delivery or per-user processing errors. |
 
 There is currently **no `audit.write.latency` instrumentation**, no queue-wait/delivery
@@ -127,21 +127,24 @@ log creation. Treat logs, destination membership, and backups as access to user 
 
 [`log_forwarder.py`](../../app/services/log_forwarder.py) sends directly at low volume
 and groups bursts into a periodically uploaded `logs.txt`. Buffers have no hard size
-cap, and failures can retain buffered content. Missing destination or bot disables
+cap, and failures can retain buffered content. Uploads are serialized and take a
+snapshot: messages arriving during delivery remain queued, and failed/cancelled
+uploads restore their snapshot. Missing destination or bot disables
 sending. Forwarding rejects events originating in the destination chat to avoid loops.
 [`error_log_sink.py`](../../app/services/error_log_sink.py) filters self-forwarded and
 common permission/blocked noise; explicit operational events use a separate path.
 
-Reset backup delivery is best-effort and deletion proceeds when upload fails. The
-current reset confirmation text claims a backup was saved even when forwarding was
-unset/unsuccessful; verify the actual upload before assuming recovery is available.
+Reset backup delivery is best-effort and deletion proceeds when upload fails. Success
+text mentions restoration only when the upload succeeded; confirmation explains that
+shared group history and archived logs remain.
 `/reset` does not erase audit rows, shared group transcripts, or Telegram/log copies.
 
 ## Inspecting LLM audit records
 
 [`llm_service.py`](../../app/services/llm_service.py) schedules audit inserts separately
-from reply generation. They can fail or be lost at shutdown; they are diagnostic data,
-not a complete transaction ledger. There is no final audit-task drain in `main.py`.
+from reply generation. Shutdown allows up to 5 seconds for tracked audit inserts before
+cancelling remaining writes and closing the LLM client. They can still fail or be lost
+on a crash or drain timeout; they are diagnostic data, not a complete transaction ledger.
 
 Use the compound `(user_id ascending, timestamp descending)` index for recent calls:
 

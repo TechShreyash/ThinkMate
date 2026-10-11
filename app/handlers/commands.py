@@ -33,9 +33,10 @@ from app.database import models
 from app.services import log_forwarder
 from app.services.affinity import affinity_cache
 from app.services.health import liveness, readiness
-from app.services.memory_loader import build_memory_block
+from app.services.memory_loader import compile_memory_block
 from app.services.metrics import LLM_TASK_TYPES, metrics
 from app.services.telegram_text import send_message_text
+from app.services.user_task_manager import user_task_manager
 
 router = Router(name="commands")
 
@@ -49,6 +50,12 @@ def _trigger(key: str) -> str:
     """
     name, _enabled = config.COMMANDS.get(key, (key, True))
     return name
+
+
+def _command_description(key: str) -> str:
+    """Resolve command examples alongside the displayed/published trigger."""
+    _handler, description = _COMMANDS[key]
+    return description.format(command=_trigger(key))
 
 
 async def _reply(message: Message, text: str, **kwargs):
@@ -382,8 +389,7 @@ def _build_help_text(is_admin: bool) -> str:
             # Admin-only commands are hidden from non-admins.
             if key in ("health", "metrics") and not is_admin:
                 continue
-            _handler, desc = _COMMANDS[key]
-            rows.append(f"/{trigger} — {desc}")
+            rows.append(f"/{trigger} — {_command_description(key)}")
         if not rows:
             return []
         return [html.bold(title), *rows, ""]
@@ -450,10 +456,11 @@ def _guide_screen(screen: str, is_admin: bool) -> tuple[str, InlineKeyboardMarku
             f"🔒 {html.bold('Your privacy & control')}\n\n"
             "Your memories are yours, and you're always in charge of them.\n\n"
             f"• /{_trigger('profile')} — see everything I've saved about you, in plain text.\n"
-            f"• /{_trigger('reset')} — wipe it all and start over. I'll ask you to confirm "
-            "first, since there's no undo.\n\n"
-            "Everyone's memories are kept completely separate — what you tell me stays "
-            "between us."
+            f"• /{_trigger('reset')} — clear your personal memories and private-chat "
+            "history after confirmation. Shared group history and archived logs remain.\n\n"
+            "Personal profiles are kept separate. Replies and profile output in a group "
+            "are visible to everyone there, so use memory commands in a DM for privacy. "
+            "If the operator has configured a logs channel, a reset may archive a backup there."
         )
         return text, _kb_topic(screen)
 
@@ -506,11 +513,17 @@ async def on_guide_nav(callback: CallbackQuery, db: AsyncIOMotorDatabase):
     and the message may be too old to edit, so failures are swallowed after the spinner
     is dismissed.
     """
+    # Dismiss Telegram's spinner before database/network work. A failed or expired
+    # acknowledgement is auxiliary and must not prevent the requested guide action.
+    try:
+        await callback.answer()
+    except Exception as exc:  # noqa: BLE001 - callback acknowledgement is best-effort
+        logger.debug(f"guide callback acknowledgement failed: {exc}")
+
     data = (callback.data or "")[len(GUIDE_PREFIX) :]
     user = callback.from_user
     msg = callback.message
     if msg is None:
-        await callback.answer()
         return
 
     is_admin = _is_admin(user.id if user else None, msg.chat.type if msg.chat else None)
@@ -521,7 +534,7 @@ async def on_guide_nav(callback: CallbackQuery, db: AsyncIOMotorDatabase):
                 db, user.id, user.username or "", user.first_name or ""
             )
             await models.set_onboarded(db, user.id, True)
-        text, kb = _onboard_text(), _kb_onboard()
+        text, kb = html.quote(_onboard_text()), _kb_onboard()
     else:
         text, kb = _guide_screen(data, is_admin)
 
@@ -529,7 +542,6 @@ async def on_guide_nav(callback: CallbackQuery, db: AsyncIOMotorDatabase):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception as exc:  # noqa: BLE001 — no-op edit / too-old message / etc.
         logger.debug(f"guide edit_text failed for {data!r}: {exc}")
-    await callback.answer()
 
 
 def _onboard_text() -> str:
@@ -699,6 +711,11 @@ async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
             or doc.get("facts")
             or doc.get("beliefs")
             or doc.get("events")
+            or (doc.get("communication_style") or "").strip()
+            or doc.get("gender") not in (None, "", "unknown")
+            or doc.get("insights")
+            or doc.get("emotional_state")
+            or doc.get("mood_history")
         )
     )
     if not has_memories:
@@ -709,7 +726,7 @@ async def cmd_profile(message: Message, db: AsyncIOMotorDatabase):
         )
         return
 
-    profile_data, _ = await build_memory_block(db, user_id)
+    profile_data, _ = compile_memory_block(doc)
     await _reply(
         message,
         f"📋 {html.bold('Here is what I remember about you:')}\n\n"
@@ -725,61 +742,67 @@ async def cmd_reset(message: Message, command: CommandObject, db: AsyncIOMotorDa
     if (command.args or "").strip().lower() != "confirm":
         await _reply(
             message,
-            "⚠️ This will erase everything I remember about you and our chats — there's "
-            "no undo.\n\n"
+            "⚠️ This will clear your saved personal memories and private-chat history. "
+            "Shared group history and archived logs remain. A backup may be saved to "
+            "the operator's logs channel before deletion.\n\n"
             f"If you're sure, send: /{_trigger('reset')} confirm",
         )
         return
 
     user = message.from_user
-    # Back up the full profile to the Logs_Channel BEFORE deleting, so an admin can
-    # restore it later if the user changes their mind. Best-effort: a backup failure is
-    # logged (and surfaces on the channel via the error sink) but never blocks the reset
-    # the user explicitly asked for.
-    try:
-        snapshot = await models.export_user_data(db, user.id)
-        if snapshot is not None:
-            payload = json.dumps(snapshot, default=str, ensure_ascii=False, indent=2)
-            uname = f"@{user.username}" if user.username else "—"
-            caption = (
-                f"🗂 Profile backup before /{_trigger('reset')}\n"
-                f"👤 {user.first_name or 'user'} ({uname})\n"
-                f"🆔 {user.id}\n"
-                f"🕐 {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC"
+    backup_saved = False
+    # Stop prior DM work and hold new messages until its backup/deletion finishes.
+    async with user_task_manager.reset_conversation(user.id):
+        # Backup failure must not prevent the deletion the user requested.
+        try:
+            snapshot = await models.export_user_data(db, user.id)
+            if snapshot is not None:
+                payload = json.dumps(
+                    snapshot, default=str, ensure_ascii=False, indent=2
+                )
+                uname = f"@{user.username}" if user.username else "—"
+                caption = (
+                    f"🗂 Profile backup before /{_trigger('reset')}\n"
+                    f"👤 {user.first_name or 'user'} ({uname})\n"
+                    f"🆔 {user.id}\n"
+                    f"🕐 {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC"
+                )
+                backup_saved = await log_forwarder.send_document(
+                    message.bot,
+                    message.chat.id,
+                    filename=f"backup_{user.id}.json",
+                    content=payload.encode("utf-8"),
+                    caption=caption,
+                )
+        except Exception as exc:  # noqa: BLE001 - never block reset on a backup failure
+            is_perm = any(
+                p in str(exc).lower()
+                for p in [
+                    "forbidden",
+                    "permission",
+                    "write access",
+                    "not enough rights",
+                    "restricted",
+                    "kicked",
+                    "blocked",
+                ]
             )
-            await log_forwarder.send_document(
-                message.bot,
-                message.chat.id,
-                filename=f"backup_{user.id}.json",
-                content=payload.encode("utf-8"),
-                caption=caption,
-            )
-    except Exception as exc:  # noqa: BLE001 - never block the reset on a backup failure
-        is_perm = any(
-            p in str(exc).lower()
-            for p in [
-                "forbidden",
-                "permission",
-                "write access",
-                "not enough rights",
-                "restricted",
-                "kicked",
-                "blocked",
-            ]
-        )
-        if is_perm:
-            logger.info(
-                f"reset backup failed (forbidden/restricted) for user {user.id}: {exc}"
-            )
-        else:
-            logger.warning(f"reset backup failed for user {user.id}: {exc}")
+            if is_perm:
+                logger.info(
+                    f"reset backup failed (forbidden/restricted) for user {user.id}: {exc}"
+                )
+            else:
+                logger.warning(f"reset backup failed for user {user.id}: {exc}")
 
-    await models.reset_user(db, user.id)
+        await models.reset_user(db, user.id)
+    backup_note = (
+        "\n\nAn admin can help restore your memories from the backup saved to the logs channel."
+        if backup_saved
+        else ""
+    )
     await _reply(
         message,
-        "Done — I've cleared everything and we're starting fresh. 🌱\n\n"
-        "Changed your mind later? A backup was just saved, so reach out to an admin and "
-        "they can help bring your memories back.",
+        f"Done — I've cleared your saved memories and chats, and we're starting fresh. 🌱{backup_note}",
     )
 
 
@@ -1001,20 +1024,20 @@ _COMMANDS: dict[str, tuple] = {
     "onboard": (cmd_onboard, "answer starter questions so I can learn your basics"),
     "checkins": (
         cmd_checkins,
-        "view or change occasional check-ins — /checkins on|off",
+        "view or change occasional check-ins — /{command} on|off",
     ),
     "profile": (cmd_profile, "see what I've remembered about you"),
-    "reset": (cmd_reset, "erase your saved memories — requires /reset confirm"),
-    "reactions": (cmd_reactions, "view or change emoji reactions — /reactions on|off"),
+    "reset": (cmd_reset, "erase your saved memories — requires /{command} confirm"),
+    "reactions": (cmd_reactions, "view or change emoji reactions — /{command} on|off"),
     "quiet": (cmd_quiet, "personal group setting: I chime in less around you"),
     "chatty": (cmd_chatty, "personal group setting: I chime in more around you"),
     "groupbot": (
         cmd_groupbot,
-        "group admin: turn me on or off here — /groupbot on|off",
+        "group admin: turn me on or off here — /{command} on|off",
     ),
     "groupmode": (
         cmd_groupmode,
-        "group admin: set group chattiness — /groupmode quiet|chatty|normal",
+        "group admin: set group chattiness — /{command} quiet|chatty|normal",
     ),
     "health": (cmd_health, "ops health + readiness report (admin-only)"),
     "metrics": (cmd_metrics, "ops metrics snapshot, incl. LLM-by-task (admin-only)"),
@@ -1051,7 +1074,7 @@ def _menu_for(keys: tuple[str, ...]) -> list[BotCommand]:
         trigger, enabled = resolved.get(key, (key, True))
         if not enabled:
             continue
-        _handler, desc = _COMMANDS[key]
+        desc = _command_description(key)
         out.append(
             BotCommand(command=trigger, description=desc[:256])
         )  # Telegram caps at 256

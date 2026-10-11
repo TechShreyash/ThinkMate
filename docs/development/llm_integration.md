@@ -15,7 +15,7 @@ See [configuration](configuration.md) for settings, [memory engine](memory_engin
 | `compress_memory` | `LLM_EXTRACTION_MODEL` or `LLM_MODEL` | `MemoryCompression` or `None`. |
 | `consolidate_memory` | `LLM_EXTRACTION_MODEL` or `LLM_MODEL` | `MemoryConsolidation` or `None`. |
 
-All calls are non-streaming and pass `LLM_REQUEST_TIMEOUT_SECS` (default `610`). Requests do not set `max_tokens`, temperature, or a provider-specific reasoning budget. `MAX_RESPONSE_CHARS` is an application delivery cap, applied after generation; it does not limit model generation cost or context size. Telegram delivery additionally chunks text to fit its message limit.
+All calls are non-streaming and pass `LLM_REQUEST_TIMEOUT_SECS` (default `610`). Requests do not set `max_tokens`, temperature, or a provider-specific reasoning budget. `MAX_RESPONSE_CHARS` is an application delivery cap, applied after generation and before saving reply history; it does not limit model generation cost or context size. Telegram delivery additionally chunks text to fit its message limit.
 
 Set the client timeout with the actual provider/proxy ceiling in mind. A client timeout can abandon a generation that continues upstream, and a retry may start duplicate work. The repository does not define or prove the external server's timeout.
 
@@ -44,12 +44,12 @@ Replies use a custom JSON parser, not Pydantic `ReplyBundle` validation. The par
 
 - Reactions are normalized by [reactions.py](../../app/services/reactions.py), restricted to its allowed set, and dropped when globally disabled. The chat manager additionally honors the sender's `reactions_enabled` preference.
 - A finite numeric, non-boolean affinity delta is bounded to the prompt's `[-0.2, 0.2]` range. Nonfinite values are ignored; the affinity cache also clamps the resulting score to `0..1`.
-- Malformed/unusable reply JSON falls back to the unfenced raw text with no reaction or delta. This can expose a malformed JSON envelope as the delivered text. The batch processor substitutes a fallback for empty DM/addressed replies and suppresses empty ambient replies.
+- A JSON object without usable reply text returns an empty reply, with no reaction or delta. The batch processor substitutes a fallback for empty DM/addressed replies and suppresses empty ambient replies. Non-object or invalid JSON falls back to the unfenced raw text with no reaction or delta.
 - An API error is audited and re-raised; the batch processor attempts a short failure response. Successful Telegram delivery still depends on Telegram permissions and connectivity.
 
 `ReplyBundle` in [schemas.py](../../app/services/schemas.py) describes the intended shape, but is not the runtime parser for this path.
 
-Check-ins use a plain-text response. Blank output or the case-insensitive sentinels `NOTHING`, `none`, `n/a`, and `na` (with trailing `.`/`!`, quotes, or Markdown code fences tolerated) produce `None`. Normal opener text is preserved. The caller stays silent and does not send a check-in. The supplied `memory_text` is used as a grounding guard; the caller must also put that memory into the system prompt, as the current scheduler does.
+Check-ins use a plain-text response. Blank output or the case-insensitive sentinels `NOTHING`, `none`, `n/a`, and `na` (with trailing `.`/`!`, quotes, or Markdown code fences tolerated) produce `None`. Normal opener text is preserved. The caller stays silent for declined output and rechecks opt-out, profile lifecycle, and user activity after generation before sending. The supplied `memory_text` is used as a grounding guard; the caller must also put that memory into the system prompt, as the current scheduler does.
 
 ## Structured memory output
 
@@ -63,7 +63,7 @@ The memory methods share `_structured_call` and validate responses against Pydan
 
 The default JSON mode requests syntactically valid JSON; schema adherence still depends on the model and application validation. Native parsing requires endpoint support and can increase latency/call count when unsupported.
 
-On the JSON path, `_strip_fences` turns blank output into `{}`. Extraction schemas default their lists to empty, so an empty extraction can still validate as success and trim history. Compression and consolidation additionally require every replacement array to be explicitly present in the actual response, before schema defaults are applied; blank or incomplete responses return `None` and preserve existing memory. The same presence check applies to native parsed responses. Explicit complete empty arrays remain valid, so this guard does not detect a model intentionally returning an unhelpful but complete replacement.
+On the JSON path, blank output, including empty fenced output, fails validation and returns `None`. Extraction schemas default their lists to empty, so an explicit `{}` can still validate as success and trim history. Compression and consolidation additionally require every replacement array to be explicitly present in the actual response, before schema defaults are applied; blank or incomplete responses return `None` and preserve existing memory. The same presence check applies to native parsed responses. Explicit complete empty arrays remain valid, so this guard does not detect a model intentionally returning an unhelpful but complete replacement.
 
 ### Schema reference
 

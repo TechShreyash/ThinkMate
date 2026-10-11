@@ -25,9 +25,10 @@ two buffer appends, an item-count read, a profile read, and an interaction-times
 update/read. That count excludes routing, command work, background jobs, audits,
 metrics persistence, and Telegram requests. There is no enforced three-query budget.
 
-A DM batch normally uses one reply service operation. A group batch is split by sender
-in [`user_task_manager.py`](../../app/services/user_task_manager.py), so it can use one
-reply operation **per distinct sender**. Group routing also reads the enable/mode
+A DM batch normally uses one reply service operation. A group batch coalesces consecutive
+messages from each sender in [`user_task_manager.py`](../../app/services/user_task_manager.py)
+and generates one reply operation **per consecutive sender run**. A → B → A therefore
+keeps all three turns in that order. Group routing also reads the enable/mode
 settings, refreshes sender identity, consults member affinity, loads both group and
 sender memory, and may write affinity changes. Non-addressed group traffic can still
 incur database work even when no reply is generated. See [group chat](group_chat.md).
@@ -44,7 +45,7 @@ are repeated Telegram calls while processing is pending.
 | Per-conversation batching | Several quick messages from one sender can share a reply operation | Adds idle wait; group senders remain separate. |
 | Reply/reaction bundle | No second LLM reaction operation | JSON parsing can fall back to raw output. |
 | Ambient/implicit gates | Most group reply decisions use local predicates before generation | Group buffering/settings/identity work still occurs. |
-| Cached persona content | Reuses text until file modification time changes | Filesystem `getmtime` still runs; cache miss/change reads the file. |
+| Cached persona content | Reuses text while nanosecond modification time and file size match | Filesystem metadata is checked; cache miss/change reads the file. |
 | Affinity cache | Avoids member DB reads for warm entries | Cold reads/default writes and write-through changes remain. |
 | Background memory jobs | Extraction/compression/consolidation do not block on the reply's direct call chain | They still compete for database, event-loop, and LLM resources. |
 | Off-path audit writes | Reply does not await audit insert | Writes are best-effort, not durable. |
@@ -62,16 +63,20 @@ consolidation for that state. Work encountering a held memory lock is skipped ra
 than put into a persistent job queue.
 
 `MAX_QUEUED_MESSAGES` caps pending messages **per chat**, not all messages/process work.
-`MAX_BATCH_DELAY_SECS` is checked on enqueue to stop repeatedly postponing a busy batch;
-it is not a strict timer deadline and does not cap time waiting for a lock or upstream
-reply. Slow generations can keep one conversation busy for much longer than the
+The coalescing timer uses the smaller of `MESSAGE_BATCH_DELAY_SECS` and the time left
+before `MAX_BATCH_DELAY_SECS` from the first pending message. Resetting that timer
+does not cancel an active generation or delivery. This bounds coalescing, not time
+waiting for a lock or upstream reply. Slow generations can keep one conversation busy for much longer than the
 batching delay. LLM timeouts apply per request and retries extend elapsed time.
 
 Locks do not coordinate separate processes. Group extraction can write participant
 profiles while holding the group's memory lock; a DM or another group touching the
-same participant holds a different lock. The current design therefore does not
-provide complete per-person serialization across conversations. Read-modify-write
-memory updates deserve concurrency regression tests when changed.
+same participant holds a different lock. Profile writes compare their memory-field
+snapshots before updating: extraction retries on conflicts and maintenance skips stale
+replacements. Captured profile-generation tokens reject obsolete extraction results
+after deletion or recreation. Confirmed reset stops prior owned DM work and holds new
+DM messages through backup/deletion. These checks do not serialize all work per person
+or prevent extraction from retained shared group history.
 
 ## Bounds and remaining growth
 
@@ -79,14 +84,14 @@ memory updates deserve concurrency regression tests when changed.
 | --- | --- | --- |
 | Pending chat queue | `MAX_QUEUED_MESSAGES` | No global count limit or durable replay. |
 | Conversation state | Idle eviction after `USER_STATE_TTL_SECS`, swept at `max(60, TTL / 2)` | Active/locked states remain; no hard maximum active-state count. Sweeper starts lazily on enqueue. |
-| Throttle timestamps/warn flags | Access-driven stale pruning | Window-based bound depends on activity, not a global cap. |
+| Throttle timestamps/warn flags | At most `RATE_LIMIT_MAX_REQUESTS` timestamps per user, plus access-driven stale pruning | No global user-count cap. |
 | Ambient/implicit/spam gate maps | Gate pruning and task-manager sweep hooks; burst history has a per-sender cap within each chat | Not a fixed maximum chat/member count. |
 | Affinity cache | Sweep prunes entries idle for `USER_STATE_TTL_SECS * 4` | Active members remain; no fixed entry cap. |
 | Chat buffer | MongoDB `$slice` to `CHAT_BUFFER_HARD_CAP` messages | Count cap is not a total-character/token cap. |
 | Compiled memory | Compression and deterministic removal of events, beliefs, then facts | Preserved metadata can remain over a small budget; not a database document-size bound. |
 | Mood/insights | `MAX_MOOD_HISTORY` / `MAX_INSIGHTS` | Content length is not strictly bounded by list count. |
 | LLM audits | Best-effort TTL index | Depends on index creation and Mongo expiry; profiles are not TTL-expired. |
-| Log-forwarder burst buffer | Periodic flush to Telegram | No hard cap; failures can retain content. |
+| Log-forwarder burst buffer | Serialized snapshot uploads preserve concurrent arrivals and restore failed batches | No hard cap; failures can retain content. |
 
 These policies reclaim idle work; they do not make memory use independent of load.
 Extraction makes up to three attempts at the pipeline level, each potentially with
@@ -101,7 +106,7 @@ Compression/consolidation preserve existing memory on LLM failure. See
 | Collection | Key/access |
 | --- | --- |
 | `user_profiles` | User ID, or negative group chat ID for shared memory; direct reads and memory writes. |
-| `chat_buffers` | Chat ID; atomic appends and timestamp-cutoff trim. |
+| `chat_buffers` | Chat ID; atomic appends, snapshot message-ID trim, and conditional legacy-array replacement. |
 | `chat_members` | String `chat_id:user_id`; affinity/mode reads and writes. |
 | `group_settings` | Chat ID; enable and ambient-mode settings. |
 | `llm_audit_log` | Generated ID; compound user/timestamp index and TTL index. |
@@ -143,7 +148,7 @@ hide overload and increase memory use; it does not increase processing capacity.
 ## Horizontal scaling is future work
 
 Do not run multiple long-polling replicas with the same bot token as a scaling tactic.
-Polling ownership, process-local timers/locks/queues, timestamp sequencing, caches,
+Polling ownership, process-local timers/locks/queues, caches,
 and the shared metrics singleton all need coordinated designs first.
 
 A future implementation would need:
@@ -151,8 +156,8 @@ A future implementation would need:
 1. An update-ownership/transport strategy, such as authenticated webhooks with routing
    or a single polling receiver feeding durable workers.
 2. Shared queues and idempotency/delivery handling; clear ordering per conversation.
-3. Cross-conversation serialization for participant profiles and atomic/versioned
-   memory updates, plus distributed ownership for scheduled jobs.
+3. Complete deletion semantics, conflict/retry policy for profile updates, and distributed
+   ownership for scheduled jobs; existing conditional writes do not provide ownership.
 4. Cache invalidation and shared rate-limit/gate state where correctness requires it.
 5. Per-instance metrics with an external aggregation sink, replacing singleton overwrites.
 6. Load-tested database query/index changes and capacity planning; shard keys must match

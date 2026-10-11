@@ -6,7 +6,6 @@ optional reaction in a single LLM call, persist the reply, and trigger backgroun
 compression (rate-limited) when the memory profile outgrows its budget.
 """
 
-import asyncio
 import json
 import os
 from datetime import UTC, datetime
@@ -26,6 +25,7 @@ from app.services.memory_loader import (
     compile_memory_block,
     load_profile_doc,
 )
+from app.services.telegram_text import apply_response_cap
 
 # Named reference cities preserve local clocks across daylight-saving transitions.
 # These references do not identify the user's own timezone.
@@ -92,11 +92,14 @@ _warned_missing_persona_paths: set[str] = set()
 # (stop / quiet / spam / annoying / shut up) is detected in their message
 # (Requirement 4.5). AffinityCache.bump clamps the result to [0, 1].
 _NEGATIVE_AFFINITY_STEP = -0.1
+EMPTY_REPLY_FALLBACK = (
+    "Sorry, I lost my train of thought there — could you say that again?"
+)
 
 
 def _read_persona_file(path: str) -> str:
     """Read valid, nonblank UTF-8 persona text, accepting an optional UTF-8 BOM."""
-    with open(path, "r", encoding="utf-8-sig") as persona_file:
+    with open(path, encoding="utf-8-sig") as persona_file:
         content = persona_file.read()
     if not content.strip():
         raise ValueError("persona file is empty or whitespace-only")
@@ -161,6 +164,37 @@ def _load_persona() -> str:
         return _persona_fallback(path)
 
 
+async def _apply_affinity_signal(
+    db: AsyncIOMotorDatabase,
+    chat_id: int,
+    sender_id: int,
+    delta: float,
+    *,
+    signal: str,
+    reason: str,
+) -> None:
+    """An optional affinity update must never discard an already generated reply."""
+    try:
+        new_affinity = await affinity_cache.bump(db, chat_id, sender_id, delta)
+        logger.debug(
+            "affinity signal={} chat={} sender={} delta={:+.3f} -> {:.3f} (reason={})",
+            signal,
+            chat_id,
+            sender_id,
+            delta,
+            new_affinity,
+            reason,
+        )
+    except Exception as exc:  # noqa: BLE001 - affinity is an optional signal
+        logger.warning(
+            "Affinity signal {} failed for chat {} sender {}: {}",
+            signal,
+            chat_id,
+            sender_id,
+            exc,
+        )
+
+
 async def handle_message(
     db: AsyncIOMotorDatabase,
     chat_id: int,
@@ -179,10 +213,8 @@ async def handle_message(
     existing call ``handle_message(db, user_id, text)`` is unchanged in meaning
     (``chat_type="private"``, ``sender_id == chat_id``).
 
-    DM path (``chat_type == "private"``): byte-for-byte identical to the original — a
-    single-party history, the same reply call (2-tuple ``(reply, reaction)``), and the
-    same memory pipeline. The ambient gate, addressed-detection, and affinity logic never
-    run here (Requirement 1.5).
+    The private-chat path uses single-party history, a reply/reaction bundle, and
+    the existing memory pipeline. Group gates and affinity logic never run here.
 
     Group path (``group``/``supergroup``): renders a multi-party history attributed by
     ``sender_name`` (Requirement 2.7) and obtains an optional ``affinity_delta`` from the
@@ -246,7 +278,7 @@ async def handle_message(
             f"Buffer overflow for chat {chat_id} ({buffer_chars} chars >= "
             f"{extraction_threshold}); launching extraction."
         )
-        asyncio.create_task(user_task_manager.run_extractor(chat_id, is_group=is_group))
+        user_task_manager.schedule_extractor(chat_id, is_group=is_group)
 
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()
@@ -286,8 +318,8 @@ async def handle_message(
             bot_name=config.bot_display_name,
         )
     else:
-        # DM path: byte-for-byte unchanged (Req 3.6, 5.2). The single profile read here
-        # also carries the sender's reaction preference (chat_id == sender_id in a DM).
+        # A single private-chat profile read provides both memory and the
+        # sender's reaction preference (chat_id == sender_id in a DM).
         dm_doc = await load_profile_doc(db, chat_id)
         memory_block, needs_compression = compile_memory_block(dm_doc)
         sender_reactions_enabled = dm_doc.get("reactions_enabled", True)
@@ -315,45 +347,56 @@ async def handle_message(
         # (a) Fold the reply bundle's optional ``affinity_delta`` into the speaker's
         #     affinity (Requirement 4.6). Skip no-op deltas (None / 0).
         if affinity_delta is not None and affinity_delta != 0:
-            new_affinity = await affinity_cache.bump(
-                db, chat_id, sender_id, affinity_delta
-            )
-            logger.debug(
-                f"affinity signal=reply_delta chat={chat_id} sender={sender_id} "
-                f"delta={affinity_delta:+.3f} -> {new_affinity:.3f} (reason={reason})"
+            await _apply_affinity_signal(
+                db,
+                chat_id,
+                sender_id,
+                affinity_delta,
+                signal="reply_delta",
+                reason=reason,
             )
 
         # (b) Negative "back off" keyword -> small affinity-down for the speaker
         #     (Requirement 4.5). This branch only runs when a reply is produced
         #     (addressed/ambient), which is acceptable for now per task 5.2.
         if scan_negative_signal(user_text):
-            new_affinity = await affinity_cache.bump(
-                db, chat_id, sender_id, _NEGATIVE_AFFINITY_STEP
-            )
-            logger.debug(
-                f"affinity signal=negative_keyword chat={chat_id} sender={sender_id} "
-                f"delta={_NEGATIVE_AFFINITY_STEP:+.3f} -> {new_affinity:.3f}"
+            await _apply_affinity_signal(
+                db,
+                chat_id,
+                sender_id,
+                _NEGATIVE_AFFINITY_STEP,
+                signal="negative_keyword",
+                reason=reason,
             )
     else:
         reply_text, reaction = await llm_service.generate_reply_bundle(
             chat_id, system_prompt, active_history
         )
 
-    # 5. Persist the assistant reply with sender attribution (DM: just adds two fields).
-    await models.add_message_to_buffer(
-        db,
-        chat_id,
-        "assistant",
-        reply_text,
-        sender_id=0,
-        sender_name=config.bot_display_name,
-    )
+    # 5. Persist the reply that the delivery path will actually send. Ambient
+    # declines produce no assistant turn; an empty direct reply uses a fallback.
+    if not reply_text or not reply_text.strip():
+        if reason == "ambient":
+            reply_text, reaction = "", None
+        else:
+            logger.warning("Empty reply for chat {}; using graceful fallback.", chat_id)
+            reply_text = EMPTY_REPLY_FALLBACK
+    reply_text = apply_response_cap(reply_text)
+    if reply_text:
+        await models.add_message_to_buffer(
+            db,
+            chat_id,
+            "assistant",
+            reply_text,
+            sender_id=0,
+            sender_name=config.bot_display_name,
+        )
 
     # 6. Memory over budget -> rate-limited background compression.
     if needs_compression:
         from app.services.user_task_manager import user_task_manager
 
-        asyncio.create_task(user_task_manager.run_compressor(chat_id))
+        user_task_manager.schedule_compressor(chat_id)
 
     # Per-user reaction opt-out (/reactions off): drop the reaction here so the sender
     # delivery path never needs a second profile read. The flag was folded into the

@@ -24,6 +24,7 @@ import asyncio
 import time
 from datetime import UTC
 
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from loguru import logger
 
 from app.config import config
@@ -291,20 +292,26 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
     """Generate + send one check-in. Returns 'sent' | 'skipped' | 'failed'.
 
     Always sets last_proactive_at (holds the rate-limit window even on skip/fail).
-    Never raises.
+    Delivery failures return 'failed'; database failures propagate to the scan.
     """
     from app.database import models
     from app.database.connection import db_session
     from app.prompts.system_prompt import build_system_prompt
     from app.services.chat_manager import _load_persona, build_time_context
     from app.services.llm_service import llm_service
-    from app.services.memory_loader import build_memory_block
-    from app.services.telegram_text import send_bot_text
+    from app.services.memory_loader import compile_memory_block, load_profile_doc
+    from app.services.telegram_text import apply_response_cap, send_bot_text
 
     async with db_session() as db:
-        memory_text, _ = await build_memory_block(db, user_id)
+        profile = await load_profile_doc(db, user_id)
+        if not profile or profile.get("proactive_enabled") is False:
+            return "skipped"
+        memory_text, _ = compile_memory_block(profile)
         # Always hold the window for this attempt.
-        await models.set_last_proactive(db, user_id, now=now)
+        if not await models.set_last_proactive(
+            db, user_id, now=now, expected_profile=profile
+        ):
+            return "skipped"
         time_context = build_time_context(now, None)
         system_prompt = build_system_prompt(
             _load_persona(), memory_text, time_context=time_context
@@ -312,15 +319,47 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
         text = await llm_service.generate_checkin(user_id, system_prompt, memory_text)
         if not text:
             return "skipped"
+        # Generation can take long enough for an opt-out, reset, or user reply.
+        # Recheck those changes before delivering an obsolete unsolicited message.
+        current = await load_profile_doc(db, user_id)
+        if (
+            not current
+            or current.get("proactive_enabled") is False
+            or current.get("memory_generation") != profile.get("memory_generation")
+            or current.get("created_at") != profile.get("created_at")
+            or current.get("last_interaction_at") != profile.get("last_interaction_at")
+        ):
+            return "skipped"
+        text = apply_response_cap(text)
         try:
             await send_bot_text(bot, user_id, text, enforce_app_limit=True)
         # Health probes report failures instead of raising to callers.
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"Proactive send failed for user {user_id}: {e}; disabling for them."
+            permanent = isinstance(e, TelegramForbiddenError) or (
+                isinstance(e, TelegramBadRequest)
+                and any(
+                    reason in str(e).lower()
+                    for reason in ("chat not found", "user is deactivated")
+                )
             )
-            await models.set_proactive_enabled(db, user_id, False)
+            logger.warning(
+                f"Proactive send failed for user {user_id}: {e}; "
+                f"disabling={permanent}."
+            )
+            if permanent:
+                await models.set_proactive_enabled(
+                    db, user_id, False, expected_profile=profile
+                )
             return "failed"
+        # A reset or engagement can also occur while Telegram delivery awaits I/O.
+        # Keep the new lifecycle free of this old attempt's history and streak.
+        current = await load_profile_doc(db, user_id)
+        if (
+            not current
+            or current.get("memory_generation") != profile.get("memory_generation")
+            or current.get("created_at") != profile.get("created_at")
+        ):
+            return "sent"
         # Record the assistant message in the buffer so a reply flows normally.
         await models.add_message_to_buffer(
             db,
@@ -332,7 +371,9 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
         )
         # Count this delivered check-in toward the unanswered streak; if the user keeps
         # ignoring us they'll be auto-paused once it reaches PROACTIVE_MAX_UNANSWERED.
-        await models.increment_proactive_unanswered(db, user_id)
+        await models.increment_proactive_unanswered(
+            db, user_id, expected_profile=profile
+        )
         return "sent"
 
 
@@ -341,6 +382,7 @@ async def _run_proactive_scan(bot) -> None:
 
     from app.database import models
     from app.database.connection import db_session
+    from app.services.user_task_manager import user_task_manager
 
     metrics.incr("proactive.runs")
     now = datetime.now(UTC)
@@ -361,7 +403,22 @@ async def _run_proactive_scan(bot) -> None:
     sent = skipped = failed = 0
     for user_id in due:
         try:
-            outcome = await _send_proactive_checkin(bot, user_id, now=now)
+            task = user_task_manager.start_conversation_task(
+                user_id,
+                _send_proactive_checkin(bot, user_id, now=now),
+                name=f"proactive-checkin:{user_id}",
+            )
+            if task is None:
+                outcome = "skipped"
+            else:
+                try:
+                    outcome = await task
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                    # A personal reset cancelled this owned check-in. Keep the
+                    # scheduler running for the other due users.
+                    outcome = "skipped"
             if outcome == "sent":
                 sent += 1
                 metrics.incr("proactive.sent")

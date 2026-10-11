@@ -19,6 +19,7 @@ Design constraints (see ``.kiro/specs/observability``):
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Iterator
@@ -46,6 +47,14 @@ _LLM_TYPE_PREFIX: dict[str, str] = {
 LLM_TASK_TYPES: tuple[tuple[str, str], ...] = tuple(_LLM_TYPE_PREFIX.items())
 
 
+def _finite_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (isinstance(value, int) or math.isfinite(value))
+    )
+
+
 class MetricsRegistry:
     """In-memory counters, gauges, and timer aggregates, safe for concurrent use."""
 
@@ -59,6 +68,8 @@ class MetricsRegistry:
     def incr(self, name: str, n: int = 1) -> None:
         """Add ``n`` (default 1) to the named counter, creating it at 0 on first use."""
         try:
+            if not isinstance(n, int) or isinstance(n, bool):
+                return
             with self._lock:
                 self._counters[name] = self._counters.get(name, 0) + n
         # Best-effort metrics must never interrupt message handling.
@@ -68,6 +79,8 @@ class MetricsRegistry:
     def set_gauge(self, name: str, value: float) -> None:
         """Replace the named gauge's value with ``value``."""
         try:
+            if not _finite_number(value):
+                return
             with self._lock:
                 self._gauges[name] = value
         # Best-effort metrics must never interrupt message handling.
@@ -77,13 +90,18 @@ class MetricsRegistry:
     def observe(self, name: str, value: float) -> None:
         """Record ``value`` into the named timer aggregate (count+1, sum+=value, max)."""
         try:
+            if not _finite_number(value) or value < 0:
+                return
             with self._lock:
                 agg = self._timers.get(name)
                 if agg is None:
                     self._timers[name] = {"count": 1, "sum": value, "max": value}
                 else:
+                    total = agg["sum"] + value
+                    if not _finite_number(total):
+                        return
                     agg["count"] += 1
-                    agg["sum"] += value
+                    agg["sum"] = total
                     agg["max"] = max(agg["max"], value)
         # Best-effort metrics must never interrupt message handling.
         except Exception as exc:  # noqa: BLE001
@@ -168,26 +186,42 @@ class MetricsRegistry:
             return
         try:
             with self._lock:
-                for name, value in (state.get("counters") or {}).items():
-                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                counters = state.get("counters")
+                gauges = state.get("gauges")
+                timers = state.get("timers")
+                for name, value in (
+                    counters if isinstance(counters, dict) else {}
+                ).items():
+                    if not isinstance(name, str) or not _finite_number(value):
                         continue
                     self._counters[name] = self._counters.get(name, 0) + int(value)
-                for name, value in (state.get("gauges") or {}).items():
-                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                for name, value in (gauges if isinstance(gauges, dict) else {}).items():
+                    if not isinstance(name, str) or not _finite_number(value):
                         continue
                     self._gauges[name] = value
-                for name, agg in (state.get("timers") or {}).items():
-                    if not isinstance(agg, dict):
+                for name, agg in (timers if isinstance(timers, dict) else {}).items():
+                    if not isinstance(name, str) or not isinstance(agg, dict):
                         continue
-                    count = int(agg.get("count", 0) or 0)
-                    total = float(agg.get("sum", 0) or 0)
-                    mx = float(agg.get("max", 0) or 0)
+                    count = agg.get("count", 0)
+                    total = agg.get("sum", 0)
+                    mx = agg.get("max", 0)
+                    if (
+                        not all(
+                            _finite_number(v) and v >= 0 for v in (count, total, mx)
+                        )
+                        or int(count) != count
+                    ):
+                        continue
+                    count = int(count)
                     existing = self._timers.get(name)
                     if existing is None:
                         self._timers[name] = {"count": count, "sum": total, "max": mx}
                     else:
+                        merged_total = existing["sum"] + total
+                        if not _finite_number(merged_total):
+                            continue
                         existing["count"] += count
-                        existing["sum"] += total
+                        existing["sum"] = merged_total
                         existing["max"] = max(existing["max"], mx)
         # Best-effort metrics must never interrupt message handling.
         except Exception as exc:  # noqa: BLE001

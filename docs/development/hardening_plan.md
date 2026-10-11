@@ -10,18 +10,19 @@ change and [observability](observability.md) to inspect a running deployment.
 
 | Area | Current behavior | Source |
 | --- | --- | --- |
-| Startup | Mongo ping before polling; audit indexes initialized; missing persona warning/fallback | [`main.py`](../../main.py), [`connection.py`](../../app/database/connection.py), [`chat_manager.py`](../../app/services/chat_manager.py) |
+| Startup | Numeric bounds/relationships validated; Mongo ping and audit indexes initialized; missing persona warning/fallback; explicit webhook/backlog removal | [`config.py`](../../app/config.py), [`main.py`](../../main.py), [`connection.py`](../../app/database/connection.py), [`chat_manager.py`](../../app/services/chat_manager.py) |
 | LLM retries | Shared client, SDK retries disabled; bounded exponential retries for transient errors | [`llm_service.py`](../../app/services/llm_service.py) |
 | Structured output | Reply/reaction bundle; memory Pydantic validation; configurable JSON-object/native parsing with fallback | [`llm_service.py`](../../app/services/llm_service.py), [`schemas.py`](../../app/services/schemas.py) |
 | Input routing | Sender/non-conversational guards, startup-stale cutoff, per-user rate limit, text-length limit, slash-command skip | [`middlewares.py`](../../app/handlers/middlewares.py), [`messages.py`](../../app/handlers/messages.py) |
 | Reply delivery | Character cap, Telegram-safe chunks, group reply fallback, normalized reactions, blocked/restricted handling | [`telegram_text.py`](../../app/services/telegram_text.py), [`user_task_manager.py`](../../app/services/user_task_manager.py) |
-| Batching/state | Per-chat pending cap, chat/memory locks, idle state/cache pruning | [`user_task_manager.py`](../../app/services/user_task_manager.py) |
-| Buffers | Mongo `$push`/`$slice` message cap; timestamp-based `$pull` trim for normal timestamped buffers | [`models.py`](../../app/database/models.py) |
-| Memory updates | Normalized dedup/matching; failed extraction returns a distinct sentinel; compression/consolidation skip replacement on LLM failure | [`models.py`](../../app/database/models.py), [`memory_extractor.py`](../../app/services/memory_extractor.py), [`memory_compressor.py`](../../app/services/memory_compressor.py), [`memory_consolidator.py`](../../app/services/memory_consolidator.py) |
+| Batching/state | Per-chat pending cap, maximum-age coalescing timer, consecutive sender ordering, chat/memory locks, idle state/cache pruning | [`user_task_manager.py`](../../app/services/user_task_manager.py) |
+| Buffers | Mongo `$push`/`$slice` message cap; extraction-snapshot message-ID removal; conditional legacy-array replacement | [`models.py`](../../app/database/models.py) |
+| Memory updates | Normalized dedup/matching; snapshot-conditional profile writes; bounded extraction-save conflict retries; stale/failing maintenance replacements skipped | [`models.py`](../../app/database/models.py), [`memory_extractor.py`](../../app/services/memory_extractor.py), [`memory_compressor.py`](../../app/services/memory_compressor.py), [`memory_consolidator.py`](../../app/services/memory_consolidator.py) |
 | Memory maintenance | Compression cooldown, single-read/at-most-one-write budget shedding, capped mood/insight lists | [`memory_compressor.py`](../../app/services/memory_compressor.py), [`models.py`](../../app/database/models.py) |
 | Operations | Best-effort audit writes, attempted TTL retention, metrics checkpointing, gated reports, loop-protected forwarding | [Observability runbook](observability.md) |
 | Group behavior | Explicit/implicit/ambient gates, mass-tag/burst checks, per-member and group mode controls | [Group chat guide](group_chat.md) |
-| Proactive behavior | Inactivity/attempt-gap/item-count checks, opt-out, UTC quiet hours, unanswered-streak pause, delivery-failure opt-out | [`health.py`](../../app/services/health.py), [`models.py`](../../app/database/models.py) |
+| Proactive behavior | Inactivity/attempt-gap/item-count checks, opt-out, UTC quiet hours, unanswered-streak pause; permanent delivery failures disable outreach, transient failures preserve opt-in | [`health.py`](../../app/services/health.py), [`models.py`](../../app/database/models.py) |
+| Shutdown | Owned conversation/audit/error tasks drain within bounded windows, final metrics/log flushes, client closure, and startup-failure cleanup | [`main.py`](../../main.py), [`user_task_manager.py`](../../app/services/user_task_manager.py), [`llm_service.py`](../../app/services/llm_service.py) |
 
 These safeguards describe code paths and their scope. They do not guarantee that the
 LLM returns accurate memories, that network operations succeed, or that storage stays
@@ -41,16 +42,18 @@ then removes entries from the front of the event, belief, and fact arrays in tha
 metadata, so a very small budget may remain unsatisfied. A memory-character budget is
 not a complete prompt-token or Mongo document-size cap.
 
-**Atomic trim has a defined scope.** Normal timestamped buffers use `$pull` on a
-cutoff and preserve newer appends. Legacy messages without timestamps use positional
-replacement, and deleting the whole observed buffer uses a whole-array replacement.
-Timestamp ordering is enforced within one process, not across replicas.
+**Atomic trim has a defined scope.** New messages carry unique IDs. Extraction removes
+only messages in its observed snapshot, preserving concurrent appends and avoiding
+over-trim after hard-cap rotation. Legacy arrays without IDs use compare-and-set
+replacement; concurrent changes skip trimming so those messages can be reconsidered.
 
 **Background work is best-effort.** Pending updates/jobs are not durably queued for
-replay. Audits are tracked in the LLM service but not explicitly drained on shutdown;
-extraction/compression tasks created by the chat manager are not all included in
-`main.py`'s scheduler shutdown list. A crash/restart can lose in-flight work and metrics
-since the last successful checkpoint.
+replay. Shutdown drains active update handlers for up to 10 seconds, owned reply/memory
+tasks for another 10 seconds, audits for up to 5 seconds, and error forwarding for up to
+5 seconds before cancelling outstanding
+tasks. Separate asynchronous cleanup steps have a 15-second outer timeout. Crashes,
+forced termination, and drain timeouts can lose in-flight work and metrics since the
+last successful checkpoint.
 
 ## Privacy and operator access
 
@@ -64,8 +67,8 @@ An empty `ADMIN_USER_IDS` permits ops reports to **every DM user**. A non-empty 
 restricts sender IDs but permits their reports in groups. `/profile` and confirmed
 `/reset` operate on the invoking user's ID; group transcripts and shared/member
 records are separate. Reset does not erase audits, all group references, local logs,
-or Telegram copies. Current reset success text overstates backup success; verify an
-uploaded backup before assuming recovery. There is no built-in restore command.
+or Telegram copies. Reset success text mentions recovery only after a backup upload
+succeeds. There is no built-in restore command.
 
 Review the [observability runbook](observability.md) and [database guide](database.md)
 when changing logging or deletion behavior.
@@ -75,12 +78,18 @@ when changing logging or deletion behavior.
 The supported topology is one long-polling process. Locks/queues/caches, gate windows,
 and compression cooldowns are process-local. Group extraction writes participant
 profiles under a group lock, so it is not serialized with the participant's DM or
-another group's work. Profile read-modify-write operations and `/reset` need further
-coordination to prevent conflicting in-flight writes.
+another group's work. Profile snapshot checks prevent stale memory overwrites;
+extraction retries conflicts and maintenance skips stale replacements. Generation tokens
+also reject results when the captured profile was deleted or recreated. DM extraction
+captures the token before its transcript snapshot; group tokens are captured after
+reading the segment. Confirmed reset stops prior owned DM work and holds new DM messages
+through backup/deletion. New activity or extraction from retained shared group history
+can still create profiles again. There are no persistent
+deletion tombstones or complete-erasure guarantees.
 
 Queue caps are per chat; active states, LLM requests, due-user scans, and log-forwarding
-buffers lack a global hard cap. The batching maximum is checked when a new message
-arrives, not as a strict end-to-end deadline. Readiness checks Mongo connectivity only;
+buffers lack a global hard cap. The batching maximum bounds the coalescing timer,
+not end-to-end response time. Readiness checks Mongo connectivity only;
 a green report says nothing about LLM/Telegram delivery. No repository benchmark
 substantiates a 50,000-user capacity claim. See
 [performance and scaling](performance_and_scaling.md).

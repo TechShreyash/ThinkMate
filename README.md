@@ -60,7 +60,7 @@ ThinkMate currently runs as one long-polling Python process per bot token. Queue
 Review these behaviors before sharing a bot with other people:
 
 - A group reply can include the triggering participant's personal memory from other chats. `/profile` can display personal memories in a group. These are current implementation behaviors, described in the [group guide](docs/development/group_chat.md).
-- `/reset` deletes the caller's personal profile and DM buffer. It does not delete group history, affinity settings, audit entries, or external logs/backups, and it does not cancel work already running.
+- `/reset` stops prior DM work and deletes the caller's personal profile and DM buffer while new DM messages wait. It does not delete group history, affinity settings, audit entries, or external logs/backups.
 - Proactive check-ins are enabled by default for eligible inactive users. Users can use `/checkins off`; an operator can set `PROACTIVE_INTERVAL_SECS=0` to disable the scheduler.
 - Empty `ADMIN_USER_IDS` permits health/metrics access to any private-chat user. Set an explicit operator allowlist for a shared deployment.
 - Telegram processes messages, and the configured LLM provider receives prompts containing conversation and memory. MongoDB and diagnostic logs also retain data. Self-hosting the bot alone does not make the whole system local or guarantee confidentiality.

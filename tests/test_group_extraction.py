@@ -176,8 +176,15 @@ async def test_group_extraction_saves_shared_group_memory_to_chat_profile():
             assert group_doc["profile_type"] == "group"
             assert group_doc["last_group_extraction"]["group_saved"] is True
             assert group_doc["last_group_extraction"]["participant_updates"] == 0
-            assert await db["user_profiles"].find_one({"_id": ALICE_ID}) is None
-            assert await db["user_profiles"].find_one({"_id": BOB_ID}) is None
+            # Known speakers receive empty identity-free skeletons before the call,
+            # allowing a reset during extraction to invalidate pending output.
+            for participant_id in (ALICE_ID, BOB_ID):
+                participant = await db["user_profiles"].find_one(
+                    {"_id": participant_id}
+                )
+                assert participant["facts"] == []
+                assert participant["memory_generation"]
+                assert "username" not in participant
     finally:
         config.CHAT_BUFFER_TRIM = original_trim
 
@@ -220,10 +227,15 @@ async def test_unresolved_participant_is_skipped():
         assert mock_extract.await_count == 1
 
         async with connection.db_session() as db:
-            # No profile is created for the unknown participant, and the known speakers
-            # got nothing (the only update was unresolved).
-            assert await db["user_profiles"].find_one({"_id": ALICE_ID}) is None
-            assert await db["user_profiles"].find_one({"_id": BOB_ID}) is None
+            # Known speakers have lifecycle skeletons but receive no facts because the
+            # only update was unresolved. An unknown participant gets no skeleton.
+            for participant_id in (ALICE_ID, BOB_ID):
+                participant = await db["user_profiles"].find_one(
+                    {"_id": participant_id}
+                )
+                assert participant["facts"] == []
+                assert participant["memory_generation"]
+                assert "username" not in participant
             # The group profile exists as an extraction status marker, but has no shared facts.
             group_doc = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
             assert group_doc["profile_type"] == "group"

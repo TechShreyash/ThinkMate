@@ -98,7 +98,7 @@ _NORMALIZED_LOOKUP: dict[str, str] = {
 
 def normalize_reaction(candidate: str | None) -> str | None:
     """Return a Telegram-accepted emoji for ``candidate``, or ``None`` if there's no match."""
-    if not candidate:
+    if not isinstance(candidate, str) or not candidate:
         return None
     cleaned = candidate.strip().strip("\"'").strip()
     if not cleaned or cleaned.lower() == "none":

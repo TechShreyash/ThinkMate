@@ -41,17 +41,19 @@ warnings, and duration come from the current checkout/environment and test comma
 - Async adapters for the synchronous mongomock collection/cursor API.
 - Reactions disabled by default, with the previous config restored afterward.
 - A synthetic logs-channel ID when no target is configured, and forwarder-state resets.
+- A TCP socket-connect blocker for IPv4/IPv6, so accidental real-service calls fail
+  during automated tests.
 
 Database tests normally need no MongoDB server. This mock does not implement all Motor
 features or server behavior: real TTL expiry, transactions, indexes under load, network
 timeouts, connection pooling, and distributed concurrency still require integration
 validation.
 
-**There is no global LLM/Telegram network blocker.** Tests mock the specific methods
-or clients they exercise, usually with `AsyncMock`. Patch background jobs as well as
-foreground calls when a test crosses extraction/compression thresholds. A new or
-incorrectly patched test can contact the configured LLM, Telegram, or an unpatched
-connection path.
+Tests still mock the specific methods or clients they exercise, usually with
+`AsyncMock`. Patch background jobs as well as foreground calls when a test crosses
+extraction/compression thresholds. The socket blocker is a backstop, not a transport
+mock: an unexpected network attempt should be fixed in the test setup. It applies
+after fixtures start; imports and the separate live script are outside that guard.
 
 Imports still load `.env` and process environment, create local logs, and construct the
 LLM singleton. Some config tests reload the module and assume default settings. Run
@@ -74,10 +76,15 @@ The complete live inventory is the `tests/` directory and `--collect-only` outpu
 | Metrics and operations | `test_metrics*.py`, [`test_health_and_command.py`](../../tests/test_health_and_command.py), [`test_logs_channel_config.py`](../../tests/test_logs_channel_config.py), [`test_observability_command_wiring.py`](../../tests/test_observability_command_wiring.py): registry behavior, instrumentation, probes, forwarding, and authorization/command wiring. |
 | Consolidation | `test_consolidation_*.py`: schemas, due-user query, scheduler, apply logic, and failed-call preservation. |
 | Engagement and proactive messages | `test_engagement_*.py`, [`test_proactive_scheduler.py`](../../tests/test_proactive_scheduler.py): temporal context, opt-out/onboarding commands, mood history, check-in decline/sending, quiet hours, and unanswered streaks. |
+| Configuration and lifecycle | [`test_config_validation.py`](../../tests/test_config_validation.py), [`test_handler_quality.py`](../../tests/test_handler_quality.py), [`test_lifecycle.py`](../../tests/test_lifecycle.py), [`test_conversation_lifecycle.py`](../../tests/test_conversation_lifecycle.py), [`test_log_forwarder_concurrency.py`](../../tests/test_log_forwarder_concurrency.py): numeric bounds, command collisions, throttle races, truthful feedback, cleanup, and concurrent log uploads. |
 
 For behavior explanations, read [memory engine](memory_engine.md),
 [Telegram bot](telegram_bot.md), [group chat](group_chat.md), and
 [observability](observability.md) before updating expectations.
+
+The [Python checks workflow](../../.github/workflows/python-checks.yml) installs the
+locked development dependencies and runs Black, Ruff, and the complete pytest suite
+on pushes and pull requests.
 
 ## Writing or changing a test
 

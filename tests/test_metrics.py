@@ -173,3 +173,33 @@ def test_reset_isolates_module_singleton():
     metrics.reset()
 
     assert metrics.snapshot() == {"counters": {}, "gauges": {}, "timers": {}}
+
+
+def test_load_state_skips_corrupt_entries_and_sections_independently():
+    reg = MetricsRegistry()
+    reg.load_state(
+        {
+            "counters": {"bad": float("nan"), "calls": 2},
+            "gauges": ["invalid section"],
+            "timers": {
+                "bad": {"count": "invalid", "sum": 1, "max": 1},
+                "latency": {"count": 2, "sum": 4, "max": 3},
+            },
+        }
+    )
+    snapshot = reg.snapshot()
+    assert snapshot["counters"] == {"calls": 2}
+    assert snapshot["gauges"] == {}
+    assert snapshot["timers"] == {"latency": {"count": 2, "sum": 4, "max": 3, "avg": 2}}
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, "invalid", None])
+def test_invalid_observations_cannot_poison_metrics(value):
+    reg = MetricsRegistry()
+    reg.observe("latency", 1)
+    reg.observe("latency", value)
+    reg.set_gauge("active", 2)
+    reg.set_gauge("active", value)
+    snapshot = reg.snapshot()
+    assert snapshot["gauges"] == {"active": 2}
+    assert snapshot["timers"]["latency"] == {"count": 1, "sum": 1, "max": 1, "avg": 1}

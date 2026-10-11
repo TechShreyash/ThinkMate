@@ -24,8 +24,12 @@ Tables below show **code defaults when a variable is unset**, not values promise
 Boolean true values are `1`, `true`, `yes`, and `on`, case-insensitive; any other
 provided string becomes false. Integer/float parse errors can stop import. Invalid
 `ADMIN_USER_IDS` entries are ignored; invalid or blank `LOGS_CHANNEL_ID` becomes
-`None`. Most settings have no range or cross-setting validation, and URL/model strings
-are not checked for endpoint support at startup. Check values before deployment.
+`None`. Numeric settings reject NaN/infinity. Resource caps and timeouts must be
+positive; retry counts, retained-buffer counts, and cooldowns allow zero. Probability
+and similarity settings must be in `[0, 1]`, and quiet-hour settings in `0`–`23`.
+Startup also checks that `CHAT_BUFFER_TRIM < CHAT_BUFFER_HARD_CAP` and that the burst
+tracking cap can hold `GROUP_SPAM_BURST_COUNT` messages. Documented `<= 0` feature
+switches remain valid. URL/model strings are not checked for endpoint support at startup.
 
 ## Telegram, identity, and persona
 
@@ -96,7 +100,7 @@ See [memory engine](memory_engine.md).
 | Variable | Type | Code default | Behavior |
 | --- | --- | --- | --- |
 | `MESSAGE_BATCH_DELAY_SECS` | Float | `2.0` | Idle delay after the latest queued message before processing. |
-| `MAX_BATCH_DELAY_SECS` | Float | `6.0` | On enqueue, dispatch immediately if elapsed time since the first queued message exceeds this value. It does not bound lock wait, generation, or delivery; an idle timer can exceed it if no new message arrives. |
+| `MAX_BATCH_DELAY_SECS` | Float | `6.0` | Coalescing timer's maximum age from the first pending message. Each timer uses the smaller of the idle delay and remaining maximum age. It does not bound lock wait, generation, or delivery. |
 | `USER_STATE_TTL_SECS` | Float | `1800.0` | Idle state eviction threshold; busy/locked/queued state is retained. Sweeps run at `max(60, TTL / 2)` seconds. |
 | `RATE_LIMIT_MAX_REQUESTS` | Integer | `10` | Maximum per-user messages accepted in the sliding window, across chats. |
 | `RATE_LIMIT_WINDOW_SECS` | Float | `5.0` | Rate-limit window using Telegram send timestamps; idle entries are pruned on later access. |
@@ -191,11 +195,11 @@ an environment variable called `COMMANDS` has no effect.
 | `health` | `CMD_HEALTH_NAME` | `CMD_HEALTH_ENABLED` |
 | `metrics` | `CMD_METRICS_NAME` | `CMD_METRICS_ENABLED` |
 
-Names lose leading `/` and surrounding whitespace. Resolver accepts 1–32 ASCII letters,
-digits, and underscores; invalid names fall back to the built-in key. Identical enabled
-triggers reset colliding commands to defaults. Use distinct lowercase names: Telegram
-menu rules are stricter than this resolver, and fallback collision handling is not
-comprehensive validation. Disabled commands disappear from handlers/help/menu;
+Names lose leading `/` and surrounding whitespace and normalize to lowercase. The
+resolver accepts 1–32 ASCII lowercase letters, digits, and underscores; invalid names
+fall back to the built-in key. Identical enabled triggers reset colliding commands to
+defaults, repeating if a fallback collides with another override. Disabled commands
+disappear from handlers/help/menu;
 catch-all command messages are ignored. Rename preserves authorization rules.
 
 ```dotenv

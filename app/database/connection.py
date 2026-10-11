@@ -24,6 +24,14 @@ def get_db_client() -> AsyncIOMotorClient:
     return _client
 
 
+def close_db() -> None:
+    """Close the existing client and clear it without creating a new connection."""
+    global _client
+    client, _client = _client, None
+    if client is not None:
+        client.close()
+
+
 def get_db() -> AsyncIOMotorDatabase:
     return get_db_client().get_database(
         config.MONGODB_DB, codec_options=_UTC_CODEC_OPTIONS

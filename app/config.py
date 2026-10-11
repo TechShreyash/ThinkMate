@@ -8,10 +8,11 @@ types via Pydantic, and exposes a single importable ``config`` instance. See
 import os
 import re
 from pathlib import Path
+from typing import Self
 
 from dotenv import load_dotenv
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Load environment variables from .env if present
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -80,7 +81,7 @@ _BUILTIN_COMMANDS: tuple[str, ...] = (
 
 # Telegram command name rule: 1-32 chars, letters/digits/underscore. Used to reject
 # invalid configured trigger names (e.g. containing spaces, "/", or punctuation).
-_CMD_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+_CMD_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
 def resolve_command_config() -> dict[str, tuple[str, bool]]:
@@ -95,7 +96,7 @@ def resolve_command_config() -> dict[str, tuple[str, bool]]:
     try:
         raw: dict[str, tuple[str, bool]] = {}
         for key in _BUILTIN_COMMANDS:
-            name = _env_str(f"CMD_{key.upper()}_NAME", key).strip().lstrip("/")
+            name = _env_str(f"CMD_{key.upper()}_NAME", key).strip().lstrip("/").lower()
             enabled = _env_bool(f"CMD_{key.upper()}_ENABLED", True)
             if not _CMD_NAME_RE.match(name):
                 logger.warning(
@@ -105,15 +106,18 @@ def resolve_command_config() -> dict[str, tuple[str, bool]]:
                 name = key
             raw[key] = (name, enabled)
 
-        # Duplicate detection among ENABLED commands' resolved triggers. Any command
-        # whose trigger collides with another's falls back to its own default (the key).
-        # Defaults are unique by construction, so fallback always resolves the collision.
-        seen: dict[str, list[str]] = {}
-        for key, (name, enabled) in raw.items():
-            if enabled:
-                seen.setdefault(name, []).append(key)
-        for name, keys in seen.items():
-            if len(keys) > 1:
+        # A fallback may collide with a third command's override. Keep resolving
+        # until all enabled names are unique. Each pass resets at least one override,
+        # so this terminates after at most the number of built-in commands.
+        while True:
+            seen: dict[str, list[str]] = {}
+            for key, (name, enabled) in raw.items():
+                if enabled:
+                    seen.setdefault(name, []).append(key)
+            collisions = [(name, keys) for name, keys in seen.items() if len(keys) > 1]
+            if not collisions:
+                break
+            for name, keys in collisions:
                 logger.warning(
                     f"command config: trigger {name!r} duplicated by {keys}; "
                     f"falling back to default names for those commands"
@@ -129,6 +133,10 @@ def resolve_command_config() -> dict[str, tuple[str, bool]]:
 
 
 class Config(BaseModel):
+    # Environment factories are defaults to Pydantic; validate them too so invalid
+    # startup settings cannot bypass numeric bounds or admit NaN/infinity.
+    model_config = ConfigDict(validate_default=True, allow_inf_nan=False)
+
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = Field(
         default_factory=lambda: _env_str("TELEGRAM_BOT_TOKEN", "")
@@ -151,9 +159,11 @@ class Config(BaseModel):
     LLM_STRUCTURED_MODE: str = Field(
         default_factory=lambda: _env_str("LLM_STRUCTURED_MODE", "json_object")
     )
-    LLM_MAX_RETRIES: int = Field(default_factory=lambda: _env_int("LLM_MAX_RETRIES", 2))
+    LLM_MAX_RETRIES: int = Field(
+        default_factory=lambda: _env_int("LLM_MAX_RETRIES", 2), ge=0
+    )
     LLM_RETRY_BASE_DELAY_SECS: float = Field(
-        default_factory=lambda: _env_float("LLM_RETRY_BASE_DELAY_SECS", 0.5)
+        default_factory=lambda: _env_float("LLM_RETRY_BASE_DELAY_SECS", 0.5), ge=0
     )
     # Per-request client timeout. Must sit ABOVE the proxy's own request ceiling
     # (currently 600s for non-streaming) so the proxy is always the first to give
@@ -162,7 +172,7 @@ class Config(BaseModel):
     # work). Generous by design — reasoning models can legitimately run for
     # minutes. See docs/development/llm_integration.md.
     LLM_REQUEST_TIMEOUT_SECS: float = Field(
-        default_factory=lambda: _env_float("LLM_REQUEST_TIMEOUT_SECS", 610.0)
+        default_factory=lambda: _env_float("LLM_REQUEST_TIMEOUT_SECS", 610.0), gt=0
     )
 
     # --- MongoDB ---
@@ -173,53 +183,55 @@ class Config(BaseModel):
         default_factory=lambda: _env_str("MONGODB_DB", "thinkmate_db")
     )
     AUDIT_LOG_RETENTION_DAYS: int = Field(
-        default_factory=lambda: _env_int("AUDIT_LOG_RETENTION_DAYS", 30)
+        default_factory=lambda: _env_int("AUDIT_LOG_RETENTION_DAYS", 30), gt=0
     )
 
     # --- Memory tuning ---
     CHAT_BUFFER_MAX_CHARS: int = Field(
-        default_factory=lambda: _env_int("CHAT_BUFFER_MAX_CHARS", 4000)
+        default_factory=lambda: _env_int("CHAT_BUFFER_MAX_CHARS", 4000), gt=0
     )
     # New/sparse users (few stored memory items) extract sooner so their profile builds
     # quickly: when a user's stored memory-item count is below NEW_USER_MEMORY_THRESHOLD,
     # extraction triggers at NEW_USER_EXTRACTION_CHARS instead of CHAT_BUFFER_MAX_CHARS.
     NEW_USER_EXTRACTION_CHARS: int = Field(
-        default_factory=lambda: _env_int("NEW_USER_EXTRACTION_CHARS", 1000)
+        default_factory=lambda: _env_int("NEW_USER_EXTRACTION_CHARS", 1000), gt=0
     )
     NEW_USER_MEMORY_THRESHOLD: int = Field(
-        default_factory=lambda: _env_int("NEW_USER_MEMORY_THRESHOLD", 10)
+        default_factory=lambda: _env_int("NEW_USER_MEMORY_THRESHOLD", 10), ge=0
     )
     CHAT_BUFFER_TRIM: int = Field(
-        default_factory=lambda: _env_int("CHAT_BUFFER_TRIM", 8)
+        default_factory=lambda: _env_int("CHAT_BUFFER_TRIM", 8), ge=0
     )
     CHAT_BUFFER_HARD_CAP: int = Field(
-        default_factory=lambda: _env_int("CHAT_BUFFER_HARD_CAP", 200)
+        default_factory=lambda: _env_int("CHAT_BUFFER_HARD_CAP", 200), gt=0
     )
     USER_MEMORY_BUDGET_CHARS: int = Field(
-        default_factory=lambda: _env_int("USER_MEMORY_BUDGET_CHARS", 10000)
+        default_factory=lambda: _env_int("USER_MEMORY_BUDGET_CHARS", 10000), gt=0
     )
     COMPRESSION_COOLDOWN_SECS: float = Field(
-        default_factory=lambda: _env_float("COMPRESSION_COOLDOWN_SECS", 300.0)
+        default_factory=lambda: _env_float("COMPRESSION_COOLDOWN_SECS", 300.0), ge=0
     )
-    CHARS_PER_TOKEN: int = Field(default_factory=lambda: _env_int("CHARS_PER_TOKEN", 4))
+    CHARS_PER_TOKEN: int = Field(
+        default_factory=lambda: _env_int("CHARS_PER_TOKEN", 4), gt=0
+    )
 
     # --- Batching / responsiveness ---
     MESSAGE_BATCH_DELAY_SECS: float = Field(
-        default_factory=lambda: _env_float("MESSAGE_BATCH_DELAY_SECS", 2.0)
+        default_factory=lambda: _env_float("MESSAGE_BATCH_DELAY_SECS", 2.0), ge=0
     )
     MAX_BATCH_DELAY_SECS: float = Field(
-        default_factory=lambda: _env_float("MAX_BATCH_DELAY_SECS", 6.0)
+        default_factory=lambda: _env_float("MAX_BATCH_DELAY_SECS", 6.0), ge=0
     )
     USER_STATE_TTL_SECS: float = Field(
-        default_factory=lambda: _env_float("USER_STATE_TTL_SECS", 1800.0)
+        default_factory=lambda: _env_float("USER_STATE_TTL_SECS", 1800.0), gt=0
     )
 
     # --- Input/Output guards ---
     RATE_LIMIT_MAX_REQUESTS: int = Field(
-        default_factory=lambda: _env_int("RATE_LIMIT_MAX_REQUESTS", 10)
+        default_factory=lambda: _env_int("RATE_LIMIT_MAX_REQUESTS", 10), gt=0
     )
     RATE_LIMIT_WINDOW_SECS: float = Field(
-        default_factory=lambda: _env_float("RATE_LIMIT_WINDOW_SECS", 5.0)
+        default_factory=lambda: _env_float("RATE_LIMIT_WINDOW_SECS", 5.0), gt=0
     )
     # Drop messages that predate the process start by more than this many seconds — i.e.
     # backlog that piled up while the bot was DOWN (anchored to startup, not a rolling
@@ -231,10 +243,10 @@ class Config(BaseModel):
         default_factory=lambda: _env_float("STALE_MESSAGE_SECS", 60.0)
     )
     MAX_QUEUED_MESSAGES: int = Field(
-        default_factory=lambda: _env_int("MAX_QUEUED_MESSAGES", 10)
+        default_factory=lambda: _env_int("MAX_QUEUED_MESSAGES", 10), gt=0
     )
     MAX_INPUT_CHARS: int = Field(
-        default_factory=lambda: _env_int("MAX_INPUT_CHARS", 4000)
+        default_factory=lambda: _env_int("MAX_INPUT_CHARS", 4000), gt=0
     )
     MAX_RESPONSE_CHARS: int = Field(
         default_factory=lambda: _env_int("MAX_RESPONSE_CHARS", 4000)
@@ -242,42 +254,44 @@ class Config(BaseModel):
 
     # --- Group chat / ambient replies ---
     GROUP_AMBIENT_COOLDOWN_SECS: float = Field(
-        default_factory=lambda: _env_float("GROUP_AMBIENT_COOLDOWN_SECS", 30.0)
+        default_factory=lambda: _env_float("GROUP_AMBIENT_COOLDOWN_SECS", 30.0), ge=0
     )
     GROUP_AMBIENT_BASE_RATE: float = Field(
-        default_factory=lambda: _env_float("GROUP_AMBIENT_BASE_RATE", 0.25)
+        default_factory=lambda: _env_float("GROUP_AMBIENT_BASE_RATE", 0.25), ge=0, le=1
     )
     GROUP_CONTEXT_SCAN_EVERY: int = Field(
         default_factory=lambda: _env_int("GROUP_CONTEXT_SCAN_EVERY", 12)
     )
     AFFINITY_DEFAULT: float = Field(
-        default_factory=lambda: _env_float("AFFINITY_DEFAULT", 0.5)
+        default_factory=lambda: _env_float("AFFINITY_DEFAULT", 0.5), ge=0, le=1
     )
 
     # --- Group chat / implicit addressing & spam ---
     GROUP_IMPLICIT_RECENCY_SECS: float = Field(
-        default_factory=lambda: _env_float("GROUP_IMPLICIT_RECENCY_SECS", 120.0)
+        default_factory=lambda: _env_float("GROUP_IMPLICIT_RECENCY_SECS", 120.0), ge=0
     )
     GROUP_IMPLICIT_RECENCY_MAX_MSGS: int = Field(
-        default_factory=lambda: _env_int("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 5)
+        default_factory=lambda: _env_int("GROUP_IMPLICIT_RECENCY_MAX_MSGS", 5), ge=0
     )
     GROUP_IMPLICIT_COOLDOWN_SECS: float = Field(
-        default_factory=lambda: _env_float("GROUP_IMPLICIT_COOLDOWN_SECS", 15.0)
+        default_factory=lambda: _env_float("GROUP_IMPLICIT_COOLDOWN_SECS", 15.0), ge=0
     )
     GROUP_MASS_TAG_SPAM_THRESHOLD: int = Field(
-        default_factory=lambda: _env_int("GROUP_MASS_TAG_SPAM_THRESHOLD", 5)
+        default_factory=lambda: _env_int("GROUP_MASS_TAG_SPAM_THRESHOLD", 5), ge=0
     )
     GROUP_SPAM_BURST_SIMILARITY: float = Field(
-        default_factory=lambda: _env_float("GROUP_SPAM_BURST_SIMILARITY", 0.85)
+        default_factory=lambda: _env_float("GROUP_SPAM_BURST_SIMILARITY", 0.85),
+        ge=0,
+        le=1,
     )
     GROUP_SPAM_BURST_COUNT: int = Field(
-        default_factory=lambda: _env_int("GROUP_SPAM_BURST_COUNT", 3)
+        default_factory=lambda: _env_int("GROUP_SPAM_BURST_COUNT", 3), gt=0
     )
     GROUP_SPAM_BURST_WINDOW_SECS: float = Field(
-        default_factory=lambda: _env_float("GROUP_SPAM_BURST_WINDOW_SECS", 60.0)
+        default_factory=lambda: _env_float("GROUP_SPAM_BURST_WINDOW_SECS", 60.0), gt=0
     )
     GROUP_SPAM_BURST_TRACK_MAX: int = Field(
-        default_factory=lambda: _env_int("GROUP_SPAM_BURST_TRACK_MAX", 20)
+        default_factory=lambda: _env_int("GROUP_SPAM_BURST_TRACK_MAX", 20), gt=0
     )
 
     # --- Persona / features ---
@@ -336,16 +350,16 @@ class Config(BaseModel):
         default_factory=lambda: _env_float("CONSOLIDATION_SCAN_INTERVAL_SECS", 3600.0)
     )
     CONSOLIDATION_MAX_USERS_PER_SCAN: int = Field(
-        default_factory=lambda: _env_int("CONSOLIDATION_MAX_USERS_PER_SCAN", 50)
+        default_factory=lambda: _env_int("CONSOLIDATION_MAX_USERS_PER_SCAN", 50), gt=0
     )
     CONSOLIDATION_MIN_ITEMS: int = Field(
-        default_factory=lambda: _env_int("CONSOLIDATION_MIN_ITEMS", 8)
+        default_factory=lambda: _env_int("CONSOLIDATION_MIN_ITEMS", 8), ge=0
     )
-    MAX_INSIGHTS: int = Field(default_factory=lambda: _env_int("MAX_INSIGHTS", 5))
+    MAX_INSIGHTS: int = Field(default_factory=lambda: _env_int("MAX_INSIGHTS", 5), gt=0)
 
     # --- Engagement / mood history (Phase 12) ---
     MAX_MOOD_HISTORY: int = Field(
-        default_factory=lambda: _env_int("MAX_MOOD_HISTORY", 10)
+        default_factory=lambda: _env_int("MAX_MOOD_HISTORY", 10), gt=0
     )
 
     # --- Proactive check-ins (Phase 12) ---
@@ -353,30 +367,48 @@ class Config(BaseModel):
         default_factory=lambda: _env_float("PROACTIVE_INTERVAL_SECS", 3600.0)
     )
     PROACTIVE_INACTIVITY_SECS: float = Field(
-        default_factory=lambda: _env_float("PROACTIVE_INACTIVITY_SECS", 86400.0)
+        default_factory=lambda: _env_float("PROACTIVE_INACTIVITY_SECS", 86400.0), ge=0
     )
     PROACTIVE_MIN_INTERVAL_SECS: float = Field(
-        default_factory=lambda: _env_float("PROACTIVE_MIN_INTERVAL_SECS", 172800.0)
+        default_factory=lambda: _env_float("PROACTIVE_MIN_INTERVAL_SECS", 172800.0),
+        ge=0,
     )
     PROACTIVE_MAX_PER_SCAN: int = Field(
-        default_factory=lambda: _env_int("PROACTIVE_MAX_PER_SCAN", 50)
+        default_factory=lambda: _env_int("PROACTIVE_MAX_PER_SCAN", 50), gt=0
     )
     PROACTIVE_MIN_ITEMS: int = Field(
-        default_factory=lambda: _env_int("PROACTIVE_MIN_ITEMS", 3)
+        default_factory=lambda: _env_int("PROACTIVE_MIN_ITEMS", 3), ge=0
     )
     # Auto-pause proactive DMs for an unresponsive user: after this many consecutive
     # delivered check-ins with no reply (no chat message or command in between), the user
     # is skipped by the scan until they engage again, which resets the streak. 0 disables
     # the auto-pause (check-ins keep going regardless of silence).
     PROACTIVE_MAX_UNANSWERED: int = Field(
-        default_factory=lambda: _env_int("PROACTIVE_MAX_UNANSWERED", 3)
+        default_factory=lambda: _env_int("PROACTIVE_MAX_UNANSWERED", 3), ge=0
     )
     PROACTIVE_QUIET_START_HOUR: int = Field(
-        default_factory=lambda: _env_int("PROACTIVE_QUIET_START_HOUR", 16)
+        default_factory=lambda: _env_int("PROACTIVE_QUIET_START_HOUR", 16), ge=0, le=23
     )
     PROACTIVE_QUIET_END_HOUR: int = Field(
-        default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 2)
+        default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 2), ge=0, le=23
     )
+
+    @model_validator(mode="after")
+    def validate_runtime_relationships(self) -> Self:
+        if self.CHAT_BUFFER_TRIM >= self.CHAT_BUFFER_HARD_CAP:
+            raise ValueError("CHAT_BUFFER_TRIM must be less than CHAT_BUFFER_HARD_CAP")
+        if self.GROUP_SPAM_BURST_COUNT > self.GROUP_SPAM_BURST_TRACK_MAX:
+            raise ValueError(
+                "GROUP_SPAM_BURST_COUNT must not exceed GROUP_SPAM_BURST_TRACK_MAX"
+            )
+        if (
+            self.CONSOLIDATION_INTERVAL_SECS > 0
+            and self.CONSOLIDATION_SCAN_INTERVAL_SECS <= 0
+        ):
+            raise ValueError(
+                "CONSOLIDATION_SCAN_INTERVAL_SECS must be positive when consolidation is enabled"
+            )
+        return self
 
     @property
     def bot_display_name(self) -> str:

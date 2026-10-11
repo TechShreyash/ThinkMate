@@ -228,16 +228,18 @@ async def _maybe_ambient_chime(
         await _trace_routing(message, "ambient→drop", f"stage={stage}")
         return
 
+    # Reserve the cooldown before diagnostics can yield to another group message.
+    # It still holds when the eventual reply is empty or fails (Req 3.7).
+    ambient_gate.mark_chimed(message.chat.id, now)
+
     # Passed the funnel — log the chime decision before dispatching (Req 7.2).
     logger.debug(f"ambient chime stage={stage} chat={message.chat.id}")
     await _trace_routing(
         message, "ambient→chime", f"stage={stage} affinity={member['affinity']:.2f}"
     )
 
-    # Reset the cooldown NOW so a failed/empty reply still holds the window (Req 3.7).
     # Do NOT write the buffer here: this message will be enqueued and the
     # enqueue_message → handle_message path appends it (single-write invariant).
-    ambient_gate.mark_chimed(message.chat.id, now)
     await user_task_manager.enqueue_message(
         message.bot,
         message.chat.id,
@@ -331,7 +333,7 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
     | F.animation
     | F.video_note
 )
-async def handle_media_message(message: Message):
+async def handle_media_message(message: Message, db: AsyncIOMotorDatabase):
     """Deflect non-text media with a friendly text-only explanation.
 
     In DMs, always reply. In groups, only reply when the media message is a
@@ -347,6 +349,11 @@ async def handle_media_message(message: Message):
         reply_to = getattr(message, "reply_to_message", None)
         if reply_to is None or getattr(reply_to, "from_user", None) is None:
             return
+        try:
+            if not await models.is_group_enabled(db, message.chat.id):
+                return
+        except Exception as exc:  # noqa: BLE001 - same fallback as the text router
+            logger.debug(f"group-enabled check failed; treating as enabled: {exc}")
         identity = await _get_bot_identity(message)
         if reply_to.from_user.id != identity["id"] or identity["id"] == 0:
             return

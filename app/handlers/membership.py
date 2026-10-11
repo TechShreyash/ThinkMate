@@ -80,9 +80,11 @@ async def on_added_to_group(event: ChatMemberUpdated) -> None:
         )
         return
 
+    intro_sent = False
     try:
         text = await _intro_text(event.bot)
         await event.bot.send_message(event.chat.id, text, parse_mode="HTML")
+        intro_sent = True
         logger.info(f"Sent group intro on join to chat {event.chat.id}")
     except Exception as e:  # noqa: BLE001 - a failed intro must never crash the update
         is_perm = any(
@@ -109,7 +111,8 @@ async def on_added_to_group(event: ChatMemberUpdated) -> None:
         await log_forwarder.diagnostic(
             event.bot,
             event.chat.id,
-            f"➕ added to group chat={event.chat.id} ({title!r}) — intro sent",
+            f"➕ added to group chat={event.chat.id} ({title!r}) — "
+            f"intro {'sent' if intro_sent else 'not sent'}",
         )
     # Auxiliary failures must not interrupt message handling.
     except Exception:  # noqa: BLE001, S110

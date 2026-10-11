@@ -21,21 +21,27 @@ and bot membership updates through long polling. Start with the
 
 ## Startup and middleware
 
-[`main()`](../../main.py) verifies MongoDB, creates indexes, restores persisted metrics,
-and starts configured metrics and consolidation jobs. It creates the bot, installs
-log-channel forwarding and the warning/error sink, validates the persona, and starts
-proactive check-ins when enabled. The dispatcher then installs middleware, includes
+[`main()`](../../main.py) verifies MongoDB, creates indexes, and restores persisted metrics.
+It creates the bot, installs log-channel forwarding and the warning/error sink, validates
+the persona, and starts configured metrics, consolidation, and proactive jobs.
+The dispatcher then installs middleware, includes
 routers, publishes command menus when enabled, and polls for the update types returned
 by `dp.resolve_used_update_types()`.
 
-Two outer middleware run on the update pipeline in this order:
+Before polling, startup explicitly calls `delete_webhook(drop_pending_updates=True)`
+to remove a previous webhook and discard Telegram's pending backlog. Polling keeps
+the bot's HTTP session open for cleanup.
 
-1. `ThrottlingMiddleware` drops bot-authored messages, sufficiently old pre-startup
+Three outer middleware run on the update pipeline in this order:
+
+1. `UpdateTaskMiddleware` tracks active update handlers, rejects new updates during
+   shutdown, and drains or cancels active commands/handlers before clients close.
+2. `ThrottlingMiddleware` drops bot-authored messages, sufficiently old pre-startup
    messages, and messages exceeding the per-user sliding-window limit. It uses
    Telegram send timestamps for rate-limit calculations and keeps one warning per
    throttling episode in DMs; groups drop over-limit messages silently. Callback
    queries and membership updates pass through this message-only limiter.
-2. `DbSessionMiddleware` injects the shared Motor database handle as `db`. This is a
+3. `DbSessionMiddleware` injects the shared Motor database handle as `db`. This is a
    pooled database handle, not a new client or transaction for each update.
 
 The command router additionally uses `ProactiveResetMiddleware` to clear the caller's
@@ -43,8 +49,13 @@ unanswered check-in streak before a matched command runs. It does not change the
 `proactive_enabled` preference. Typing indicators belong to `UserTaskManager`, not a
 middleware. See [configuration](configuration.md) for limits and startup switches.
 
-On shutdown, the entry point closes log forwarding, cancels its registered background
-jobs, flushes metrics, and closes the bot's HTTP session.
+On shutdown or startup failure, the entry point cancels registered schedulers and drains
+active update handlers for up to 10 seconds, owned conversation work for another
+10 seconds, then LLM audits for up to 5 seconds. It
+flushes metrics, drains the error sink for up to 5 seconds, and uploads buffered logs
+before closing Telegram and MongoDB; the shared LLM client closes after its audit drain.
+Asynchronous cleanup steps have separate 15-second outer timeouts. See
+[shutdown and restarts](../operations.md#shutdown-and-restarts).
 
 ## Commands and their actual scope
 
@@ -63,7 +74,7 @@ controls discoverability, not authorization or where a handler can run.
 | `/reactions [on\|off]` | Report or set reactions on the caller's messages. | DMs and groups; preference follows the user across chats. |
 | `/quiet` | Set the caller's ambient mode to `quiet` in this chat. | Groups; in a DM, explain that the control is for groups. |
 | `/chatty` | Set the caller's ambient mode to `chatty` in this chat. | Groups; in a DM, explain that the control is for groups. |
-| `/groupbot [on\|off]` | Report or change whether conversational text is processed in this group. | Group-only; anyone can read status, authorized admins can change it. |
+| `/groupbot [on\|off]` | Report or change whether conversational text and media explanations are processed in this group. | Group-only; anyone can read status, authorized admins can change it. |
 | `/groupmode [quiet\|chatty\|normal]` | Report or set a group-wide ambient override. `normal` stores `auto`. | Group-only; anyone can read status, authorized admins can change it. |
 | `/health` | Show liveness, MongoDB readiness, and a metrics summary. | Ops authorization below. Unauthorized calls are silent. |
 | `/metrics` | Show counters, gauges, timers, and LLM calls by task. | Ops authorization below. Unauthorized calls are silent. |
@@ -86,9 +97,17 @@ memory also enters group reply prompts for the triggering sender. `/reset` delet
 only `user_profiles[user_id]` and `chat_buffers[user_id]`; it does not remove group
 history, group profiles, affinity, settings, or archived logs. The export contains
 that profile and DM buffer and is sent to `LOGS_CHANNEL_ID` when forwarding is
-configured. Backup delivery is best-effort; the success message currently claims a
-backup was saved even when forwarding was disabled or failed. There is no restore
-command. See [database](database.md) and the [roadmap](../roadmap.md).
+configured. Backup delivery is best-effort; the success message mentions restoration
+only after the backup upload succeeds. The confirmation explains that shared group
+history and archived logs remain. There is no restore command. See
+[database](database.md) and the [roadmap](../roadmap.md).
+
+Confirmed reset stops prior owned DM work and holds new DM messages through backup
+and deletion; a 10-second cancellation timeout prevents deletion. Shared group work
+and text remain. Extraction results are accepted only while the owner's captured
+profile-generation token still matches; deletion/recreation invalidates an older
+token. Group owner tokens are captured after reading the group segment, and retained
+history can be extracted again.
 
 ## Renaming, disabling, and Telegram menus
 
@@ -102,10 +121,10 @@ TELEGRAM_PUBLISH_COMMANDS=true
 ```
 
 `commands.py` binds enabled handlers at import time. Restart after changing these
-values. The loader strips a leading slash and validates 1-32 letters, digits, or
-underscores. Invalid names fall back to the built-in key; a detected duplicate among
-enabled triggers falls back to the keys for the colliding commands. Use unique
-lowercase names to keep registration and Telegram publication compatible.
+values. The loader strips a leading slash, normalizes to lowercase, and validates
+1-32 ASCII lowercase letters, digits, or underscores. Invalid names fall back to the
+built-in key. Duplicates among enabled triggers fall back to the keys for the colliding
+commands; collision checks repeat until fallback names are unique.
 
 Help lists and menus use resolved names and omit disabled commands. Some guide text,
 buttons, and command descriptions still refer to disabled commands; disabling a slash
@@ -137,9 +156,11 @@ in [group routing](group_chat.md).
 `UserTaskManager` queues by `chat_id`. It coalesces messages after
 `MESSAGE_BATCH_DELAY_SECS`, limits postponement with `MAX_BATCH_DELAY_SECS`, caps pending
 entries with `MAX_QUEUED_MESSAGES`, and serializes processing with the conversation's
-`chat_lock`. Within a batch it groups messages by sender in first-seen sender order,
-combines each sender's text, and generates separately for each sender. A direct-reply
-reason takes precedence over an ambient reason within a sender's batch.
+`chat_lock`. The timer expires at the idle delay or maximum batch age, whichever comes
+first; this does not bound lock waits, generation, or delivery. Within a batch it combines
+only consecutive messages from the same sender and generates separately for each run,
+preserving an A → B → A sequence. A direct-reply reason takes precedence over an ambient
+reason within a sender's run. A new coalescing timer does not cancel ongoing reply work.
 
 The typing loop spans batching and generation. `handle_message()` appends the combined
 user turn, builds memory and context, makes one reply-bundle LLM call, and stores the
@@ -191,8 +212,8 @@ is sent only for media that directly replies to a bot message; a caption mention
 bot is not sufficient. Channels receive no notice. Other update types, such as
 location and polls, have no dedicated conversational handler.
 
-The group enabled flag is checked in the conversational text path only. Commands,
-media explanations, and membership introductions can still respond while
+The group enabled flag is checked for conversational text and media explanations.
+Commands and membership introductions can still respond while
 `/groupbot off` is set; see [group controls](group_chat.md#group-controls).
 
 ## Verification references

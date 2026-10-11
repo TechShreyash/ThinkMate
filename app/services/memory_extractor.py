@@ -276,12 +276,30 @@ _GROUP_EXTRACTION_NOTE = (
 )
 
 
-async def _bounded_group_memories(db, chat_id, segment, name_to_id):
-    """Fit whole owners' memory text into one aggregate budget, retaining attribution."""
+async def _generation_is_current(db, owner_id: int, generation: str | None) -> bool:
+    """Check an already-captured lifecycle without creating or updating a profile."""
+    if generation is None:
+        return False
+    return (
+        await db["user_profiles"].find_one(
+            {"_id": owner_id, "memory_generation": generation}, {"_id": 1}
+        )
+        is not None
+    )
+
+
+async def _bounded_group_memories(db, chat_id, segment, name_to_id, generations):
+    """Fit owner context while retaining the run's original lifecycle tokens."""
     remaining_chars = max(0, config.USER_MEMORY_BUDGET_CHARS)
 
     async def owner_memory(owner_id):
         nonlocal remaining_chars
+        if owner_id not in generations:
+            generations[owner_id] = await models.prepare_memory_generation(db, owner_id)
+        elif not await _generation_is_current(db, owner_id, generations[owner_id]):
+            return {"text": "", "memory_available": False}
+        if generations[owner_id] is None:
+            return {"text": "", "memory_available": False}
         if remaining_chars == 0:
             return {"text": "", "memory_available": False}
         text, _ = await build_memory_block(db, owner_id)
@@ -399,9 +417,19 @@ async def _extract_and_trim_single(user_id: int):
     logger.info(f"Memory extraction started for user {user_id}.")
     metrics.incr("extraction.runs")
     keep_count = config.CHAT_BUFFER_TRIM
+    generation = None
     try:
         for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
             async with db_session() as db:
+                # Capture lifecycle before observing the transcript. A reset between
+                # these reads must invalidate the output, rather than authorize old
+                # messages against a freshly recreated profile.
+                if generation is None:
+                    generation = await models.prepare_memory_generation(db, user_id)
+                elif not await _generation_is_current(db, user_id, generation):
+                    return
+                if generation is None:
+                    return
                 # Read the raw buffer (with per-message ``created_at``) so the transcript can
                 # be date-stamped for accurate event dating.
                 buffer_messages = await _read_raw_buffer(db, user_id)
@@ -430,17 +458,26 @@ async def _extract_and_trim_single(user_id: int):
                 )
 
                 if extraction is not None:
-                    await models.save_extracted_memories(db, user_id, extraction)
-                    # Atomic trim of the processed segment (concurrent appends preserved):
-                    # the segment we processed is the oldest `trim_size` messages, so a
-                    # fresh-read oldest-N trim removes exactly those, keeping newer arrivals.
-                    await models.delete_oldest_buffer_messages(db, user_id, trim_size)
+                    saved = await models.save_extracted_memories(
+                        db, user_id, extraction, expected_generation=generation
+                    )
+                    if not saved:
+                        logger.info(
+                            f"Extraction discarded for user {user_id}; profile reset."
+                        )
+                        return
+                    # Bind removal to the messages actually seen by the model. A slow
+                    # call can overlap hard-cap eviction as well as ordinary appends.
+                    trimmed = await models.delete_oldest_buffer_messages(
+                        db, user_id, trim_size, snapshot=buffer_messages
+                    )
+                    trim_status = "applied" if trimmed else "deferred (buffer changed)"
 
                     has_updates = _extraction_has_updates(extraction)
 
                     if has_updates:
                         logger.info(
-                            f"Memory extraction done for user {user_id}; updates saved, trimmed {trim_size} messages."
+                            f"Memory extraction done for user {user_id}; updates saved, processed {trim_size} messages; snapshot trim {trim_status}."
                         )
                         summary = _format_extraction_summary(extraction)
                         await log_forwarder.send(
@@ -450,7 +487,7 @@ async def _extract_and_trim_single(user_id: int):
                         )
                     else:
                         logger.info(
-                            f"Memory extraction done for user {user_id}; no new updates (skipped), trimmed {trim_size} messages."
+                            f"Memory extraction done for user {user_id}; no new updates, processed {trim_size} messages; snapshot trim {trim_status}."
                         )
                     return
 
@@ -458,17 +495,19 @@ async def _extract_and_trim_single(user_id: int):
                 f"Extraction attempt {attempt}/{MAX_EXTRACTION_ATTEMPTS} failed for user {user_id}."
             )
 
-        # Every attempt failed. Trim the oldest messages anyway so a sustained outage can't
-        # let the buffer grow unbounded. This drops un-extracted memory by design.
+        # Every attempt failed. Trim only the final attempted snapshot: arrivals
+        # during that call were never examined and must remain available for later.
         async with db_session() as db:
-            buffer_messages = await models.get_chat_buffer(db, user_id)
-            if len(buffer_messages) > keep_count:
-                trim_size = len(buffer_messages) - keep_count
-                await models.delete_oldest_buffer_messages(db, user_id, trim_size)
-                logger.error(
-                    f"All {MAX_EXTRACTION_ATTEMPTS} extraction attempts failed for user {user_id}; "
-                    f"trimmed {trim_size} un-extracted messages to keep the buffer bounded."
-                )
+            if not await _generation_is_current(db, user_id, generation):
+                return
+            trimmed = await models.delete_oldest_buffer_messages(
+                db, user_id, trim_size, snapshot=buffer_messages
+            )
+            trim_status = "applied" if trimmed else "deferred (buffer changed)"
+            logger.error(
+                f"All {MAX_EXTRACTION_ATTEMPTS} extraction attempts failed for user {user_id}; "
+                f"snapshot trim of {trim_size} un-extracted messages {trim_status}."
+            )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Extraction pipeline failed for user {user_id}: {e}")
 
@@ -486,7 +525,7 @@ async def extract_and_trim_group(chat_id: int):
       participant name back to a ``sender_id`` via the segment's own name->id map
       (Requirements 5.2, 5.3). Updates whose name cannot be resolved are skipped rather
       than misattributed (Requirement 5.4).
-    - The processed segment is trimmed with the existing atomic ``$pull``-on-cutoff trim
+    - The processed snapshot's message IDs are removed with atomic ``$pull``
       (Requirement 5.6).
     - If every attempt fails, the oldest messages are trimmed anyway to keep the buffer
       bounded during an outage — the same all-fail-still-trim contract as the DM path.
@@ -494,6 +533,7 @@ async def extract_and_trim_group(chat_id: int):
     logger.info(f"Group memory extraction started for chat {chat_id}.")
     metrics.incr("extraction.runs")
     keep_count = config.CHAT_BUFFER_TRIM
+    generations = {}
     try:
         for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
             async with db_session() as db:
@@ -510,7 +550,7 @@ async def extract_and_trim_group(chat_id: int):
                 name_to_id = _build_name_id_map(segment)
 
                 group_memory, participant_memories = await _bounded_group_memories(
-                    db, chat_id, segment, name_to_id
+                    db, chat_id, segment, name_to_id, generations
                 )
                 memory_available = {
                     entry["sender_id"]: entry["memory_available"]
@@ -538,17 +578,22 @@ async def extract_and_trim_group(chat_id: int):
                     group_extraction = getattr(result, "group_extraction", None)
                     if not group_memory["memory_available"]:
                         group_extraction = _only_new_memory(group_extraction)
-                    if _extraction_has_updates(group_extraction):
-                        await models.save_extracted_memories(
-                            db, chat_id, group_extraction
-                        )
-                        group_saved = True
-                        summary = _format_extraction_summary(group_extraction)
-                        await log_forwarder.send(
-                            None,
+                    if generations[chat_id] is not None and _extraction_has_updates(
+                        group_extraction
+                    ):
+                        group_saved = await models.save_extracted_memories(
+                            db,
                             chat_id,
-                            f"group-memory-extraction-saved: chat={chat_id} | updates: {summary}",
+                            group_extraction,
+                            expected_generation=generations[chat_id],
                         )
+                        if group_saved:
+                            summary = _format_extraction_summary(group_extraction)
+                            await log_forwarder.send(
+                                None,
+                                chat_id,
+                                f"group-memory-extraction-saved: chat={chat_id} | updates: {summary}",
+                            )
 
                     for update in result.updates:
                         resolved_id = name_to_id.get(
@@ -568,9 +613,22 @@ async def extract_and_trim_group(chat_id: int):
                         has_updates = _extraction_has_updates(p_extraction)
 
                         if has_updates:
-                            await models.save_extracted_memories(
-                                db, resolved_id, p_extraction
+                            generation = generations.get(resolved_id)
+                            if generation is None:
+                                skipped += 1
+                                continue
+                            applied = await models.save_extracted_memories(
+                                db,
+                                resolved_id,
+                                p_extraction,
+                                expected_generation=generation,
                             )
+                            if not applied:
+                                skipped += 1
+                                logger.info(
+                                    f"Extraction discarded for participant {resolved_id}; profile reset."
+                                )
+                                continue
                             saved += 1
                             summary = _format_extraction_summary(p_extraction)
                             await log_forwarder.send(
@@ -579,20 +637,25 @@ async def extract_and_trim_group(chat_id: int):
                                 f"memory-extraction-saved: chat={chat_id} participant_id={resolved_id} | updates: {summary}",
                             )
 
-                    await models.mark_group_memory_extraction(
-                        db,
-                        chat_id,
-                        group_saved=group_saved,
-                        participant_updates=saved,
-                        skipped_updates=skipped,
-                    )
+                    if generations[chat_id] is not None:
+                        await models.mark_group_memory_extraction(
+                            db,
+                            chat_id,
+                            group_saved=group_saved,
+                            participant_updates=saved,
+                            skipped_updates=skipped,
+                            expected_generation=generations[chat_id],
+                        )
 
                     # Atomic trim of the processed segment (concurrent appends preserved).
-                    await models.delete_oldest_buffer_messages(db, chat_id, trim_size)
+                    trimmed = await models.delete_oldest_buffer_messages(
+                        db, chat_id, trim_size, snapshot=buffer_messages
+                    )
+                    trim_status = "applied" if trimmed else "deferred (buffer changed)"
                     logger.info(
                         f"Group memory extraction done for chat {chat_id}; "
                         f"group_saved={group_saved}, saved {saved} participant update(s), "
-                        f"skipped {skipped}, trimmed {trim_size} messages."
+                        f"skipped {skipped}, processed {trim_size} messages; snapshot trim {trim_status}."
                     )
                     return
 
@@ -600,16 +663,17 @@ async def extract_and_trim_group(chat_id: int):
                 f"Group extraction attempt {attempt}/{MAX_EXTRACTION_ATTEMPTS} failed for chat {chat_id}."
             )
 
-        # Every attempt failed. Trim the oldest messages anyway so a sustained outage can't
-        # let the buffer grow unbounded. This drops un-extracted memory by design.
+        # Preserve arrivals during the final failed call by trimming its snapshot.
         async with db_session() as db:
-            buffer_messages = await _read_raw_buffer(db, chat_id)
-            if len(buffer_messages) > keep_count:
-                trim_size = len(buffer_messages) - keep_count
-                await models.delete_oldest_buffer_messages(db, chat_id, trim_size)
-                logger.error(
-                    f"All {MAX_EXTRACTION_ATTEMPTS} group extraction attempts failed for chat {chat_id}; "
-                    f"trimmed {trim_size} un-extracted messages to keep the buffer bounded."
-                )
+            if not await _generation_is_current(db, chat_id, generations.get(chat_id)):
+                return
+            trimmed = await models.delete_oldest_buffer_messages(
+                db, chat_id, trim_size, snapshot=buffer_messages
+            )
+            trim_status = "applied" if trimmed else "deferred (buffer changed)"
+            logger.error(
+                f"All {MAX_EXTRACTION_ATTEMPTS} group extraction attempts failed for chat {chat_id}; "
+                f"snapshot trim of {trim_size} un-extracted messages {trim_status}."
+            )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Group extraction pipeline failed for chat {chat_id}: {e}")

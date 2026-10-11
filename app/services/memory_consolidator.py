@@ -15,7 +15,7 @@ from app.database.connection import db_session
 from app.prompts.consolidation_prompt import SYSTEM_CONSOLIDATION_PROMPT
 from app.services.llm_service import llm_service
 from app.services.memory_compressor import _enforce_budget
-from app.services.memory_loader import build_memory_block
+from app.services.memory_loader import compile_memory_block, load_profile_doc
 from app.services.metrics import metrics
 
 
@@ -30,7 +30,10 @@ async def consolidate_user_memory(user_id: int) -> None:
     metrics.incr("consolidation.runs")
     try:
         async with db_session() as db:
-            memory_text, _ = await build_memory_block(db, user_id)
+            snapshot = await load_profile_doc(db, user_id)
+            if not snapshot:
+                return
+            memory_text, _ = compile_memory_block(snapshot)
             system_prompt = (
                 f"{SYSTEM_CONSOLIDATION_PROMPT}\n\n"
                 f"MAX INSIGHTS: {config.MAX_INSIGHTS}. Emit at most {config.MAX_INSIGHTS} insights."
@@ -44,8 +47,16 @@ async def consolidate_user_memory(user_id: int) -> None:
                 )
                 metrics.incr("consolidation.failure")
                 return
-            await models.apply_consolidation(db, user_id, consolidation)
-            await _enforce_budget(db, user_id)
+            applied = await models.apply_consolidation(
+                db, user_id, consolidation, snapshot=snapshot
+            )
+            if not applied:
+                logger.info(
+                    f"Consolidation skipped for user {user_id}; memory changed."
+                )
+                metrics.incr("consolidation.skipped")
+                return
+            await _enforce_budget(db, user_id, source_profile=snapshot)
             metrics.incr("consolidation.success")
             logger.info(f"Memory consolidation done for user {user_id}.")
     except Exception as e:  # noqa: BLE001 - never raise into the scheduler

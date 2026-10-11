@@ -1,7 +1,28 @@
+import socket
 from unittest.mock import patch
 
 import mongomock
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def block_network(monkeypatch):
+    """Fail closed if a test accidentally reaches a real external service."""
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+
+    def connect(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            raise RuntimeError("Network access is disabled in automated tests")
+        return original_connect(sock, address)
+
+    def connect_ex(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            raise RuntimeError("Network access is disabled in automated tests")
+        return original_connect_ex(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
 
 
 # Mock Cursor for simulating motor async cursors
@@ -16,7 +37,7 @@ class AsyncMockCursor:
         try:
             return next(self._cursor)
         except StopIteration:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
 
 # Mock Collection wrapper to simulate motor's async operations on mongomock

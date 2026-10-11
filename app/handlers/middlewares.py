@@ -1,5 +1,6 @@
-"""aiogram middlewares: per-user throttling and database-session injection."""
+"""aiogram middleware for update lifecycle, throttling, and database injection."""
 
+import asyncio
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,41 @@ from loguru import logger
 from app.config import config
 from app.database.connection import db_session
 from app.services.metrics import metrics
+
+
+class UpdateTaskMiddleware(BaseMiddleware):
+    """Track active update handlers so shutdown can drain them before clients close."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._tasks: set[asyncio.Task] = set()
+        self._closing = False
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        if self._closing:
+            return None
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks.add(task)
+        try:
+            return await handler(event, data)
+        finally:
+            if task is not None:
+                self._tasks.discard(task)
+
+    async def close(self, *, timeout: float = 10.0) -> None:
+        self._closing = True
+        tasks = self._tasks - {asyncio.current_task()}
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -120,6 +156,13 @@ class ThrottlingMiddleware(BaseMiddleware):
         ]
 
         if len(window) >= config.RATE_LIMIT_MAX_REQUESTS:
+            # Only the newest limit-sized set is needed to decide whether a later
+            # message exceeds the limit. Retaining every dropped spam message makes
+            # memory grow with attack volume. Commit before the warning's network await
+            # so another update cannot observe or overwrite stale throttle state.
+            window.append(msg_ts)
+            self.users[user_id] = sorted(window)[-config.RATE_LIMIT_MAX_REQUESTS :]
+            metrics.incr("throttle.drops")
             # Warn at most once per spam episode (tracked via self.warned).
             # The public message is only sent in DMs to avoid group flood.
             # The throttle event is logged as a warning so it goes to console and the Logs Channel.
@@ -143,9 +186,6 @@ class ThrottlingMiddleware(BaseMiddleware):
                 # Auxiliary failures must not interrupt message handling.
                 except Exception:  # noqa: BLE001, S110
                     pass
-            window.append(msg_ts)  # extend the window if they keep spamming
-            self.users[user_id] = window
-            metrics.incr("throttle.drops")
             return
 
         # Under the limit: clear any prior warning flag so a future, separate burst

@@ -56,7 +56,7 @@ The [observability guide](development/observability.md) explains metric names, p
 | uv cannot install Python | uv version, platform support, network access, and availability of the pinned release. |
 | Startup stops at MongoDB | URI/authentication, network allowlist, DNS/TLS, server availability, and container-relative addresses. |
 | Telegram authentication fails | Correct token, no placeholder value or extra whitespace. |
-| Polling reports a conflict | Stop the other process using this token; check that a previous deployment is gone. If a webhook was configured separately, inspect/remove it before using polling. |
+| Polling reports a conflict | Stop the other process using this token; check that a previous deployment is gone. Startup explicitly removes the webhook and pending updates before polling; inspect failures of that request. |
 | `/start` works but chat fails | LLM base URL, credential, exact model IDs, JSON-mode support, provider limits, and logged errors. |
 | Responses take a long time | Configured batch delay, per-chat queueing, LLM latency/retries, and the 610-second code-default request timeout. The timeout is configurable and endpoint-specific. |
 | Messages receive no response | Throttle/input/queue guards; startup-old messages; disabled command; groupbot/groupmode/member mode; spam or ambient gate decisions. |
@@ -64,7 +64,7 @@ The [observability guide](development/observability.md) explains metric names, p
 | Memories do not appear immediately | Extraction threshold, newest entries retained by `CHAT_BUFFER_TRIM`, failed extraction, and whether the group only buffered passive messages. |
 | Memory stays over budget | Protected fields, compression cooldown, empty/failing compression, and budget-enforcement limits. See [memory](development/memory_engine.md). |
 | Logs channel is silent | `LOGS_CHANNEL_ID`, bot permission to send messages/documents, and forwarding controls. Delivery is best-effort. |
-| Check-ins stop | Opt-out, quiet UTC hours, insufficient memory/inactivity, unanswered streak cap, or a failed send that disabled outreach for that user. |
+| Check-ins stop | Opt-out, quiet UTC hours, insufficient memory/inactivity, unanswered streak cap, or permanent blocked/permission/not-found delivery failures. Transient send failures retain the opt-in preference and wait for the next eligible attempt. |
 | TTL retention changed but old audit entries remain | Check the MongoDB TTL index and startup warnings. An existing index may need a deliberate administrative change; modifying the setting alone does not guarantee it was replaced. |
 | Persona changes have no effect | `PERSONA_FILE`, process working directory, file modification time, container mount/image, and code-supplied behavior rules. |
 
@@ -74,7 +74,7 @@ MongoDB stores profiles, recent raw chat text, group-member settings, audit reco
 
 Use your MongoDB deployment's backup and restore procedures for the full database. The supplied Compose volume persists file logs only; it does not back up MongoDB. Validate restores against a separate database and test bot account before relying on them.
 
-`/reset confirm` is a user-memory reset, not a database backup or full erasure workflow. It can forward the caller's profile and DM buffer as JSON to the configured logs channel before deletion. Export is optional and best-effort, despite the current success message claiming a backup was saved. There is no built-in restore command. See [database/reset scope](development/database.md).
+`/reset confirm` is a user-memory reset, not a database backup or full erasure workflow. It can forward the caller's profile and DM buffer as JSON to the configured logs channel before deletion. Export is optional and best-effort; success text mentions restoration only after the upload succeeds. There is no built-in restore command. See [database/reset scope](development/database.md).
 
 ## Updates
 
@@ -100,8 +100,8 @@ docker compose logs -f thinkmate
 
 ## Shutdown and restarts
 
-Use `Ctrl+C` locally or `docker compose stop` for containers. [main.py](../main.py) cancels registered schedulers, flushes metrics, closes log forwarding, and closes the Telegram session after polling exits.
+Use `Ctrl+C` locally or `docker compose stop` for containers. [main.py](../main.py) runs cleanup after polling exits or startup fails. It cancels registered schedulers and stops accepting updates, giving active commands/handlers up to 10 seconds to finish. It then stops admitting queued chat work and gives owned reply/memory tasks another 10 seconds. Pending batches dispatch immediately during this second drain; remaining tasks are cancelled.
 
-It does not explicitly drain every detached extraction/compression/audit or queued reply task, and it does not explicitly close the MongoDB or LLM clients. In-memory pending messages and unfinished writes can be lost on restart; persisted buffers/profiles remain.
+LLM audits then receive a 5-second drain before the shared LLM client closes. Metrics flush, the shutdown notice, a separate 5-second warning/error-sink drain, and the final log upload run while Telegram is available. Telegram and MongoDB clients close afterward. Each asynchronous cleanup step has a 15-second outer timeout so one failure does not skip later cleanup. These are separate windows, not a total shutdown deadline; configure the container/service termination grace period to allow cleanup. Crashes, forced termination, and drain timeouts can still lose pending work; persisted buffers/profiles remain.
 
-The message-age guard rejects sufficiently old messages relative to process startup when enabled. The entry point passes `drop_pending_updates=True` to polling, but does not explicitly call Telegram's webhook deletion API with that flag, so do not rely on the kwarg as proof that Telegram's entire backlog was discarded. See [Telegram integration](development/telegram_bot.md) and [safeguards](development/hardening_plan.md).
+Startup calls `delete_webhook(drop_pending_updates=True)` before polling, intentionally discarding Telegram's pending backlog. The message-age guard separately rejects sufficiently old messages relative to process startup when enabled. See [Telegram integration](development/telegram_bot.md) and [safeguards](development/hardening_plan.md).

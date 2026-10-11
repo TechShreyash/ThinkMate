@@ -38,6 +38,8 @@ def _strip_html(text: str) -> str:
 
 def _split_text(text: str, *, limit: int = SAFE_CHUNK_CHARS) -> list[str]:
     """Split text into Telegram-safe chunks, preferring natural boundaries."""
+    if limit <= 0:
+        raise ValueError("chunk limit must be positive")
     text = text or ""
     if len(text) <= limit:
         return [text]
@@ -46,20 +48,15 @@ def _split_text(text: str, *, limit: int = SAFE_CHUNK_CHARS) -> list[str]:
     remaining = text
     while len(remaining) > limit:
         window = remaining[:limit]
-        cut = max(
-            window.rfind("\n\n"),
-            window.rfind("\n"),
-            window.rfind(". "),
-            window.rfind(" "),
-        )
-        if cut < limit // 2:
-            cut = limit
-        chunk = remaining[:cut].rstrip()
-        if not chunk:
-            chunk = remaining[:limit]
-            cut = limit
-        chunks.append(chunk)
-        remaining = remaining[cut:].lstrip()
+        cut = limit
+        for boundary in ("\n\n", "\n", ". ", " "):
+            position = window.rfind(boundary)
+            if position >= limit // 2:
+                cut = position + len(boundary)
+                break
+        # Preserve code indentation, blank lines, and meaningful whitespace.
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
     if remaining:
         chunks.append(remaining)
     return chunks
@@ -76,8 +73,10 @@ def _prepare_text_and_kwargs(
 
     # Splitting arbitrary HTML can break tags/entities. For oversized formatted
     # command output, prefer reliable delivery as plain text over a rejected send.
-    if send_kwargs.get("parse_mode") and len(prepared) > TELEGRAM_MESSAGE_LIMIT:
-        prepared = _strip_html(prepared)
+    if send_kwargs.get("parse_mode") and len(prepared) > SAFE_CHUNK_CHARS:
+        parse_mode = send_kwargs["parse_mode"]
+        if isinstance(parse_mode, str) and parse_mode.upper() == "HTML":
+            prepared = _strip_html(prepared)
         send_kwargs.pop("parse_mode", None)
 
     return prepared, send_kwargs

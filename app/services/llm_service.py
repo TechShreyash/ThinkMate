@@ -56,6 +56,18 @@ class LLMService:
         )
         self._bg_tasks: set[asyncio.Task] = set()
 
+    async def close(self, *, timeout: float = 5.0) -> None:
+        """Drain audit writes before closing the shared HTTP client."""
+        try:
+            tasks = set(self._bg_tasks)
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=timeout)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            await self.client.close()
+
     # ------------------------------------------------------------------ #
     # Audit logging
     # ------------------------------------------------------------------ #
@@ -126,13 +138,15 @@ class LLMService:
                     f"{what}: transient {type(e).__name__}, retry {attempt + 1}/{config.LLM_MAX_RETRIES} in {delay:.1f}s"
                 )
                 await asyncio.sleep(delay)
-        raise last_exc  # type: ignore[misc]
+        if last_exc is None:
+            raise ValueError("LLM_MAX_RETRIES must be nonnegative")
+        raise last_exc
 
     @staticmethod
     def _strip_fences(raw: str | None) -> str:
         """Strip ```json ... ``` fences some models add around JSON output."""
         if not raw:
-            return "{}"
+            return ""
         s = raw.strip()
         if s.startswith("```"):
             s = s[3:]
@@ -140,7 +154,7 @@ class LLMService:
                 s = s[4:]
             s = s.strip()
             s = s.removesuffix("```")
-        return s.strip() or "{}"
+        return s.strip()
 
     # ------------------------------------------------------------------ #
     # Conversational reply (+ optional reaction) — one call
@@ -375,12 +389,14 @@ class LLMService:
                 ):
                     affinity_delta = float(max(-0.2, min(0.2, ad)))
                 return data["reply"].strip(), reaction, affinity_delta
+            if isinstance(data, dict):
+                logger.warning("Reply bundle contained no usable reply text.")
+                return "", None, None
         except json.JSONDecodeError, ValueError:
             pass
         logger.warning("Reply bundle was not valid JSON; using raw text as the reply.")
         # Fall back to whatever text we got (minus any fences), no reaction, no delta.
-        fallback = cleaned if cleaned and cleaned != "{}" else raw
-        return fallback.strip(), None, None
+        return cleaned, None, None
 
     # ------------------------------------------------------------------ #
     # Structured memory calls (extraction / compression)

@@ -22,12 +22,32 @@ _in_sink: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-def make_error_log_sink(bot, loop):
-    """Build a synchronous loguru sink closing over ``bot`` and the main event ``loop``."""
+class ErrorLogSink:
+    """Callable Loguru sink with owned, drainable forwarding tasks."""
 
-    def sink(message):
+    def __init__(self, bot, loop):
+        self._bot = bot
+        self._loop = loop
+        self._tasks: set[asyncio.Task] = set()
+        self._accepting = True
+        self._closed = False
+
+    async def close(self, *, timeout: float = 5.0) -> None:
+        self._accepting = False
+        # Dispatch callbacks queued before admission stopped, then include their
+        # forwarding tasks in the drain rather than dropping the last warning.
+        await asyncio.sleep(0)
+        self._closed = True
+        tasks = set(self._tasks)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def __call__(self, message):
         # loguru passes a Message whose .record holds structured fields.
-        if not config.LOGS_CHANNEL_ID:
+        if not self._accepting or not config.LOGS_CHANNEL_ID:
             return
         try:
             record = message.record
@@ -73,12 +93,15 @@ def make_error_log_sink(bot, loop):
 
             def _dispatch():
                 # Runs on the loop thread. Schedule the send; never block the logging call.
+                if self._closed:
+                    return
+
                 async def _send():
                     token = _in_sink.set(True)
                     try:
                         from app.services import log_forwarder
 
-                        await log_forwarder.send(bot, None, text)
+                        await log_forwarder.send(self._bot, None, text)
                     # Logging failures must not recurse or escape the sink.
                     except Exception:  # noqa: BLE001, S110
                         pass
@@ -86,15 +109,20 @@ def make_error_log_sink(bot, loop):
                         _in_sink.reset(token)
 
                 try:
-                    asyncio.create_task(_send())
+                    task = asyncio.create_task(_send())
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
                 # Logging failures must not recurse or escape the sink.
                 except Exception:  # noqa: BLE001, S110
                     pass
 
             # 4) Hop onto the loop thread without blocking the originating logging call (Req 4.6).
-            loop.call_soon_threadsafe(_dispatch)
+            self._loop.call_soon_threadsafe(_dispatch)
         # Logging failures must not recurse or escape the sink.
         except Exception:  # noqa: BLE001, S110
             pass
 
-    return sink
+
+def make_error_log_sink(bot, loop) -> ErrorLogSink:
+    """Build a synchronous sink that can be drained before closing Telegram."""
+    return ErrorLogSink(bot, loop)

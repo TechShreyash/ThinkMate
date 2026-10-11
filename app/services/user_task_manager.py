@@ -1,8 +1,8 @@
 """Per-conversation concurrency, batching, queues, and typing indicators.
 
 Coalesces rapid-fire messages into batches, serializes response generation per conversation
-(``chat_lock``) and background memory work (``memory_lock``), and bounds in-memory state
-by evicting idle conversations — important at 50k+ users on a single instance.
+(``chat_lock``) and background memory work (``memory_lock``), and reclaims
+in-memory state by evicting idle conversations.
 
 State is keyed by ``chat_id``. In a DM ``chat_id == user_id`` (and ``sender_id == chat_id``),
 so per-conversation batching collapses to exactly the original per-user behavior; for groups
@@ -11,6 +11,10 @@ a single conversation batches per chat regardless of how many members are speaki
 
 import asyncio
 import time
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import asynccontextmanager
+from itertools import groupby
+from weakref import WeakValueDictionary
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -22,7 +26,7 @@ from app.database import models
 from app.database.connection import db_session
 from app.services import log_forwarder
 from app.services.affinity import affinity_cache
-from app.services.chat_manager import handle_message
+from app.services.chat_manager import EMPTY_REPLY_FALLBACK, handle_message
 from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector
 from app.services.metrics import metrics
 from app.services.telegram_text import send_message_text
@@ -58,9 +62,10 @@ class UserState:
         self.chat_id = chat_id
         self.chat_lock = asyncio.Lock()
         self.memory_lock = asyncio.Lock()
-        # Each entry: {"text", "message", "user_id", "sender_name", "reason"}.
+        # Each entry: text, message, user_id, sender_name, reason, chat_type.
         self.pending_messages: list[dict] = []
         self.batch_task: asyncio.Task | None = None
+        self.processing_task: asyncio.Task | None = None
         self.typing_task: asyncio.Task | None = None
         self.typing_stop_event = asyncio.Event()
         self.first_message_time: float | None = None
@@ -74,6 +79,7 @@ class UserState:
             and not self.chat_lock.locked()
             and not self.memory_lock.locked()
             and (self.batch_task is None or self.batch_task.done())
+            and (self.processing_task is None or self.processing_task.done())
             and (self.typing_task is None or self.typing_task.done())
         )
 
@@ -83,6 +89,109 @@ class UserTaskManager:
         self._states: dict[int, UserState] = {}
         self._states_lock = asyncio.Lock()
         self._sweeper: asyncio.Task | None = None
+        self._tasks: dict[asyncio.Task, int | None] = {}
+        self._resets: dict[int, asyncio.Event] = {}
+        self._reset_locks: WeakValueDictionary[int, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
+        self._closing = False
+
+    def _create_task(
+        self, coroutine: Coroutine, *, name: str, chat_id: int | None = None
+    ) -> asyncio.Task:
+        """Own background tasks and retrieve failures before they reach the loop."""
+        task = asyncio.create_task(coroutine, name=name)
+        self._tasks[task] = chat_id
+        task.add_done_callback(self._task_finished)
+        return task
+
+    def _task_finished(self, task: asyncio.Task) -> None:
+        self._tasks.pop(task, None)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("Background task {} failed: {}", task.get_name(), error)
+
+    def start_conversation_task(
+        self, chat_id: int, coroutine: Coroutine, *, name: str
+    ) -> asyncio.Task | None:
+        """Own work that must stop before this conversation is reset or shut down."""
+        if self._closing or chat_id in self._resets:
+            coroutine.close()
+            return None
+        return self._create_task(coroutine, name=name, chat_id=chat_id)
+
+    def schedule_extractor(self, chat_id: int, *, is_group: bool = False) -> None:
+        self.start_conversation_task(
+            chat_id,
+            self.run_extractor(chat_id, is_group=is_group),
+            name=f"extract-memory:{chat_id}",
+        )
+
+    def schedule_compressor(self, chat_id: int) -> None:
+        self.start_conversation_task(
+            chat_id, self.run_compressor(chat_id), name=f"compress-memory:{chat_id}"
+        )
+
+    @asynccontextmanager
+    async def reset_conversation(
+        self, chat_id: int, *, timeout: float = 10.0
+    ) -> AsyncIterator[None]:
+        """Hold fresh messages until prior work stops and reset storage writes finish."""
+        lock = self._reset_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            finished = asyncio.Event()
+            self._resets[chat_id] = finished
+            try:
+                await self._cancel_conversation(chat_id, timeout=timeout)
+                yield
+            finally:
+                self._resets.pop(chat_id, None)
+                finished.set()
+
+    async def _cancel_conversation(self, chat_id: int, *, timeout: float) -> None:
+        """Stop prior conversation work before an existing reset erases its history."""
+        state = self._states.get(chat_id)
+        if state is not None:
+            state.pending_messages.clear()
+            state.first_message_time = None
+            state.batch_task = None
+            self._stop_typing(state)
+        current = asyncio.current_task()
+        tasks = {
+            task
+            for task, owner in self._tasks.items()
+            if owner == chat_id and task is not current
+        }
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+            if pending:
+                raise TimeoutError(f"Conversation {chat_id} did not stop before reset")
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._states.pop(chat_id, None)
+        metrics.set_gauge("conversations.active", len(self._states))
+
+    async def shutdown(self, *, timeout: float = 10.0) -> None:
+        """Stop admission, flush queued replies, and bound the drain of owned work."""
+        self._closing = True
+        if self._sweeper is not None:
+            self._sweeper.cancel()
+        for chat_id, state in self._states.items():
+            if state.batch_task is not None:
+                state.batch_task.cancel()
+                state.batch_task = None
+            self._stop_typing(state)
+            if state.pending_messages:
+                self._start_processing(chat_id, state)
+
+        tasks = set(self._tasks)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._states.clear()
+        metrics.set_gauge("conversations.active", 0)
 
     async def get_state(self, chat_id: int) -> UserState:
         async with self._states_lock:
@@ -95,10 +204,12 @@ class UserTaskManager:
 
     def _ensure_sweeper(self):
         """Lazily start the idle-state eviction loop on the running event loop."""
+        if self._closing:
+            return
         if self._sweeper is None or self._sweeper.done():
             try:
-                self._sweeper = asyncio.get_running_loop().create_task(
-                    self._sweep_loop()
+                self._sweeper = self._create_task(
+                    self._sweep_loop(), name="conversation-state-sweeper"
                 )
             except RuntimeError:
                 pass
@@ -168,13 +279,22 @@ class UserTaskManager:
         chime-in path downstream.
         """
         # In a DM the only speaker is the user, whose id equals the chat id.
+        if self._closing:
+            return
         if user_id is None:
             user_id = chat_id
 
+        while True:
+            while (reset_finished := self._resets.get(chat_id)) is not None:
+                await reset_finished.wait()
+            if self._closing:
+                return
+            state = await self.get_state(chat_id)
+            if chat_id not in self._resets:
+                break
         self._ensure_sweeper()
-        state = await self.get_state(chat_id)
         state.last_active = time.time()
-        current_time = state.last_active
+        current_time = time.monotonic()
 
         if len(state.pending_messages) >= config.MAX_QUEUED_MESSAGES:
             logger.warning(
@@ -190,14 +310,17 @@ class UserTaskManager:
                 "user_id": user_id,
                 "sender_name": sender_name,
                 "reason": reason,
+                "chat_type": chat_type,
             }
         )
 
         # Start the typing indicator if not already running.
         if not state.typing_task or state.typing_task.done():
             state.typing_stop_event.clear()
-            state.typing_task = asyncio.create_task(
-                self._typing_loop(bot, message.chat.id, state.typing_stop_event)
+            state.typing_task = self._create_task(
+                self._typing_loop(bot, message.chat.id, state.typing_stop_event),
+                name=f"typing:{chat_id}",
+                chat_id=chat_id,
             )
 
         if state.first_message_time is None:
@@ -206,10 +329,16 @@ class UserTaskManager:
         # Reset the coalescing timer, but never postpone past the hard deadline.
         if state.batch_task and not state.batch_task.done():
             state.batch_task.cancel()
-        if current_time - state.first_message_time >= config.MAX_BATCH_DELAY_SECS:
-            state.batch_task = asyncio.create_task(self._process_batch(chat_id))
-        else:
-            state.batch_task = asyncio.create_task(self._delayed_process_batch(chat_id))
+        remaining = max(
+            0.0,
+            config.MAX_BATCH_DELAY_SECS - (current_time - state.first_message_time),
+        )
+        delay = min(config.MESSAGE_BATCH_DELAY_SECS, remaining)
+        state.batch_task = self._create_task(
+            self._delayed_process_batch(chat_id, state, delay),
+            name=f"batch-timer:{chat_id}",
+            chat_id=chat_id,
+        )
 
     async def _typing_loop(self, bot: Bot, chat_id: int, stop_event: asyncio.Event):
         while not stop_event.is_set():
@@ -222,14 +351,36 @@ class UserTaskManager:
             except asyncio.CancelledError:
                 break
 
-    async def _delayed_process_batch(self, chat_id: int):
+    async def _delayed_process_batch(
+        self, chat_id: int, state: UserState, delay: float
+    ):
         try:
-            await asyncio.sleep(config.MESSAGE_BATCH_DELAY_SECS)
-            await self._process_batch(chat_id)
+            await asyncio.sleep(delay)
+            # The timer owns no reply work: resetting a coalescing window must
+            # never cancel an LLM call or delivery already underway.
+            if state.batch_task is asyncio.current_task():
+                state.batch_task = None
+                self._start_processing(chat_id, state)
         except asyncio.CancelledError:
             pass
         except Exception as e:  # noqa: BLE001
             logger.error(f"Delayed batch error for chat {chat_id}: {e}")
+
+    def _start_processing(self, chat_id: int, state: UserState) -> None:
+        if state.processing_task is None or state.processing_task.done():
+            state.processing_task = self._create_task(
+                self._process_ready_batches(chat_id, state),
+                name=f"process-batches:{chat_id}",
+                chat_id=chat_id,
+            )
+
+    async def _process_ready_batches(self, chat_id: int, state: UserState) -> None:
+        while state.pending_messages:
+            await self._process_batch(chat_id)
+            # A timer that expired during the preceding reply leaves another
+            # ready batch. Otherwise wait for the still-running timer.
+            if state.batch_task is not None:
+                break
 
     @staticmethod
     def _resolve_chat_type(message: Message) -> str:
@@ -262,20 +413,19 @@ class UserTaskManager:
             # chat_type is a property of the conversation, so derive it once from the
             # batch's last message (same chat for the whole batch).
             chat_type = self._resolve_chat_type(batch[-1]["message"])
+            actual_type = getattr(batch[-1]["message"].chat, "type", None)
+            if actual_type not in _VALID_CHAT_TYPES and "chat_type" in batch[-1]:
+                chat_type = batch[-1]["chat_type"]
 
-            # Group the batch by sender, preserving the order each user_id first
-            # appears. In a GROUP, messages from different senders coalesced in one
-            # window must not be mis-attributed to the last speaker; per-sender
-            # grouping keeps sender_id/sender_name/affinity signals correct. For the
-            # common single-sender batch (all DMs, most group bursts) this yields
-            # exactly one group and is behaviorally identical to before.
-            grouped: dict[int, list[dict]] = {}
-            for m in batch:
-                grouped.setdefault(m["user_id"], []).append(m)
+            # Coalesce consecutive turns by the same sender. Merging all of one
+            # sender's messages would reorder A -> B -> A into A+A -> B, hiding
+            # intervening context and generating replies out of sequence.
+            grouped = groupby(batch, key=lambda item: item["user_id"])
 
             try:
                 async with db_session() as db:
-                    for sender_id, group in grouped.items():
+                    for sender_id, entries in grouped:
+                        group = list(entries)
                         group_last = group[-1]
                         last_message = group_last["message"]
                         group_combined_text = "\n".join(m["text"] for m in group)
@@ -330,7 +480,7 @@ class UserTaskManager:
                                         f"Empty reply for chat {chat_id} (sender {sender_id}); "
                                         "sending graceful fallback."
                                     )
-                                    reply_text = "Sorry, I lost my train of thought there — could you say that again?"
+                                    reply_text = EMPTY_REPLY_FALLBACK
 
                                 # In groups, reply to the triggering message so the
                                 # response visibly threads under it (a bare answer looks
@@ -436,6 +586,9 @@ class UserTaskManager:
         state.typing_stop_event.set()
         if state.typing_task and not state.typing_task.done():
             state.typing_task.cancel()
+        # Cancellation completes on a later loop turn. A fresh enqueue must
+        # start its own indicator even if the old task has not finished yet.
+        state.typing_task = None
 
     async def run_extractor(self, chat_id: int, *, is_group: bool = False):
         """Run memory extraction in the background; at most one per conversation (shared memory_lock).

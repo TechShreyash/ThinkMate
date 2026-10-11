@@ -23,6 +23,8 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
+from aiogram.methods import SendMessage
 
 from app.config import config
 from app.database import connection, models
@@ -355,7 +357,10 @@ async def test_send_proactive_checkin_failed_disables_user(
         AsyncMock(return_value="hey"),
     )
     bot = AsyncMock()
-    bot.send_message.side_effect = Exception("Forbidden: bot was blocked by the user")
+    bot.send_message.side_effect = TelegramForbiddenError(
+        method=SendMessage(chat_id=user_id, text="hey"),
+        message="bot was blocked by the user",
+    )
     now = datetime.now(UTC)
 
     outcome = await health._send_proactive_checkin(bot, user_id, now=now)
@@ -365,3 +370,272 @@ async def test_send_proactive_checkin_failed_disables_user(
         doc = await db["user_profiles"].find_one({"_id": user_id})
         assert doc["proactive_enabled"] is False
         assert doc["last_proactive_at"] is not None
+
+
+async def test_proactive_transient_failure_preserves_opt_in(monkeypatch):
+    user_id = 90004
+    await _seed_user_with_memory(user_id)
+    async with connection.db_session() as db:
+        await models.set_proactive_enabled(db, user_id, True)
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin",
+        AsyncMock(return_value="hey"),
+    )
+    bot = AsyncMock()
+    bot.send_message.side_effect = TelegramNetworkError(
+        method=SendMessage(chat_id=user_id, text="hey"), message="temporary outage"
+    )
+
+    assert (
+        await health._send_proactive_checkin(bot, user_id, now=datetime.now(UTC))
+        == "failed"
+    )
+    async with connection.db_session() as db:
+        profile = await db["user_profiles"].find_one({"_id": user_id})
+        assert profile["proactive_enabled"] is True
+        assert profile["last_proactive_at"] is not None
+
+
+async def test_proactive_records_only_the_text_delivered(monkeypatch):
+    user_id = 90005
+    await _seed_user_with_memory(user_id)
+    monkeypatch.setattr(config, "MAX_RESPONSE_CHARS", 50)
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin",
+        AsyncMock(return_value="hello " * 100),
+    )
+    bot = AsyncMock()
+
+    assert (
+        await health._send_proactive_checkin(bot, user_id, now=datetime.now(UTC))
+        == "sent"
+    )
+    delivered = bot.send_message.await_args.kwargs["text"]
+    assert len(delivered) <= 50
+    async with connection.db_session() as db:
+        history = await models.get_chat_buffer(db, user_id)
+        assert history[-1] == {"role": "assistant", "content": delivered}
+
+
+@pytest.mark.parametrize("change", ["opt_out", "delete", "recreate", "reply"])
+async def test_proactive_skips_when_user_state_changes_during_generation(
+    monkeypatch, change
+):
+    user_id = 90006
+    await _seed_user_with_memory(user_id)
+
+    async def generate(*args):
+        async with connection.db_session() as db:
+            if change == "opt_out":
+                await models.set_proactive_enabled(db, user_id, False)
+            elif change in ("delete", "recreate"):
+                await models.reset_user(db, user_id)
+                if change == "recreate":
+                    await models.ensure_user(db, user_id, "u", "U")
+            else:
+                await db["user_profiles"].update_one(
+                    {"_id": user_id},
+                    {"$set": {"last_interaction_at": datetime.now(UTC)}},
+                )
+        return "obsolete check-in"
+
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin", generate
+    )
+    bot = AsyncMock()
+
+    assert (
+        await health._send_proactive_checkin(bot, user_id, now=datetime.now(UTC))
+        == "skipped"
+    )
+    bot.send_message.assert_not_awaited()
+    async with connection.db_session() as db:
+        assert await models.get_chat_buffer(db, user_id) == []
+
+
+async def test_proactive_respects_opt_out_before_generation(monkeypatch):
+    user_id = 90007
+    await _seed_user_with_memory(user_id)
+    async with connection.db_session() as db:
+        await models.set_proactive_enabled(db, user_id, False)
+    generate = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin", generate
+    )
+    bot = AsyncMock()
+
+    assert (
+        await health._send_proactive_checkin(bot, user_id, now=datetime.now(UTC))
+        == "skipped"
+    )
+    generate.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("change", ["delete", "recreate", "reply"])
+async def test_proactive_delivery_completion_respects_concurrent_user_changes(
+    monkeypatch, change
+):
+    user_id = 90008
+    await _seed_user_with_memory(user_id)
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin",
+        AsyncMock(return_value="delivered check-in"),
+    )
+
+    async def send(**kwargs):
+        async with connection.db_session() as db:
+            if change == "reply":
+                await models.touch_and_get_last_interaction(db, user_id)
+            else:
+                await models.reset_user(db, user_id)
+                if change == "recreate":
+                    await models.ensure_user(db, user_id, "fresh", "Fresh")
+
+    bot = AsyncMock()
+    bot.send_message.side_effect = send
+
+    assert (
+        await health._send_proactive_checkin(bot, user_id, now=datetime.now(UTC))
+        == "sent"
+    )
+    async with connection.db_session() as db:
+        profile = await db["user_profiles"].find_one({"_id": user_id})
+        if change == "reply":
+            assert profile["proactive_unanswered"] == 0
+        else:
+            assert await models.get_chat_buffer(db, user_id) == []
+            assert not profile or profile.get("proactive_unanswered", 0) == 0
+
+
+async def test_old_proactive_send_failure_preserves_recreated_preferences(monkeypatch):
+    user_id = 90009
+    await _seed_user_with_memory(user_id)
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin",
+        AsyncMock(return_value="old check-in"),
+    )
+
+    async def send(**kwargs):
+        async with connection.db_session() as db:
+            await models.reset_user(db, user_id)
+            await models.ensure_user(db, user_id, "fresh", "Fresh")
+            await models.set_proactive_enabled(db, user_id, True)
+        raise TelegramForbiddenError(
+            method=SendMessage(chat_id=user_id, text="old check-in"),
+            message="bot was blocked by the user",
+        )
+
+    bot = AsyncMock()
+    bot.send_message.side_effect = send
+
+    assert (
+        await health._send_proactive_checkin(bot, user_id, now=datetime.now(UTC))
+        == "failed"
+    )
+    async with connection.db_session() as db:
+        profile = await db["user_profiles"].find_one({"_id": user_id})
+        assert profile["proactive_enabled"] is True
+        assert profile.get("last_proactive_at") is None
+
+
+async def test_checkin_streak_update_cannot_overwrite_a_later_reply(monkeypatch):
+    user_id = 90010
+    await _seed_user_with_memory(user_id)
+    monkeypatch.setattr(
+        "app.services.llm_service.llm_service.generate_checkin",
+        AsyncMock(return_value="delivered check-in"),
+    )
+    append = models.add_message_to_buffer
+
+    async def append_then_reply(db, *args, **kwargs):
+        await append(db, *args, **kwargs)
+        await models.touch_and_get_last_interaction(db, user_id)
+
+    monkeypatch.setattr(models, "add_message_to_buffer", append_then_reply)
+
+    assert (
+        await health._send_proactive_checkin(
+            AsyncMock(), user_id, now=datetime.now(UTC)
+        )
+        == "sent"
+    )
+    async with connection.db_session() as db:
+        profile = await db["user_profiles"].find_one({"_id": user_id})
+        assert profile["proactive_unanswered"] == 0
+
+
+async def test_reset_cancels_owned_checkin_without_stopping_scan(monkeypatch):
+    from app.services import user_task_manager as manager_module
+
+    manager = manager_module.UserTaskManager()
+    monkeypatch.setattr(manager_module, "user_task_manager", manager)
+    monkeypatch.setattr(health, "_in_quiet_hours", lambda *args: False)
+    monkeypatch.setattr(
+        models, "find_users_due_for_proactive", AsyncMock(return_value=[91, 92])
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    processed = []
+
+    async def send(bot, user_id, *, now):
+        processed.append(user_id)
+        if user_id == 91:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return "sent"
+
+    monkeypatch.setattr(health, "_send_proactive_checkin", send)
+    scan = asyncio.create_task(health._run_proactive_scan(AsyncMock()))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        async with manager.reset_conversation(91):
+            assert cancelled.is_set()
+        await asyncio.wait_for(scan, timeout=1)
+    finally:
+        await _cancel(scan)
+        await manager.shutdown()
+
+    assert processed == [91, 92]
+    assert _counters()["proactive.skipped"] == 1
+    assert _counters()["proactive.sent"] == 1
+
+
+async def test_scan_shutdown_cancellation_propagates_to_owned_checkin(monkeypatch):
+    from app.services import user_task_manager as manager_module
+
+    manager = manager_module.UserTaskManager()
+    monkeypatch.setattr(manager_module, "user_task_manager", manager)
+    monkeypatch.setattr(health, "_in_quiet_hours", lambda *args: False)
+    monkeypatch.setattr(
+        models, "find_users_due_for_proactive", AsyncMock(return_value=[93, 94])
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    processed = []
+
+    async def send(bot, user_id, *, now):
+        processed.append(user_id)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(health, "_send_proactive_checkin", send)
+    scan = asyncio.create_task(health._run_proactive_scan(AsyncMock()))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        scan.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(scan, timeout=1)
+    finally:
+        await _cancel(scan)
+        await manager.shutdown()
+
+    assert cancelled.is_set()
+    assert processed == [93]
+    assert _counters().get("proactive.skipped", 0) == 0

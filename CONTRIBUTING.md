@@ -43,9 +43,15 @@ Commit `pyproject.toml`, `uv.lock`, and the generated `requirements.txt` togethe
 Run focused tests for the behavior you changed; run the broader suite when shared paths are affected. Commands in the [testing guide](docs/development/testing_guide.md) map subsystems to coverage.
 
 ```bash
+uv run --locked --extra dev black --check .
+uv run --locked --extra dev ruff check .
 uv run --locked --extra dev python -m pytest -q
 git diff --check
 ```
+
+CI runs these formatting, lint, and test checks. Ruff checks imports, common bug
+patterns, current Python idioms, and async misuse. Tests block real TCP connections;
+mock provider and Telegram calls explicitly so failures remain fast and predictable.
 
 The manual `tests/run_llm_live.py` script makes real requests and can incur provider usage. It is separate from pytest and should only be run against an intentionally configured test endpoint.
 

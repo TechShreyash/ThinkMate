@@ -47,23 +47,23 @@ There is no arrow from extraction completion to reply generation: replies contin
 
 ## A conversational turn
 
-1. [Middleware](../app/handlers/middlewares.py) applies a per-user sliding-window throttle and a startup-anchored age guard, then injects the shared database handle. This handle is not a MongoDB transaction/session.
+1. [Middleware](../app/handlers/middlewares.py) tracks the active handler for shutdown, applies a per-user sliding-window throttle and a startup-anchored age guard, then injects the shared database handle. This handle is not a MongoDB transaction/session.
 2. [Message routing](../app/handlers/messages.py) ignores unsupported/senderless updates, enforces the text input limit, and selects private or group behavior. Commands are handled by their own router.
-3. [UserTaskManager](../app/services/user_task_manager.py) queues text by chat ID and coalesces messages. It processes each sender's combined text separately within a group batch, under the chat's reply lock.
+3. [UserTaskManager](../app/services/user_task_manager.py) queues text by chat ID and coalesces consecutive messages from the same sender. Group batches preserve arrival order, including an A → B → A sequence, under the chat's reply lock.
 4. [chat_manager](../app/services/chat_manager.py) appends text and uses the returned buffer snapshot for history. It checks the stored item count to choose the normal or new/sparse-profile extraction threshold.
 5. It compiles memory and the cached persona. Private chats add the previous-interaction gap; groups add named history, speaker instructions, shared group memory, and the triggering sender's personal memory. Both paths include current time context.
 6. [LLMService](../app/services/llm_service.py) makes a logical reply-bundle request for text and reaction, plus an optional affinity adjustment in groups. Retries can make that more than one HTTP attempt.
-7. The assistant reply is stored before Telegram delivery. [Delivery](../app/services/user_task_manager.py) applies optional reactions and caps/splits text with [telegram_text.py](../app/services/telegram_text.py). A stored assistant reply does not prove that Telegram delivered it.
+7. The assistant reply is capped before it is stored and sent to Telegram. [Delivery](../app/services/user_task_manager.py) applies optional reactions and splits text with [telegram_text.py](../app/services/telegram_text.py). A stored assistant reply does not prove that Telegram delivered it.
 8. Extraction and compression are scheduled when needed. Reply locks serialize conversations locally; they do not block concurrent users.
 
-Batch delay and extraction thresholds are tunable. The maximum batch delay is checked on enqueue; it is not an independent timer guaranteeing delivery within that time. Generation and queueing can take longer. See [performance](development/performance_and_scaling.md).
+Batch delay and extraction thresholds are tunable. The coalescing timer waits until the idle delay or maximum batch age, whichever comes first. This bounds batching delay, not lock waits, generation, or delivery. See [performance](development/performance_and_scaling.md).
 
 ## Memory lifecycle
 
 | Stage | Trigger and result |
 | --- | --- |
 | Buffering | Store recent text under chat ID with a hard entry cap. A buffer persists across process restarts. |
-| Extraction | At the character threshold, process older entries while retaining the newest configured number. Save structured updates and trim by timestamp cutoff. |
+| Extraction | At the character threshold, process older entries while retaining the newest configured number. Save structured updates and remove only entries from the extraction snapshot by unique message ID; legacy arrays use conditional replacement. |
 | Compression | When compiled memory exceeds the configured budget, condense its arrays/summary, then apply deterministic shedding. |
 | Consolidation | A periodic scan finds eligible profiles and revisits the complete memory to merge/update it and add insights. |
 | Proactive check-in | A separate scheduler finds eligible inactive private-chat users and generates a memory-grounded opener. |
@@ -87,11 +87,11 @@ Keyed records prevent accidental unscoped lookups, but they do not guarantee pri
 
 `UserState` contains a queue, batch/typing tasks, `chat_lock`, and `memory_lock`. States are keyed by chat ID. The reply lock serializes generation within a conversation; the memory lock coordinates extraction/compression/consolidation for that same key.
 
-These locks exist only in this process. A group extractor can update participant profiles without holding their DM/other-group memory locks, and commands can reset data while detached work is active. MongoDB single-document atomic updates do not turn read-modify-write flows or updates across collections into transactions.
+These locks exist only in this process. Memory writes also compare their source profile snapshots before applying updates, protecting participant profiles from stale replacement across conversations. Extraction retries against current memory after a conflict; maintenance skips stale replacement. Captured profile-generation tokens reject results after that profile is deleted or recreated. Confirmed reset stops prior owned DM work and holds new DM messages through backup/deletion. Updates across collections are not transactional, and retained shared group history remains.
 
-[main.py](../main.py) starts metrics persistence, consolidation, and proactive schedulers according to configuration. On polling shutdown it cancels those scheduler tasks, flushes metrics, closes the log forwarder, and closes the bot session. It does not explicitly drain every batch, memory task, or audit write. In-memory pending work can be lost on restart.
+[main.py](../main.py) starts configured schedulers and explicitly deletes the Telegram webhook with pending updates before polling. Its cleanup runs after polling or startup failure: stop schedulers, drain active update handlers for up to 10 seconds, drain conversation tasks for another 10 seconds, drain LLM audit tasks for up to 5 seconds and close the LLM client, then flush metrics and logs before closing Telegram and MongoDB. The error sink has a separate 5-second drain; asynchronous cleanup steps have a 15-second outer timeout. Outstanding tasks are cancelled after their drain window. Crashes and forced termination can still lose in-memory work.
 
-Run one process per bot token. Distributed workers/webhooks, a global LLM concurrency ceiling, and stronger profile-level coordination require additional design; see [scaling](development/performance_and_scaling.md) and [roadmap](roadmap.md).
+Run one process per bot token. Distributed workers/webhooks, a global LLM concurrency ceiling, and complete deletion semantics require additional design; see [scaling](development/performance_and_scaling.md) and [roadmap](roadmap.md).
 
 ## Where to go next
 

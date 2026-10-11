@@ -173,3 +173,41 @@ async def test_bad_request_is_not_retried(sdk_service):
         await service.generate_reply_bundle(123, "system", [])
 
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("content", ["", "   ", "```json\n\n```"])
+async def test_blank_extraction_output_is_failure_instead_of_empty_success(
+    sdk_service, content
+):
+    service = sdk_service(
+        lambda request: httpx2.Response(200, json=_completion(content))
+    )
+    assert await service.extract_memory(123, "system", "New facts") is None
+
+
+async def test_explicit_empty_extraction_object_remains_valid(sdk_service):
+    service = sdk_service(lambda request: httpx2.Response(200, json=_completion("{}")))
+    assert isinstance(
+        await service.extract_memory(123, "system", "Hi"), MemoryExtraction
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["{}", '{"reaction":"👍"}', '{"reply":"   ","reaction":"👍"}', '{"reply":null}'],
+)
+async def test_unusable_reply_envelope_uses_existing_empty_reply_policy(
+    sdk_service, content
+):
+    service = sdk_service(
+        lambda request: httpx2.Response(200, json=_completion(content))
+    )
+    assert await service.generate_reply_bundle(123, "system", []) == ("", None)
+
+
+async def test_non_json_reply_still_preserves_plain_text(sdk_service):
+    content = "Here is the answer, without a JSON envelope."
+    service = sdk_service(
+        lambda request: httpx2.Response(200, json=_completion(content))
+    )
+    assert await service.generate_reply_bundle(123, "system", []) == (content, None)

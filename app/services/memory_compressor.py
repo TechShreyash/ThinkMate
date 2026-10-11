@@ -22,11 +22,15 @@ from app.database import models
 from app.database.connection import db_session
 from app.prompts.compression_prompt import SYSTEM_COMPRESSION_PROMPT
 from app.services.llm_service import llm_service
-from app.services.memory_loader import build_memory_block, compile_memory_text
+from app.services.memory_loader import (
+    compile_memory_block,
+    compile_memory_text,
+    load_profile_doc,
+)
 from app.services.metrics import metrics
 
 
-async def _enforce_budget(db, user_id: int):
+async def _enforce_budget(db, user_id: int, *, source_profile: dict | None = None):
     """Deterministically drop the lowest-priority memory items until under budget.
 
     Single read + in-memory trim + single write: load the profile once, then drop the
@@ -36,6 +40,12 @@ async def _enforce_budget(db, user_id: int):
     """
     doc = await db["user_profiles"].find_one({"_id": user_id})
     if not doc:
+        return
+    if source_profile is not None and any(
+        (field in doc) != (field in source_profile)
+        or doc.get(field) != source_profile.get(field)
+        for field in ("created_at", "memory_generation")
+    ):
         return
 
     facts = list(doc.get("facts") or [])
@@ -64,10 +74,13 @@ async def _enforce_budget(db, user_id: int):
             break  # nothing left to drop
 
     if (len(facts), len(beliefs), len(events)) != original_lengths:
-        await db["user_profiles"].update_one(
-            {"_id": user_id},
-            {"$set": {"facts": facts, "beliefs": beliefs, "events": events}},
+        applied = await models.update_memory_if_unchanged(
+            db, doc, {"facts": facts, "beliefs": beliefs, "events": events}
         )
+        if not applied:
+            logger.info(
+                f"Budget enforcement skipped for user {user_id}; memory changed."
+            )
 
 
 async def compress_user_memory(user_id: int):
@@ -76,7 +89,10 @@ async def compress_user_memory(user_id: int):
     metrics.incr("compression.runs")
     try:
         async with db_session() as db:
-            memory_text, _ = await build_memory_block(db, user_id)
+            snapshot = await load_profile_doc(db, user_id)
+            if not snapshot:
+                return
+            memory_text, _ = compile_memory_block(snapshot)
             target_chars = int(config.USER_MEMORY_BUDGET_CHARS * 0.8)
 
             system_prompt = (
@@ -95,10 +111,15 @@ async def compress_user_memory(user_id: int):
                 )
                 return
 
-            await models.replace_user_memory(db, user_id, compression)
+            applied = await models.replace_user_memory(
+                db, user_id, compression, snapshot=snapshot
+            )
+            if not applied:
+                logger.info(f"Compression skipped for user {user_id}; memory changed.")
+                return
 
             # Guarantee we end up under budget even if the model overshot.
-            await _enforce_budget(db, user_id)
+            await _enforce_budget(db, user_id, source_profile=snapshot)
             logger.info(f"Memory compression done for user {user_id}.")
     except Exception as e:  # noqa: BLE001
         logger.error(f"Compression failed for user {user_id}: {e}")

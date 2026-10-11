@@ -88,7 +88,7 @@ async def test_character_count_extraction_trigger(temp_db):
                     new_callable=AsyncMock,
                 ) as mock_run_extractor,
                 patch(
-                    "app.services.llm_service.LLMService.generate_reply_bundle",
+                    "app.services.chat_manager.llm_service.generate_reply_bundle",
                     new_callable=AsyncMock,
                 ) as mock_response,
             ):
@@ -226,18 +226,16 @@ async def test_max_batch_delay_prevents_infinite_postponement(temp_db):
             )
             await asyncio.sleep(0.15)
 
-            # Message 4 at t=0.45 (would postpone to t=0.65, but exceeds max delay of 0.4)
-            # This should trigger immediately
+            # The hard deadline must fire at t=0.4 even if no further message
+            # arrives. The fourth message starts a fresh batch.
+            mock_handle.assert_called_once()
+            assert mock_handle.call_args[0][2] == "Msg 1\nMsg 2\nMsg 3"
             await user_task_manager.enqueue_message(
                 mock_bot, user_id, "Msg 4", mock_message
             )
-
-            # Give a tiny slice of time for execution
-            await asyncio.sleep(0.05)
-
-            # Verify it was called immediately upon Msg 4 arrival
-            mock_handle.assert_called_once()
-            assert mock_handle.call_args[0][2] == "Msg 1\nMsg 2\nMsg 3\nMsg 4"
+            await asyncio.sleep(0.25)
+            assert mock_handle.await_count == 2
+            assert mock_handle.call_args[0][2] == "Msg 4"
     finally:
         config.MESSAGE_BATCH_DELAY_SECS = original_delay
         config.MAX_BATCH_DELAY_SECS = original_max_delay

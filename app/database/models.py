@@ -1,16 +1,18 @@
 """MongoDB document accessors (CRUD) for ThinkMate.
 
 Each function takes the active ``AsyncIOMotorDatabase`` as its first argument so sessions
-can be injected by middleware and swapped for an in-memory mock under test. All state is
-keyed on the Telegram ``user_id`` for strict per-user isolation.
+can be injected by middleware and swapped for an in-memory mock under test. Personal
+profiles use Telegram ``user_id`` keys, while group profiles and buffers use ``chat_id``.
 
-Buffer trimming uses an atomic ``$pull`` on a ``created_at`` cutoff rather than a
-read-slice-overwrite, so messages appended concurrently by the chat path are never
-clobbered by a background extractor (see docs/development/hardening_plan.md, B1).
+Buffer trimming removes the processed snapshot's unique message IDs with ``$pull``.
+Legacy arrays without IDs use a conditional replacement, preserving concurrent appends
+and hard-cap rotations. Memory writes also compare their read snapshots before applying
+changes, so different conversations cannot silently overwrite each other's updates.
 """
 
 import threading
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -34,10 +36,9 @@ def _utcnow() -> datetime:
 def _monotonic_utcnow() -> datetime:
     """Wall-clock UTC, strictly increasing within this process at millisecond resolution.
 
-    Buffer messages are ordered and trimmed by ``created_at``. BSON stores dates with only
-    millisecond precision, so the monotonic step must be a full millisecond — otherwise two
-    writes in the same millisecond collide once persisted and the cutoff trim can't separate
-    them. Real user messages are seconds apart, so this never drifts in practice.
+    BSON stores dates with millisecond precision, so the monotonic step is a full
+    millisecond. Message IDs identify entries during trimming; timestamps retain an
+    unambiguous observation order within this process for extraction date context.
     """
     global _last_ts
     with _ts_lock:
@@ -56,6 +57,43 @@ def _normalize(text: str | None) -> str:
     return " ".join((text or "").split()).casefold()
 
 
+_MEMORY_SNAPSHOT_FIELDS = (
+    "created_at",
+    "memory_generation",
+    "profile_summary",
+    "communication_style",
+    "gender",
+    "facts",
+    "beliefs",
+    "events",
+    "insights",
+    "emotional_state",
+    "mood_history",
+    "last_consolidated_at",
+)
+_MAX_MEMORY_WRITE_ATTEMPTS = 5
+
+
+async def update_memory_if_unchanged(
+    db: AsyncIOMotorDatabase, snapshot: dict, set_fields: dict
+) -> bool:
+    """Apply memory fields only when the profile still matches the read snapshot.
+
+    Identity and engagement updates may proceed independently. Comparing memory fields
+    prevents lost updates across groups, DMs, and processes without a distributed lock.
+    Missing fields are distinguished from explicit nulls, including legacy documents.
+    """
+    query = {"_id": snapshot["_id"]}
+    for field in _MEMORY_SNAPSHOT_FIELDS:
+        query[field] = (
+            {"$eq": snapshot[field], "$exists": True}
+            if field in snapshot
+            else {"$exists": False}
+        )
+    result = await db["user_profiles"].update_one(query, {"$set": set_fields})
+    return result.matched_count == 1
+
+
 async def ensure_user(
     db: AsyncIOMotorDatabase, user_id: int, username: str, display_name: str
 ):
@@ -70,6 +108,7 @@ async def ensure_user(
                 "updated_at": now,
             },
             "$setOnInsert": {
+                "memory_generation": uuid4().hex,
                 "profile_summary": "",
                 "communication_style": "",
                 "gender": None,
@@ -140,6 +179,7 @@ async def _ensure_memory_skeleton(db: AsyncIOMotorDatabase, user_id: int):
         {"_id": user_id},
         {
             "$setOnInsert": {
+                "memory_generation": uuid4().hex,
                 "profile_summary": "",
                 "communication_style": "",
                 "gender": None,
@@ -157,6 +197,35 @@ async def _ensure_memory_skeleton(db: AsyncIOMotorDatabase, user_id: int):
     )
 
 
+async def prepare_memory_generation(
+    db: AsyncIOMotorDatabase, user_id: int
+) -> str | None:
+    """Capture a profile's lifecycle token before an extraction call.
+
+    Initially absent owners get an identity-free skeleton. Legacy profiles acquire a
+    token through a conditional, non-upserting write. A deletion during initialization
+    returns None rather than resurrecting a profile that was already observed.
+    """
+    collection = db["user_profiles"]
+    projection = {"memory_generation": 1}
+    profile = await collection.find_one({"_id": user_id}, projection)
+    if profile is None:
+        await _ensure_memory_skeleton(db, user_id)
+        profile = await collection.find_one({"_id": user_id}, projection)
+    if profile is None:
+        return None
+    if "memory_generation" not in profile:
+        initialized = await collection.find_one_and_update(
+            {"_id": user_id, "memory_generation": {"$exists": False}},
+            {"$set": {"memory_generation": uuid4().hex}},
+            projection=projection,
+            return_document=ReturnDocument.AFTER,
+            upsert=False,
+        )
+        profile = initialized or await collection.find_one({"_id": user_id}, projection)
+    return (profile or {}).get("memory_generation")
+
+
 async def mark_group_memory_extraction(
     db: AsyncIOMotorDatabase,
     chat_id: int,
@@ -164,6 +233,7 @@ async def mark_group_memory_extraction(
     group_saved: bool,
     participant_updates: int,
     skipped_updates: int,
+    expected_generation: str | None = None,
 ):
     """Ensure a group-profile document exists and record the latest extraction outcome.
 
@@ -172,10 +242,14 @@ async def mark_group_memory_extraction(
     document visible in Compass and explains why there may be no shared facts yet.
     """
     now = _utcnow()
+    query = {"_id": chat_id}
+    if expected_generation is not None:
+        query["memory_generation"] = expected_generation
     await db["user_profiles"].update_one(
-        {"_id": chat_id},
+        query,
         {
             "$setOnInsert": {
+                "memory_generation": uuid4().hex,
                 "profile_summary": "",
                 "communication_style": "",
                 "gender": None,
@@ -200,7 +274,7 @@ async def mark_group_memory_extraction(
                 "updated_at": now,
             },
         },
-        upsert=True,
+        upsert=expected_generation is None,
     )
 
 
@@ -262,6 +336,7 @@ async def add_message_to_buffer(
                 "messages": {
                     "$each": [
                         {
+                            "message_id": uuid4().hex,
                             "role": role,
                             "sender_id": sender_id,
                             "sender_name": sender_name,
@@ -324,59 +399,89 @@ async def count_memory_items(db: AsyncIOMotorDatabase, user_id: int) -> int:
 
 
 async def delete_oldest_buffer_messages(
-    db: AsyncIOMotorDatabase, user_id: int, count: int
-):
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    count: int,
+    *,
+    snapshot: list[dict] | None = None,
+) -> bool:
     """Atomically trim the ``count`` oldest messages from the buffer.
 
-    Removal is done with ``$pull`` on a ``created_at`` cutoff, so messages appended after
-    this snapshot (e.g. by a concurrent chat batch) are preserved rather than clobbered.
+    Pass the extraction's raw snapshot so hard-cap eviction during an LLM call cannot
+    change which messages are removed. New messages have unique IDs for exact atomic
+    removal across processes. Legacy arrays use a conditional replacement: a concurrent
+    change skips trimming instead of losing messages, which can be processed again later.
     """
     if count <= 0:
-        return
-    doc = await db["chat_buffers"].find_one({"_id": user_id}, {"messages": 1})
-    if not doc or "messages" not in doc:
-        return
-    messages = doc["messages"]
-    if count >= len(messages):
-        await db["chat_buffers"].update_one(
-            {"_id": user_id}, {"$set": {"messages": [], "updated_at": _utcnow()}}
+        return True
+    if snapshot is None:
+        doc = await db["chat_buffers"].find_one({"_id": user_id}, {"messages": 1})
+        snapshot = (doc or {}).get("messages") or []
+    segment = snapshot[:count]
+    if not segment:
+        return True
+    if any(not message.get("message_id") for message in segment):
+        result = await db["chat_buffers"].update_one(
+            {"_id": user_id, "messages": {"$eq": snapshot}},
+            {"$set": {"messages": snapshot[count:], "updated_at": _utcnow()}},
         )
-        return
-    cutoff = messages[count].get("created_at")
-    if cutoff is None:
-        # Legacy messages without created_at: fall back to a positional slice.
-        await db["chat_buffers"].update_one(
-            {"_id": user_id},
-            {"$set": {"messages": messages[count:], "updated_at": _utcnow()}},
-        )
-        return
-    await db["chat_buffers"].update_one(
+        return result.matched_count == 1
+    result = await db["chat_buffers"].update_one(
         {"_id": user_id},
         {
-            "$pull": {"messages": {"created_at": {"$lt": cutoff}}},
+            "$pull": {
+                "messages": {"message_id": {"$in": [m["message_id"] for m in segment]}}
+            },
             "$set": {"updated_at": _utcnow()},
         },
     )
+    return result.matched_count == 1
 
 
 async def save_extracted_memories(
-    db: AsyncIOMotorDatabase, user_id: int, extraction: MemoryExtraction
-):
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    extraction: MemoryExtraction,
+    *,
+    expected_generation: str | None = None,
+) -> bool:
     """Apply extracted profile style, facts, beliefs, events, and mood to the user record.
 
     Free-text matches (removals/updates) are normalized (casefold + whitespace-collapse)
     so minor LLM phrasing drift still resolves to the stored item, and new items are
-    de-duplicated against existing ones.
+    de-duplicated against existing ones. A supplied generation rejects profiles reset
+    after the extraction began, including absent profiles, and never recreates them.
     """
-    profile = await db["user_profiles"].find_one({"_id": user_id})
-    if not profile:
-        await _ensure_memory_skeleton(db, user_id)
+    for _ in range(_MAX_MEMORY_WRITE_ATTEMPTS):
         profile = await db["user_profiles"].find_one({"_id": user_id})
+        if profile is None:
+            if expected_generation is not None:
+                return False
+            await _ensure_memory_skeleton(db, user_id)
+            profile = await db["user_profiles"].find_one({"_id": user_id})
+        if profile is None:
+            continue
+        if (
+            expected_generation is not None
+            and profile.get("memory_generation") != expected_generation
+        ):
+            return False
+        set_fields = _extracted_memory_fields(profile, extraction, _utcnow())
+        if await update_memory_if_unchanged(db, profile, set_fields):
+            return True
+    # Do not let the extractor trim messages after a failed save. Its outer error
+    # handler leaves them available for the next run.
+    raise RuntimeError(f"Memory changed repeatedly while saving user {user_id}")
 
-    facts = profile.get("facts", [])
-    beliefs = profile.get("beliefs", [])
-    events = profile.get("events", [])
-    now = _utcnow()
+
+def _extracted_memory_fields(
+    profile: dict, extraction: MemoryExtraction, now: datetime
+) -> dict:
+    """Build one extraction update against the latest profile without mutating it."""
+
+    facts = profile.get("facts") or []
+    beliefs = profile.get("beliefs") or []
+    events = profile.get("events") or []
 
     set_fields: dict = {}
 
@@ -461,7 +566,7 @@ async def save_extracted_memories(
     # 5. Events CRUD
     exclude_events = {_normalize(e.description) for e in extraction.removed_events}
     exclude_events |= {_normalize(e.old_description) for e in extraction.updated_events}
-    original_events = list(profile.get("events", []))
+    original_events = list(events)
     events = [e for e in events if _normalize(e["description"]) not in exclude_events]
 
     seen_events = {_normalize(e["description"]) for e in events}
@@ -480,6 +585,10 @@ async def save_extracted_memories(
             }
         )
     for update in extraction.updated_events:
+        key = _normalize(update.new_description)
+        if key in seen_events:
+            continue
+        seen_events.add(key)
         old_ev = next(
             (
                 e
@@ -494,15 +603,17 @@ async def save_extracted_memories(
                 "event_date": (
                     update.date
                     if update.date is not None
-                    else (old_ev["event_date"] if old_ev else None)
+                    else (old_ev.get("event_date") if old_ev else None)
                 ),
                 "significance": (
                     update.significance
                     if update.significance is not None
-                    else (old_ev["significance"] if old_ev else "minor")
+                    else (old_ev.get("significance", "minor") if old_ev else "minor")
                 ),
-                "emotional_context": old_ev["emotional_context"] if old_ev else "",
-                "created_at": old_ev["created_at"] if old_ev else now,
+                "emotional_context": (
+                    old_ev.get("emotional_context", "") if old_ev else ""
+                ),
+                "created_at": old_ev.get("created_at", now) if old_ev else now,
             }
         )
 
@@ -511,12 +622,16 @@ async def save_extracted_memories(
     set_fields["events"] = events
     set_fields["updated_at"] = now
 
-    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+    return set_fields
 
 
 async def replace_user_memory(
-    db: AsyncIOMotorDatabase, user_id: int, compression: MemoryCompression
-):
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    compression: MemoryCompression,
+    *,
+    snapshot: dict | None = None,
+) -> bool:
     """Replace compressed profile content while preserving the last observed mood."""
     now = _utcnow()
     set_fields: dict = {}
@@ -555,7 +670,12 @@ async def replace_user_memory(
     ]
     set_fields["updated_at"] = now
 
-    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+    if snapshot is not None:
+        return await update_memory_if_unchanged(db, snapshot, set_fields)
+    result = await db["user_profiles"].update_one(
+        {"_id": user_id}, {"$set": set_fields}
+    )
+    return result.matched_count == 1
 
 
 async def find_users_due_for_consolidation(
@@ -594,8 +714,12 @@ async def find_users_due_for_consolidation(
 
 
 async def apply_consolidation(
-    db: AsyncIOMotorDatabase, user_id: int, consolidation: MemoryConsolidation
-):
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    consolidation: MemoryConsolidation,
+    *,
+    snapshot: dict | None = None,
+) -> bool:
     """Single-``$set`` apply of a consolidation result + ``last_consolidated_at``.
 
     Mirrors ``replace_user_memory``'s single-write style: refreshes summary/style (only
@@ -644,7 +768,12 @@ async def apply_consolidation(
     set_fields["last_consolidated_at"] = now
     set_fields["updated_at"] = now
 
-    await db["user_profiles"].update_one({"_id": user_id}, {"$set": set_fields})
+    if snapshot is not None:
+        return await update_memory_if_unchanged(db, snapshot, set_fields)
+    result = await db["user_profiles"].update_one(
+        {"_id": user_id}, {"$set": set_fields}
+    )
+    return result.matched_count == 1
 
 
 async def get_active_facts(db: AsyncIOMotorDatabase, user_id: int) -> list[dict]:
@@ -685,10 +814,35 @@ async def touch_and_get_last_interaction(
     return (doc or {}).get("last_interaction_at")
 
 
-async def set_proactive_enabled(db: AsyncIOMotorDatabase, user_id: int, enabled: bool):
+def _proactive_snapshot_query(user_id: int, snapshot: dict | None) -> dict:
+    """Match the same profile lifecycle, preference, and engagement snapshot."""
+    query = {"_id": user_id}
+    if snapshot is not None:
+        for field in (
+            "memory_generation",
+            "created_at",
+            "last_interaction_at",
+            "proactive_enabled",
+            "proactive_unanswered",
+        ):
+            query[field] = (
+                {"$eq": snapshot[field], "$exists": True}
+                if field in snapshot
+                else {"$exists": False}
+            )
+    return query
+
+
+async def set_proactive_enabled(
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    enabled: bool,
+    *,
+    expected_profile: dict | None = None,
+):
     """Single-``$set`` toggle of the per-user proactive opt-out flag."""
     await db["user_profiles"].update_one(
-        {"_id": user_id},
+        _proactive_snapshot_query(user_id, expected_profile),
         {"$set": {"proactive_enabled": enabled, "updated_at": _utcnow()}},
     )
 
@@ -773,16 +927,28 @@ async def set_onboarded(db: AsyncIOMotorDatabase, user_id: int, value: bool = Tr
     )
 
 
-async def set_last_proactive(db: AsyncIOMotorDatabase, user_id: int, *, now=None):
+async def set_last_proactive(
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    *,
+    now=None,
+    expected_profile: dict | None = None,
+) -> bool:
     """Single-``$set`` write of ``last_proactive_at`` (holds the rate-limit window)."""
     now = now or _utcnow()
-    await db["user_profiles"].update_one(
-        {"_id": user_id},
+    result = await db["user_profiles"].update_one(
+        _proactive_snapshot_query(user_id, expected_profile),
         {"$set": {"last_proactive_at": now, "updated_at": now}},
     )
+    return result.matched_count == 1
 
 
-async def increment_proactive_unanswered(db: AsyncIOMotorDatabase, user_id: int):
+async def increment_proactive_unanswered(
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    *,
+    expected_profile: dict | None = None,
+):
     """Bump the consecutive-unanswered proactive check-in counter by one.
 
     Called only when a check-in is actually delivered. Once the counter reaches
@@ -790,7 +956,7 @@ async def increment_proactive_unanswered(db: AsyncIOMotorDatabase, user_id: int)
     (a DM message or any command), which resets it to 0.
     """
     await db["user_profiles"].update_one(
-        {"_id": user_id},
+        _proactive_snapshot_query(user_id, expected_profile),
         {"$inc": {"proactive_unanswered": 1}, "$set": {"updated_at": _utcnow()}},
     )
 

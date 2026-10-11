@@ -32,3 +32,6 @@ jobs:
 
       - name: Check lint and imports
         run: uv run --locked --extra dev ruff check .
+
+      - name: Run regression tests
+        run: uv run --locked --extra dev python -m pytest -q
