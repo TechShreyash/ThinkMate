@@ -19,7 +19,6 @@ The application separates Telegram handling, conversation/memory services, promp
 | [docker-compose.yml](../docker-compose.yml) | Single bot service, optional local env file, and persistent log volume. |
 | [README.md](../README.md) | Project entry point and quick start. |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Workflow and documentation maintenance. |
-| [scripts/check_docs.py](../scripts/check_docs.py) | Standard-library Markdown/local-link validator. |
 
 ## Application modules
 

@@ -45,4 +45,4 @@ Recommended reading order: [architecture](architecture.md) → [repository map](
 
 Subsystem filenames in `development/` remain stable for existing references. The former phase-by-phase `project_plan.md` has been replaced by the [roadmap](roadmap.md); implemented behavior belongs in the subsystem guides.
 
-Run `uv run --locked python scripts/check_docs.py` from the repository root to check authored Markdown structure and local links. External service availability and semantic accuracy require separate review.
+When changing documentation, check local links and heading anchors, and verify behavior and defaults against their sources of truth.

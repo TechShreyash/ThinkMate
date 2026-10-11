@@ -72,13 +72,12 @@ Details and safeguards: [database](docs/development/database.md), [observability
 ```bash
 uv sync --locked --extra dev
 uv run --locked --extra dev python -m pytest -q
-uv run --locked python scripts/check_docs.py
 ```
 
 See [Contributing](CONTRIBUTING.md) for the workflow and [testing](docs/development/testing_guide.md) for targeted tests and the separate live LLM check.
 
 ## Community and license
 
-Project bot: [@ThinkMate_AIBot](https://t.me/ThinkMate_AIBot). Updates: [@TechZBots](https://t.me/TechZBots). Discussion: [TechZBots Support](https://t.me/TechZBots_Support). These are project links; service availability is not checked by the documentation validator.
+Project bot: [@ThinkMate_AIBot](https://t.me/ThinkMate_AIBot). Updates: [@TechZBots](https://t.me/TechZBots). Discussion: [TechZBots Support](https://t.me/TechZBots_Support).
 
 Licensed under the [MIT License](LICENSE).

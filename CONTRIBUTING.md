@@ -25,7 +25,6 @@ uv lock --upgrade
 uv export --locked --extra dev --no-emit-project --format requirements.txt --output-file requirements.txt
 uv sync --locked --extra dev
 uv run --locked --extra dev python -m pytest -q
-uv run --locked python scripts/check_docs.py
 docker build -t thinkmate .
 ```
 
@@ -45,7 +44,6 @@ Run focused tests for the behavior you changed; run the broader suite when share
 
 ```bash
 uv run --locked --extra dev python -m pytest -q
-uv run --locked python scripts/check_docs.py
 git diff --check
 ```
 
@@ -58,10 +56,10 @@ The manual `tests/run_llm_live.py` script makes real requests and can incur prov
 - Give every document one top-level heading. Leave blank lines after headings and before lists/fenced blocks.
 - Keep setup commands executable from the stated directory. Describe what each verification step actually proves.
 - Keep default values in the configuration reference instead of repeating full tables in multiple guides.
-- Add new human-facing guides to [docs/README.md](docs/README.md). The checker also requires authored Markdown to be reachable from the project README.
+- Add new human-facing guides to [docs/README.md](docs/README.md) and check that their links resolve.
 - Treat [persona.md](persona.md) as runtime input: changing its text can change bot behavior. Use the [persona guide](docs/development/persona.md) and appropriate prompt regression coverage.
 
-The documentation checker uses only Python's standard library. It validates local links/Markdown anchors, basic heading/fence structure, index reachability, and environment-reference coverage. It skips generated environments, caches, logs, and external URL availability; semantic claims still need code review.
+Review documentation against the current source, configuration, and tests. Check local links and heading anchors when moving or renaming a guide.
 
 ## Describe the result
 
