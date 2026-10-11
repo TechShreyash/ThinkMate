@@ -1,532 +1,181 @@
-# Observability & Ops Runbook
+# Observability and operations
 
-> The operator's guide to ThinkMate's in-process observability layer (Phase 10). It explains
-> every metric the bot records, how to read them through the `/health` and `/metrics` admin
-> commands, how to inspect the `llm_audit_log`, and — most importantly — **how to tell whether
-> you are near the LLM-throughput ceiling** and what to tune in response. Read this alongside
-> [performance_and_scaling.md](performance_and_scaling.md) (the capacity model),
-> [database.md](database.md) (the audit-log schema and indexes), and
-> [configuration.md](configuration.md) (every tuning knob).
+ThinkMate exposes Telegram `/health` and `/metrics` commands, cumulative metrics,
+local logs, LLM audit records, and optional forwarding to a Telegram logs destination.
+This runbook describes what those signals measure and their privacy/diagnostic limits.
+See [configuration](configuration.md) for environment values and
+[performance and scaling](performance_and_scaling.md) for capacity constraints.
 
-**How to read this runbook.** It moves from concepts to action. It first explains what the
-observability layer is and isn't, then walks through every metric and the in-memory registry
-that holds them, then covers the health probes and admin commands you read those numbers
-through. The last three sections are operational: how to recognize the throughput ceiling, and
-which configuration knobs to turn in response. If you are mid-incident, skip straight to
-[Recognizing the LLM-throughput ceiling](#recognizing-the-llm-throughput-ceiling) and then
-[Tuning budgets & batching in response](#tuning-budgets--batching-in-response). A few terms used
-throughout: the **hot path** is the latency-sensitive code that runs while a user waits for a
-reply; **background work** is everything deferred off that path (memory extraction, compression,
-audit writes); and the **ceiling** is the point where incoming load outpaces what the single
-process can serve.
+## Startup and readiness
 
-## Table of Contents
-1. [What this layer is (and isn't)](#what-this-layer-is-and-isnt)
-2. [The metric set](#the-metric-set)
-3. [The in-memory metrics registry](#the-in-memory-metrics-registry)
-4. [Health & readiness helpers](#health--readiness-helpers)
-5. [The optional periodic metrics logger](#the-optional-periodic-metrics-logger)
-6. [Admin commands: `/health` and `/metrics`](#admin-commands-health-and-metrics)
-7. [Reading the `llm_audit_log`](#reading-the-llm_audit_log)
-8. [Recognizing the LLM-throughput ceiling](#recognizing-the-llm-throughput-ceiling)
-9. [Tuning budgets & batching in response](#tuning-budgets--batching-in-response)
-10. [Related docs](#related-docs)
+[`main.py`](../../main.py) pings MongoDB before polling and then initializes audit
+indexes. An unreachable database or failure of the compound-index creation stops
+startup. Audit TTL-index failure only logs a warning. Metrics restore is best-effort.
+Persona validation warns on a missing file and allows a fallback persona. There is
+no startup LLM request that verifies models or structured-output compatibility.
 
----
+[`health.py`](../../app/services/health.py) provides two probes:
 
-## What this layer is (and isn't)
+| Probe | What it checks | Limit |
+| --- | --- | --- |
+| `liveness()` | In-process uptime and a compact metrics summary; no I/O | Does not prove Telegram polling, LLM availability, or successful delivery. |
+| `readiness(db)` | Calls the singleton Mongo client admin `ping` | The argument is currently unused. Does not test writes, indexes, LLM, or Telegram. Errors return `ready: false` with a reason. |
 
-ThinkMate runs as **one long-polling process** (a single Python process that continuously asks
-Telegram for new updates rather than receiving webhooks) whose practical ceiling is **LLM
-throughput**, not the Python event loop or MongoDB (see
-[performance_and_scaling.md](performance_and_scaling.md#the-single-instance-ceiling)). Phase 10
-adds a lightweight, in-process observability layer so an operator can answer one question
-quickly: **"are we near the ceiling?"**
+There is no HTTP health endpoint or Prometheus/OpenTelemetry exporter. `/health` is
+an HTML Telegram report combining these probes. `/metrics` renders task-level LLM
+outcomes, counters, gauges, and timers from the in-memory registry with no LLM call.
 
-**What it is:**
-- A dependency-free, process-wide, in-memory metrics registry
-  ([`app/services/metrics.py`](../../app/services/metrics.py)) — counters, gauges, and
-  timer/histogram-lite aggregates, stdlib only.
-- Cheap hot-path instrumentation that adds **no** DB or LLM round-trip.
-- Liveness/readiness helpers ([`app/services/health.py`](../../app/services/health.py)).
-- Admin `/health` and `/metrics` commands ([`app/handlers/commands.py`](../../app/handlers/commands.py)).
-- An optional periodic metrics logger.
+## Who can read reports
 
-**What it is NOT:**
-- It is **not** a Prometheus/OpenTelemetry server. There is no scrape endpoint, no external
-  time-series database, no exporter. The metrics live in memory in this one process and reset
-  when it restarts.
-- The external metrics sink (Prometheus/OTel) is an **optional future** addition — only if a
-  metrics backend is ever introduced — and is not part of this layer.
+Both commands use the gate in [`commands.py`](../../app/handlers/commands.py):
 
-Because everything is in-memory and single-instance, treat the numbers as a **live operational
-snapshot** for the running process, not a historical record. For history, use the periodic
-logger (a log time series) or the `llm_audit_log` (per-call detail).
+- Empty/unset `ADMIN_USER_IDS` allows **any private-chat user** to read reports.
+- A non-empty set allows only listed sender IDs, **in private chats or groups**.
+- Senderless and unauthorized requests are silently ignored.
 
-[Back to top](#table-of-contents)
+The default protects against broadcasting group reports, but does not restrict reports
+to operators. Set explicit operator IDs when that restriction is needed; issue reports
+in a DM when they contain information you do not want posted to a group. Command
+renaming/disabling uses the same gate. See [command configuration](configuration.md#command-environment-variables).
 
----
+## Metric catalog
 
-## The metric set
+[`metrics.py`](../../app/services/metrics.py) holds one thread-safe process registry.
+Counters accumulate, gauges replace the latest value, and timers store `count`, `sum`,
+`max`, and derived `avg`. Failures are swallowed so instrumentation does not break
+application work. Names are created on demand; current callers use a small fixed set.
 
-All metric names are drawn from a **small fixed set** (so registry memory is bounded) and use a
-dotted namespace. The table below lists every metric, its type, where it is recorded, what it
-means, and how to read a **healthy** vs. a **concerning** value.
+Each LLM family has `.calls`, `.success`, `.failure`, and `.latency`:
 
-> Types: **counter** = monotonically increasing total; **gauge** = latest point-in-time value;
-> **timer** = a latency aggregate holding `count` / `sum` / `max`, from which `avg` is derived.
+| Prefix | Service call type |
+| --- | --- |
+| `llm.reply` | `chat_reply` |
+| `llm.extraction` | `memory_extraction` |
+| `llm.group_extraction` | `group_memory_extraction` |
+| `llm.compression` | `memory_compression` |
+| `llm.memory_consolidation` | `memory_consolidation` |
+| `llm.proactive_checkin` | `proactive_checkin` |
 
-### LLM call metrics
+A `.calls` count represents a completed service operation, **not every HTTP attempt**.
+Retries and native-parse fallback occur inside that operation; latency includes their
+waits. Successful reply parsing can fall back to raw text, and a successful check-in
+request can decline to send anything. These counters therefore do not prove delivery
+or semantic reply quality.
 
-The reply call is the dominant cost on the hot path; the others are amortized background work.
-For every LLM call type, three counters (`.calls`, `.success`, `.failure`) and one latency timer
-are recorded via the `metrics.record_llm(call_type, ok=…, latency=…)` helper.
+| Metric | Meaning |
+| --- | --- |
+| `throttle.drops` | Per-user sliding-window rate-limit rejects. |
+| `throttle.stale_dropped` | Messages older than the startup cutoff. |
+| `queue.drops` | Messages rejected at a conversation's pending queue cap. |
+| `conversations.active` | Resident conversation-state count, including retained idle state; not an online-user count. |
+| `extraction.runs` | Entry into an extraction pipeline, including one that later finds nothing to process. |
+| `compression.runs` | Entry into the compression pipeline after scheduler/cooldown gating. |
+| `consolidation.runs` / `.success` / `.failure` | Consolidation pipeline entries and apply outcomes; separate from LLM call outcomes. |
+| `proactive.runs` | Scans entered, including scans skipped for quiet hours. |
+| `proactive.sent` | Check-ins delivered and subsequent bookkeeping completed. |
+| `proactive.skipped` | Due-user attempts whose generation returned no usable text. |
+| `proactive.failed` | Failed attempts, including delivery or per-user processing errors. |
 
-| Metric name | Type | Recorded at | Meaning | Healthy | Concerning |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `llm.reply.calls` | counter | `llm_service.generate_reply_bundle` | Total reply-bundle calls (one per message batch). | Tracks active conversation volume. | — (volume signal; read with latency). |
-| `llm.reply.success` | counter | same | Reply calls that returned a usable bundle. | ≈ `llm.reply.calls`. | Diverging from `.calls`. |
-| `llm.reply.failure` | counter | same | Reply calls that raised or returned the failure sentinel. | ~0, or a tiny fraction. | Rising / a growing share of `.calls` → endpoint stress or bad output. |
-| `llm.reply.latency` | timer | wraps the reply call | Reply latency (`avg`, `max`). | `avg` steady and well under the batch budget. | `avg`/`max` rising → **LLM endpoint saturating** (primary ceiling signal). |
-| `llm.extraction.calls` / `.success` / `.failure` | counter | `_structured_call` (`memory_extraction`) | Single-party memory-extraction volume/outcomes. | failures ~0. | rising failures → extraction model/endpoint stress. |
-| `llm.extraction.latency` | timer | wraps extraction call | Extraction latency. | steady. | rising → shared endpoint pressure. |
-| `llm.group_extraction.calls` / `.success` / `.failure` | counter | `_structured_call` (`group_memory_extraction`) | Group memory-extraction volume/outcomes. | failures ~0. | rising failures. |
-| `llm.group_extraction.latency` | timer | wraps group extraction call | Group extraction latency. | steady. | rising. |
-| `llm.compression.calls` / `.success` / `.failure` | counter | `_structured_call` (`memory_compression`) | Memory-compression volume/outcomes. | failures ~0 (a failed compression is skipped, never wipes memory). | rising failures. |
-| `llm.compression.latency` | timer | wraps compression call | Compression latency. | steady. | rising. |
+There is currently **no `audit.write.latency` instrumentation**, no queue-wait/delivery
+latency, no percentile histogram, and no global LLM concurrency gauge. Use logs and
+provider/database diagnostics for those questions.
 
-### Hot-path & background metrics
-
-| Metric name | Type | Recorded at | Meaning | Healthy | Concerning |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `throttle.drops` | counter | `ThrottlingMiddleware.__call__` | Messages rejected because a user exceeded `RATE_LIMIT_MAX_REQUESTS` in the window. | Low / flat. | Sustained climb → a flood/abuse source, or a too-tight limit for real usage. |
-| `queue.drops` | counter | `UserTaskManager.enqueue_message` | Messages dropped because a conversation's queue hit `MAX_QUEUED_MESSAGES`. | ~0. | Rising → a conversation **can't drain in time** (replies slower than inflow → a ceiling signal). |
-| `conversations.active` | gauge | `get_state` (create) + `_evict_idle` | Resident `UserState` count = the active working-set size. | Stable, tracks concurrency. | Climbing without leveling → more concurrent load than the loop can comfortably serve. |
-| `extraction.runs` | counter | `run_extractor` (past the guard) | Background extraction runs that actually proceeded (skipped runs are not counted). | Proportional to chat volume. | Spiking far above chat volume → thrashing / a misconfigured threshold. |
-| `compression.runs` | counter | `run_compressor` (past the cooldown/lock guard) | Background compression runs that actually proceeded. | Occasional, gated by `COMPRESSION_COOLDOWN_SECS`. | Frequent → memory budget too tight (see tuning). |
-| `audit.write.latency` | timer *(optional)* | `llm_service._log_llm_call` | Audit-write lag to `llm_audit_log` (fire-and-forget, off the hot path). | Low; **may be absent** if audit instrumentation is not wired or no audit write has occurred yet. | Rising → MongoDB write pressure. |
-
-> **Note on `audit.write.latency`:** this timer is optional. If it is not present in a snapshot,
-> it simply means no audit write has been observed (or the optional instrumentation isn't
-> enabled) — its absence is not an error. The summary and `/metrics` output degrade gracefully
-> when a metric is missing.
-
-### Proactive check-in metrics (Phase 12)
-
-The optional proactive check-in scheduler (see
-[configuration.md](configuration.md#-proactive-check-ins-phase-12)) records four counters per scan
-plus, for free, its own `llm.proactive_checkin.*` family (the check-in LLM call flows through the
-same `metrics.record_llm` helper as every other call type). All of these stay at zero unless the
-feature is enabled (`PROACTIVE_INTERVAL_SECS > 0`).
-
-| Metric name | Type | Recorded at | Meaning | Healthy | Concerning |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `proactive.runs` | counter | start of each scan (`_run_proactive_scan`) | How often the scheduler woke and scanned for due users. | Tracks the configured scan cadence. | — (cadence signal; read with the outcomes below). |
-| `proactive.sent` | counter | after a successful `bot.send_message` | Check-ins actually delivered to a user's DM. | Tracks genuine re-engagement volume. | — (volume signal). |
-| `proactive.skipped` | counter | when generation is empty/declined | Eligible users for whom the model produced nothing genuine to say (never-fabricate rule). | A normal share — the bot stays quiet rather than sending filler. | A very high skip ratio may mean profiles are too thin to ground a nudge (raise `PROACTIVE_MIN_ITEMS` or leave disabled). |
-| `proactive.failed` | counter | when a send raises (e.g. `Forbidden` / user blocked the bot) | Delivery failures; the affected user is auto-opted-out of future check-ins. | ~0, or a tiny fraction. | Rising → many users have blocked/restricted the bot, or a Telegram-side delivery problem. |
-| `llm.proactive_checkin.calls` / `.success` / `.failure` | counter | inside `generate_checkin` (via `record_llm`) | Volume/outcomes of the one LLM call each attempted check-in makes. | failures ~0. | rising failures → LLM endpoint stress on the background path. |
-| `llm.proactive_checkin.latency` | timer | wraps the check-in call | Check-in generation latency. | steady. | rising → shared endpoint pressure (background work). |
-
-Each scan also logs a one-line summary (`[proactive] scan: N due, S sent, K skipped, F failed.`)
-so the same numbers appear in the logs without a command.
-
-### `snapshot()` shape
-
-A snapshot is a plain dict with three well-formed sections (empty sections when nothing has been
-recorded). Timers carry a derived `avg = sum / count`:
+Example registry snapshot:
 
 ```json
 {
-  "counters": { "llm.reply.calls": 12, "llm.reply.success": 11, "llm.reply.failure": 1,
-                "throttle.drops": 3, "queue.drops": 0,
-                "extraction.runs": 2, "compression.runs": 1 },
-  "gauges":   { "conversations.active": 7 },
-  "timers":   { "llm.reply.latency": { "count": 12, "sum": 18.4, "max": 3.1, "avg": 1.533 } }
+  "counters": {"llm.reply.calls": 12, "llm.reply.success": 11, "llm.reply.failure": 1},
+  "gauges": {"conversations.active": 7},
+  "timers": {"llm.reply.latency": {"count": 12, "sum": 18.4, "max": 3.1, "avg": 1.533}}
 }
 ```
 
-[Back to top](#table-of-contents)
+## Persistence and periodic logging
 
----
+The registry is restored from the `metrics_state` singleton document
+(`_id: "metrics:singleton"`) at startup, checkpointed every
+`METRICS_PERSIST_INTERVAL_SECS` (default 300), and flushed during the polling shutdown
+path. Setting the interval to `<= 0` disables only periodic checkpoints. All persistence
+is best-effort: a crash can lose changes after the last successful checkpoint.
 
-## The in-memory metrics registry
+Counters and timer aggregates continue across restarts when restore succeeds; uptime
+starts fresh on import. Gauges restored from a checkpoint can be stale until their
+owners update them. `load_state()` adds counters/timers to existing state, so repeated
+loads would double-count; normal startup calls it once. Multiple bot instances would
+overwrite the same singleton and are unsupported.
 
-Source: [`app/services/metrics.py`](../../app/services/metrics.py). A single process-wide
-singleton, `metrics`, is the only thing callers touch.
+`METRICS_LOG_INTERVAL_SECS > 0` enables periodic `[metrics]` summary lines without a
+DB/LLM request. The default `0` disables this logger. Snapshot averages/maxima are
+cumulative, not a recent-window view; compare successive checkpoints or log samples
+before inferring trends. [`health.py`](../../app/services/health.py) owns both loops.
 
-**API surface:**
+## Logs and stored content
 
-| Method | Purpose |
-| :--- | :--- |
-| `incr(name, n=1)` | Add `n` (default 1) to a counter; auto-creates at 0 on first use. |
-| `set_gauge(name, value)` | **Replace** the gauge's value (does not accumulate). |
-| `observe(name, value)` / `record_latency(name, seconds)` | Feed a timer aggregate: `count += 1`, `sum += value`, `max = max(prev, value)`. |
-| `timer(name)` | Context manager that records the wrapped block's wall-clock duration **exactly once**, in a `finally` — so it records even when the block raises, and the exception propagates unchanged. |
-| `record_llm(call_type, *, ok, latency)` | Convenience that maps a `call_type` to `llm.<type>.calls` + `.success`/`.failure` + `.latency` in one call. |
-| `snapshot()` | Return the `{counters, gauges, timers}` dict (timers include derived `avg`). |
-| `reset()` | Clear all state (used for test isolation). |
+| Destination | Content | Retention/control |
+| --- | --- | --- |
+| Console | INFO and above, including actionable group routes with message previews | Process/service output configuration. |
+| `logs/bot.log` | DEBUG and above, including routing IDs/names, message previews, and errors | 10 MB rotation and 10-day retention in [`app/__init__.py`](../../app/__init__.py). |
+| `llm_audit_log` | User/conversation ID, call type, timestamp, status, input/output lengths, error traceback | Best-effort TTL index; code default 30 days. |
+| Telegram `LOGS_CHANNEL_ID` | Lifecycle notices, extraction-update summaries containing memory content, selected WARNING+ records; diagnostic traces if enabled | Telegram destination access/retention, independent of audit TTL. |
+| Telegram reset backup | JSON export of the user's profile and buffer before confirmed `/reset` | Best-effort upload; independent of MongoDB deletion. |
 
-**Design properties that matter operationally:**
+The normal audit `inputs` and `outputs` contain character lengths, not full prompts or
+completions. Its `error` field contains a traceback; provider/validation errors can
+include sensitive fragments. Local route traces contain text previews even when
+`FORWARD_DIAGNOSTICS=false`. That switch controls extra Telegram forwarding, not local
+log creation. Treat logs, destination membership, and backups as access to user data.
 
-- **Stdlib only.** Built on `threading`, `time`, and `contextlib` plus `loguru` for debug logs —
-  no third-party metrics dependency.
-- **Never raises into a caller.** Every mutator wraps its body in `try/except` and logs at debug
-  on failure. A metrics error can never break a reply, a drop decision, or a background job.
-- **Cheap & atomic.** Each mutation takes a brief `threading.Lock` so a record is applied
-  atomically; the lock is uncontended on a single event loop.
-- **Bounded.** Callers only ever use the fixed metric set above, so registry memory cannot grow
-  without limit. Unknown names auto-create empty rather than raising, but no caller uses them.
-- **Not a server.** Again: this registry is in-memory and resets on process restart. An external
-  Prometheus/OTel sink is an optional future addition, not this.
+[`log_forwarder.py`](../../app/services/log_forwarder.py) sends directly at low volume
+and groups bursts into a periodically uploaded `logs.txt`. Buffers have no hard size
+cap, and failures can retain buffered content. Missing destination or bot disables
+sending. Forwarding rejects events originating in the destination chat to avoid loops.
+[`error_log_sink.py`](../../app/services/error_log_sink.py) filters self-forwarded and
+common permission/blocked noise; explicit operational events use a separate path.
 
-[Back to top](#table-of-contents)
+Reset backup delivery is best-effort and deletion proceeds when upload fails. The
+current reset confirmation text claims a backup was saved even when forwarding was
+unset/unsuccessful; verify the actual upload before assuming recovery is available.
+`/reset` does not erase audit rows, shared group transcripts, or Telegram/log copies.
 
----
+## Inspecting LLM audit records
 
-## Health & readiness helpers
+[`llm_service.py`](../../app/services/llm_service.py) schedules audit inserts separately
+from reply generation. They can fail or be lost at shutdown; they are diagnostic data,
+not a complete transaction ledger. There is no final audit-task drain in `main.py`.
 
-Source: [`app/services/health.py`](../../app/services/health.py). Two cheap probes plus a shared
-compact summary formatter over `metrics.snapshot()`.
-
-### `liveness()`
-
-Synchronous, **performs no I/O**. Returns:
-
-```python
-{ "status": "ok", "uptime_secs": 1234.5, "summary": { ... } }
-```
-
-- `uptime_secs` is measured from `_PROCESS_START`, captured once at module import.
-- `summary` is the compact view (total LLM calls, reply `avg`/`max` latency, throttle/queue
-  drops, active conversations, extraction/compression runs) shared by the command and the logger.
-- On any unexpected internal error it degrades to `{"status": "degraded"}` rather than raising.
-
-### `readiness(db)`
-
-Asynchronous. Runs a **single** MongoDB `ping` (delegated to
-[`connection.ping_db`](../../app/database/connection.py)) and **never raises**:
-
-```python
-{ "ready": True,  "mongo": "ok" }                                   # ping succeeded
-{ "ready": False, "mongo": "error", "reason": "<str>" }             # any failure, incl. timeout
-```
-
-It catches everything — including server-selection timeouts — so a degraded database surfaces as
-a `ready: False` report instead of an exception.
-
-[Back to top](#table-of-contents)
-
----
-
-## The optional periodic metrics logger
-
-Source: `start_metrics_logger()` in [`app/services/health.py`](../../app/services/health.py),
-wired from [`main.py`](../../main.py) after `init_db()`.
-
-- Controlled by **`METRICS_LOG_INTERVAL_SECS`** (see [configuration.md](configuration.md)).
-  Default `0.0` = **disabled** (no task is started; a harmless no-op).
-- When the interval is `> 0`, a single background task logs one compact summary line per interval:
-
-  ```
-  [metrics] {'llm_calls_total': 42, 'reply_latency_avg': 1.53, 'reply_latency_max': 3.1,
-             'throttle_drops': 0, 'queue_drops': 0, 'conversations_active': 7,
-             'extraction_runs': 3, 'compression_runs': 1}
-  ```
-
-- It performs **no DB or LLM call** — it only formats the in-memory snapshot.
-- Each iteration is wrapped so an error is logged and the loop continues; it never crashes the
-  process. Cancellation (shutdown) exits the loop cleanly.
-
-This gives you a **time series in the logs** without anyone having to issue a command — useful for
-spotting trends (e.g. reply latency creeping up over an hour).
-
-[Back to top](#table-of-contents)
-
----
-
-## Admin commands: `/health` and `/metrics`
-
-Source: [`app/handlers/commands.py`](../../app/handlers/commands.py). Both are registered as
-commands (never treated as conversation) and reply with plain text built only from the in-memory
-snapshot plus, for `/health`, a single Mongo ping — **no LLM call**.
-
-### `/health`
-
-Combines `liveness()` + `await readiness(db)` into a readable report:
-
-```
-🩺 ThinkMate health
-status: ok
-uptime_secs: 1234.5
-readiness: mongo: ok (ok)
-
-metrics summary:
-  llm_calls_total: 42
-  reply_latency_avg: 1.53
-  reply_latency_max: 3.1
-  throttle_drops: 0
-  queue_drops: 0
-  conversations_active: 7
-  extraction_runs: 3
-  compression_runs: 1
-```
-
-If the Mongo ping fails, the readiness line degrades (e.g. `mongo: degraded (<reason>)`) instead
-of erroring — the report still renders.
-
-### `/metrics`
-
-Dumps the raw snapshot summary (all counters, gauges, and timers) under the **same**
-authorization rule as `/health`:
-
-```
-📊 ThinkMate metrics
-
-counters:
-  llm.reply.calls: 42
-  ...
-gauges:
-  conversations.active: 7
-timers:
-  llm.reply.latency: count=42 avg=1.53 max=3.1
-  ...
-```
-
-### Authorization: the `ADMIN_USER_IDS` gate and the DM-only default
-
-Both commands pass through `_admin_allowed(message)`:
-
-- **When `ADMIN_USER_IDS` is non-empty** (a comma-separated list of Telegram user ids; see
-  [configuration.md](configuration.md)): only those `from_user.id`s are honored. Everyone else is
-  silently declined (fail closed — no report leaks).
-- **When `ADMIN_USER_IDS` is unset or empty** (the default): the command is honored **only in
-  private chats (DMs)**. This safe default ensures a status report is **never broadcast into a
-  group**.
-
-To lock the commands to specific operators in production, set `ADMIN_USER_IDS` to their numeric
-Telegram ids. To keep the casual DM-only behavior, leave it unset.
-
-[Back to top](#table-of-contents)
-
----
-
-## Reading the `llm_audit_log`
-
-When you need per-call operational detail (call type, input/output lengths, status, timestamp, and
-error tracebacks), the in-memory metrics aren't enough — that's what the `llm_audit_log`
-collection is for. It intentionally does not store full prompts or raw model outputs. Its full
-schema lives in [database.md](database.md#3-llm_audit_log-collection).
-
-**Indexes that make reads fast:**
-
-- A **compound index** `("user_id", 1), ("timestamp", -1)` — built for the canonical access
-  pattern: *filter by `user_id`, sort by `timestamp` descending* (newest first).
-- A **TTL index** on `("timestamp", 1)` with `expireAfterSeconds = AUDIT_LOG_RETENTION_DAYS × 86400`,
-  so entries auto-expire after the retention window (default 30 days; see
-  [configuration.md](configuration.md)). This bounds storage growth — old entries vanish on their
-  own, so a query only ever sees recent history.
-
-**Example: the latest 20 LLM calls for one user** (matches the compound index exactly — filter on
-`user_id`, sort on `timestamp` descending):
-
-```python
-cursor = (
-    db["llm_audit_log"]
-    .find({"user_id": 12345678})
-    .sort("timestamp", -1)
-    .limit(20)
-)
-async for entry in cursor:
-    print(entry["timestamp"], entry["call_type"], entry["status"])
-```
-
-Equivalent in the `mongosh` shell:
+Use the compound `(user_id ascending, timestamp descending)` index for recent calls:
 
 ```javascript
-db.llm_audit_log
-  .find({ user_id: 12345678 })
-  .sort({ timestamp: -1 })
-  .limit(20)
+// In mongosh, after selecting the configured database:
+db.llm_audit_log.find({user_id: 12345678}).sort({timestamp: -1}).limit(20)
+// Only failures:
+db.llm_audit_log.find({user_id: 12345678, status: "failed"})
+  .sort({timestamp: -1}).limit(20)
+// Verify audit retention was configured:
+db.llm_audit_log.getIndexes()
 ```
 
-**Narrowing further:**
+Group reply/extraction audits use the group chat ID in `user_id`. Status is `success`
+or `failed`; call types are listed above. See [database](database.md) for schemas.
+TTL is index-dependent and asynchronous; changing the environment does not guarantee
+an existing index is altered successfully. Check startup warnings and the actual index.
 
-- Only failures for a user: add `"status": "failed"` to the filter — useful when
-  `llm.<type>.failure` counters are climbing and you want the tracebacks.
-- By call type: add `"call_type": "chat_reply"` (or `"memory_extraction"`,
-  `"group_memory_extraction"`, `"memory_compression"`).
+## Troubleshooting
 
-Always lead the filter with `user_id` and sort by `timestamp` descending so the query rides the
-compound index instead of scanning. Because the TTL prunes old rows, the working set stays small.
+| Symptom | First checks | Useful change |
+| --- | --- | --- |
+| No polling after startup | Mongo connection/index errors, token construction, startup logs | Correct settings before changing concurrency. |
+| `/health` ready but replies fail | LLM model/URL/auth, reply failure counts, provider logs | Test endpoint capability in an isolated environment. |
+| Slow replies and queue drops | Reply latency trend, actual provider throughput, loop/database latency | Adjust batching cautiously; lower competing scheduler volume if needed. |
+| Many throttle drops | Identify users/chats and rate-limit values | Tighten for abusive bursts or relax if ordinary typing is rejected. |
+| Frequent compression | Profile budget, retained metadata, cooldown | Increase practical budget/cooldown after examining profile sizes. |
+| No proactive check-ins | Quiet UTC window, interaction age, opt-out/streak, item count, model decline | Check eligibility; missing sends need not be failure. |
+| Audit retention absent | Startup TTL warning and `getIndexes()` | Correct/reconcile the existing index with a database maintenance change. |
+| Logs destination floods | Diagnostic flag, repeated warnings, forwarding buffer | Turn off verbose forwarding and fix the underlying failure. |
 
-[Back to top](#table-of-contents)
+These are hypotheses to investigate, not proof of a particular bottleneck. Current
+metrics cannot distinguish upstream queuing, network delay, event-loop pressure, and
+Mongo latency on their own. See [performance and scaling](performance_and_scaling.md)
+for measurement and the limitations of running multiple replicas.
 
----
-
-## Recognizing the LLM-throughput ceiling
-
-The single-instance ceiling is almost always **LLM throughput** (see
-[performance_and_scaling.md](performance_and_scaling.md#the-single-instance-ceiling)). The metrics
-above are exactly the saturation signals that tell you when you're approaching it. Watch for these
-**together** — any one in isolation can be noise; sustained movement across several is the tell:
-
-| Signal (metric) | What it looks like near the ceiling |
-| :--- | :--- |
-| `llm.reply.latency` (`avg` and `max`) | **Rising** — the LLM endpoint is taking longer to answer, so each reply call queues behind the last. This is the primary signal. |
-| `queue.drops` | **Climbing** — conversations can't drain within their batch budget because replies are slow; messages pile up past `MAX_QUEUED_MESSAGES` and get dropped. |
-| `throttle.drops` | **Climbing** — often a flood/abuse source, but combined with the above it can mean genuine load is outpacing the rate limit. |
-| `conversations.active` | **Growing and not leveling off** — more concurrent working set than the single event loop can comfortably serve. |
-| `llm.*.failure` counters | **Rising share of `.calls`** — the endpoint is shedding load (timeouts, 429s, 5xx), a classic saturation symptom. |
-
-**How to confirm** which of the three documented ceilings you've hit
-([the single-instance ceiling](performance_and_scaling.md#the-single-instance-ceiling)):
-
-1. **LLM endpoint saturated** (the usual case): `llm.reply.latency` up *and* `queue.drops` up
-   *and/or* `llm.reply.failure` up. The fix is a **faster/parallel LLM endpoint**, not more bot
-   replicas.
-2. **Event loop can't drain batches**: `conversations.active` high with latency rising even though
-   the LLM endpoint itself is responsive. This is the rarer "scale horizontally" trigger.
-3. **MongoDB pressure**: `audit.write.latency` rising (when present), or readiness pings getting
-   slow/flaky. Check the Atlas tier IOPS/connections.
-
-[Back to top](#table-of-contents)
-
----
-
-## Tuning budgets & batching in response
-
-Once you've recognized the ceiling, these knobs (full reference in
-[configuration.md](configuration.md)) let you trade responsiveness, cost, and load. The
-priority order is always **responsiveness → robustness → minimize LLM calls** (see
-[performance_and_scaling.md](performance_and_scaling.md#design-goals--priorities)).
-
-**To absorb bursty load and cut reply-call volume** (fewer, fatter batches → fewer LLM calls):
-
-| Knob | Effect | Direction when saturating |
-| :--- | :--- | :--- |
-| `MESSAGE_BATCH_DELAY_SECS` | How long to wait after a user's last message before replying. | **Raise** (e.g. `2.5`) to coalesce rapid-fire messages into one reply call. |
-| `MAX_BATCH_DELAY_SECS` | Hard deadline from the first message in a batch. | **Raise** modestly to allow larger batches, but keep responsiveness acceptable. |
-| `MAX_QUEUED_MESSAGES` | Per-conversation queue cap before `queue.drops` increments. | **Raise** to tolerate brief inflow spikes without dropping; **don't** raise so far it masks a real ceiling. |
-
-**To reduce background LLM load** (extraction/compression compete with replies for the endpoint):
-
-| Knob | Effect | Direction when saturating |
-| :--- | :--- | :--- |
-| `CHAT_BUFFER_MAX_CHARS` | Buffer size before extraction runs. | **Raise** to run extraction less often (fewer `extraction.runs`), trading memory freshness for fewer calls. |
-| `USER_MEMORY_BUDGET_CHARS` | Compiled-memory budget before compression runs. | **Raise** to compress less often (fewer `compression.runs`). Keep ≥ ~600 (the empty template alone is ~380 chars). |
-| `COMPRESSION_COOLDOWN_SECS` | Minimum gap between compression runs per user. | **Raise** to space compression out further under load. |
-| `LLM_EXTRACTION_MODEL` | Model used for extraction/compression. | Point at a **smaller/faster** model so background work doesn't starve replies. |
-
-**To shed abusive load** (when `throttle.drops` is climbing from a flood, not genuine traffic):
-
-| Knob | Effect | Direction |
-| :--- | :--- | :--- |
-| `RATE_LIMIT_MAX_REQUESTS` / `RATE_LIMIT_WINDOW_SECS` | Per-user rate limit. | **Tighten** to reject floods sooner. |
-| `MAX_INPUT_CHARS` | Inbound message size cap. | **Lower** to block pasted-log/essay dumps that inflate token cost. |
-
-**The real fix for an LLM endpoint ceiling** is a faster or parallel endpoint, or a smaller
-reply model — the knobs above buy headroom but don't change the endpoint's throughput. Only scale
-the bot horizontally when the **event loop or MongoDB** is the proven bottleneck (signals 2 and 3
-above), following the
-[migration path](performance_and_scaling.md#horizontal-scale-migration-path-future).
-
-[Back to top](#table-of-contents)
-
----
-
-## Related docs
-
-- [README.md](../../README.md) — project overview and entry point.
-- [architecture.md](../architecture.md) — system topology and data flow.
-- [performance_and_scaling.md](performance_and_scaling.md) — the capacity model, hot-path
-  invariants, saturation signals, and the future metrics-sink step.
-- [configuration.md](configuration.md) — every tuning knob, including `ADMIN_USER_IDS` and
-  `METRICS_LOG_INTERVAL_SECS`.
-- [database.md](database.md) — the `llm_audit_log` schema, the compound index, and the TTL.
-- [project_plan.md](../project_plan.md) — phase-by-phase plan (Phase 10 = observability & ops).
-
-[Back to top](#table-of-contents)
-
-[Back to top](#table-of-contents)
-
----
-
-## Metrics persistence (surviving restarts)
-
-The [`MetricsRegistry`](../../app/services/metrics.py) is an **in-memory** registry, so without
-persistence every counter, gauge, and timer aggregate resets to zero on each restart — and because
-`/health` and `/metrics` both read from that registry, their reports would lose all history on a
-redeploy or crash. To avoid that, the registry is checkpointed to MongoDB.
-
-**Storage.** A single document in the `metrics_state` collection (fixed `_id`
-`"metrics:singleton"`) holds the latest `metrics.snapshot()`. See the
-[`metrics_state` collection](database.md) for the schema and the
-`save_metrics_state` / `load_metrics_state` accessors.
-
-**Lifecycle** (wired in [`main.py`](../../main.py)):
-
-1. **Startup** — after `init_db()`, `load_persisted_metrics()` reads the saved snapshot and calls
-   `metrics.load_state(...)`. Counters and timer `count`/`sum` are *added* to the (empty) registry
-   so totals are restored and keep accumulating; timer `max` takes the larger value; gauges are
-   replaced (they are point-in-time). A missing or malformed document simply leaves the registry
-   empty — it never blocks startup.
-2. **Periodically** — `start_metrics_persister()` flushes the snapshot every
-   **`METRICS_PERSIST_INTERVAL_SECS`** seconds (default `300`; `0` disables the periodic flush) so
-   the data survives an unclean crash, not just a graceful shutdown.
-3. **Shutdown** — `flush_metrics()` runs once in `main.py`'s `finally` block (and the persister loop
-   also flushes on cancellation), so the session's final totals are always captured.
-
-Every step is best-effort: persistence is observability data and must never raise into a caller or
-crash a loop, so all failures are logged at debug and swallowed.
-
-[Back to top](#table-of-contents)
-
----
-
-## `/health` and `/metrics` message formatting
-
-Both reports are rendered as Telegram **HTML** (`parse_mode="HTML"`) by helpers in
-[`app/handlers/commands.py`](../../app/handlers/commands.py):
-
-- Section titles use `<b>…</b>` with emoji markers (🩺 health, 📊 metrics, 🤖 LLM-by-task,
-  🔢 counters, 📈 gauges, ⏱ timers).
-- Tabular data is wrapped in `<pre>` blocks and column-aligned by the `_mono_table(...)` helper, so
-  numbers line up in a monospace font on the client.
-- `_fmt_uptime(secs)` renders uptime as `2d 3h 4m 5s` (zero units trimmed); `_fmt_secs(v)` renders
-  latencies as `120ms` / `0.84s`, and `—` for zero/absent values.
-- Status and MongoDB readiness show 🟢/🟠 and ✅/⚠️ indicators.
-- All interpolated content is escaped with `html.quote(...)` so a metric name can never break the
-  HTML, and empty sections render a plain `<i>none</i>`.
-
-[Back to top](#table-of-contents)
-
-[Back to top](#table-of-contents)
-
----
-
-## Startup / shutdown notices on the logs channel
-
-[`main.py`](../../main.py) posts two best-effort lifecycle notices to the Telegram **logs
-channel** (`LOGS_CHANNEL_ID`) via [`log_forwarder.send`](../../app/services/log_forwarder.py):
-
-- **Startup** — sent just before long-polling begins, after the bot identity is resolved:
-
-  ```
-  🚀 @yourbot started — polling Telegram.
-  🕐 2026-06-14 23:00:00 UTC
-  ```
-
-- **Shutdown** — sent in the `finally` block (so it fires on Ctrl+C and on container
-  stop/redeploy alike) before the HTTP session closes, including the session uptime:
-
-  ```
-  🛑 @yourbot shutting down.
-  ⏱ uptime 2h 15m 25s
-  ```
-
-Both go through `log_forwarder.send`, which is a no-op when `LOGS_CHANNEL_ID` is unset and
-swallows any delivery error, so a missing or unreachable channel never blocks startup or a clean
-shutdown. The bot-identity lookup (`get_me`) is also guarded and falls back to `"ThinkMate"`.
-
-[Back to top](#table-of-contents)
+[Documentation index](../README.md)

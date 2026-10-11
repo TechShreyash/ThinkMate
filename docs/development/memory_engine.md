@@ -1,451 +1,104 @@
-# Sliding Window Memory Engine Details
-
-This document covers the core memory architecture of ThinkMate, detailing the sliding window extraction pipeline, memory loader block compilers, and memory compressors. All components are updated to use Pydantic models and MongoDB.
+# Memory engine
 
-The *memory engine* is the subsystem that lets ThinkMate remember a user across conversations without ever feeding an ever-growing transcript to the language model. It does this with a **sliding window**: only the most recent messages are kept verbatim in a short-lived buffer, while older messages are distilled into a compact, long-lived **memory profile** (facts, beliefs, events, mood, and — later — behavioral insights). The compiled profile is the **memory block** that gets injected into the system prompt on each reply, so the bot stays informed while the prompt stays bounded.
+ThinkMate keeps recent conversation text in a chat buffer and extracts longer-lived context into MongoDB profiles. Replies use a compiled profile plus the current buffer. This is a lossy memory system: it summarizes, merges, and drops information rather than preserving a complete conversation archive.
 
-Three priorities shape every design decision in this engine, in order: **responsiveness** (never block the user's reply on bookkeeping), **robustness** (never lose or corrupt memory, even during an LLM outage), and **minimizing LLM calls** (each call costs latency and money). Throughout this guide, the *hot path* means the per-message request/response flow that produces a reply; anything that can run after the reply is pushed off the hot path into a background task.
+Start with [architecture](../architecture.md) for the request flow. See [database](database.md) for stored fields, [LLM integration](llm_integration.md) for output contracts, and [configuration](configuration.md) for environment settings.
 
-### What this guide covers
-
-- **🛠️ Chat Manager Orchestration** — the per-message entry point that ties everything together: append the message, trigger background work when buffers or budgets are exceeded, compile the prompt, and make a single LLM call.
-- **🔍 Memory Extraction Logic** — how a full buffer window is summarized into durable memory, with retries and a "trim anyway on failure" safety rule.
-- **🧹 Memory Compression** — how an over-budget profile is shrunk without ever wiping memory on failure.
-- **🔒 Shared Task Concurrency Lock** — the per-user lock that keeps extraction, compression, and consolidation from racing each other.
-- **👥 Multi-Party Extraction in Groups** *(Phase 9)* — how group chats share one buffer but keep memory per user.
-- **🌙 Phase 11 — Periodic consolidation** — the long-horizon "dreaming" pass that reviews the whole profile and synthesizes behavioral insights.
-- **⏰ Phase 12 — Temporal context & emotional continuity** — small, additive features that give the bot a sense of time and a mood trend.
-
-For sibling subsystems, see the group-chat flow in [group_chat.md](group_chat.md), the LLM schemas in [llm_integration.md](llm_integration.md), and the tunable keys in [configuration.md](configuration.md).
-
----
-
-## 🛠️ Chat Manager Orchestration (`chat_manager.py`)
-
-The orchestration process in [chat_manager.py](../../app/services/chat_manager.py) coordinates message updates, triggers memory extraction, compiles prompts, and runs chat generation:
-
-```python
-# app/services/chat_manager.py
-import asyncio
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config import config
-from app.database import models
-from app.services.llm_service import llm_service          # shared singleton
-from app.services.memory_loader import build_memory_block
-from app.prompts.system_prompt import build_system_prompt
-
-async def handle_message(
-    db: AsyncIOMotorDatabase, user_id: int, user_text: str
-) -> tuple[str, str | None]:
-    # 1. Append the user message; the returned array gives char count + active
-    #    history in a single round-trip (no separate buffer reads).
-    messages = await models.add_message_to_buffer(db, user_id, "user", user_text)
-    buffer_chars = sum(len(m["content"]) for m in messages)
-    active_history = [{"role": m["role"], "content": m["content"]} for m in messages]
-
-    # 2. Buffer overflow -> non-blocking background extraction. New/sparse users use a
-    #    lower trigger (NEW_USER_EXTRACTION_CHARS) so their profile builds fast; established
-    #    users use CHAT_BUFFER_MAX_CHARS. See models.count_memory_items + the trigger note below.
-    extraction_threshold = config.CHAT_BUFFER_MAX_CHARS
-    if await models.count_memory_items(db, user_id) < config.NEW_USER_MEMORY_THRESHOLD:
-        extraction_threshold = min(config.NEW_USER_EXTRACTION_CHARS, config.CHAT_BUFFER_MAX_CHARS)
-    if buffer_chars >= extraction_threshold:
-        from app.services.user_task_manager import user_task_manager
-        asyncio.create_task(user_task_manager.run_extractor(user_id))
-
-    # 3. Assemble the system prompt (persona is cached by mtime; see _load_persona).
-    memory_block, needs_compression = await build_memory_block(db, user_id)
-    system_prompt = build_system_prompt(_load_persona(), memory_block)
-
-    # 4. ONE LLM call -> reply + optional reaction.
-    reply_text, reaction = await llm_service.generate_reply_bundle(
-        user_id, system_prompt, active_history
-    )
-
-    # 5. Persist the assistant reply.
-    await models.add_message_to_buffer(db, user_id, "assistant", reply_text)
-
-    # 6. Memory over budget -> rate-limited background compression.
-    if needs_compression:
-        from app.services.user_task_manager import user_task_manager
-        asyncio.create_task(user_task_manager.run_compressor(user_id))
-
-    return reply_text, reaction
-```
-
-> The persona file is read through `_load_persona`, which re-reads only when the file's mtime
-> changes — preserving "edit persona without restart" while avoiding a blocking disk read on
-> every message. The reply and reaction are produced in a single call, so the batch processor
-> simply applies the returned reaction and sends the reply.
-
----
-
-## 🔍 Memory Extraction Logic (`memory_extractor.py`)
-
-The memory extraction pipeline in [memory_extractor.py](../../app/services/memory_extractor.py) extracts key details from conversation histories and saves them to the database. All LLM access goes through the shared `llm_service` singleton (one client/connection pool per process).
-
-The extraction call is **retried up to `MAX_EXTRACTION_ATTEMPTS` (3) times**, and the buffer is **re-read on every attempt** so messages that arrive while a slow call is in flight are folded into the next attempt rather than missed. Success vs. failure is distinguished by `extract_memory` returning a value vs. `None` — an *empty* `MemoryExtraction` still counts as success (nothing was worth saving). If every attempt fails (e.g. an LLM outage), the oldest messages are trimmed anyway so the buffer stays bounded; memory is never written on a failed run.
-
-**Adaptive trigger for new users.** The extraction trigger is not a single fixed threshold. A user whose stored memory items (facts + beliefs + events, via `models.count_memory_items`) number fewer than `NEW_USER_MEMORY_THRESHOLD` is treated as "new/sparse" and extracts at the lower `NEW_USER_EXTRACTION_CHARS` (capped at `CHAT_BUFFER_MAX_CHARS`), so a fresh profile starts capturing memories quickly. Established users fall back to the normal `CHAT_BUFFER_MAX_CHARS`.
-
-**Date-stamped transcript + date normalization.** Each line of the transcript handed to the model is prefixed with the sending date (`[YYYY-MM-DD]`, from the message's `created_at`), and the prompt is given a `=== CURRENT DATE ===` block. The extraction prompt's *Date Normalization* rules require every event `date` to be an absolute ISO date (`YYYY-MM-DD` / `YYYY-MM` / `YYYY`) resolved from any relative reference ("yesterday", "last week") against the message's own date — never a vague word like "today" or "recent". This keeps the life-events timeline accurate even when extraction runs well after the conversation happened.
-
-```python
-# app/services/memory_extractor.py
-from loguru import logger
-from app.config import config
-from app.database.connection import db_session
-from app.database import models
-from app.services.llm_service import llm_service          # shared singleton
-from app.services.memory_loader import build_memory_block
-from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
-
-MAX_EXTRACTION_ATTEMPTS = 3  # max extraction LLM calls per run; each re-snapshots the buffer
-
-async def extract_and_trim(user_id: int):
-    logger.info(f"Memory extraction started for user {user_id}.")
-    keep_count = config.CHAT_BUFFER_TRIM
-    try:
-        for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
-            async with db_session() as db:
-                buffer_messages = await models.get_chat_buffer(db, user_id)
-                if len(buffer_messages) <= keep_count:
-                    return  # nothing left (a concurrent run may have trimmed it)
-
-                trim_size = len(buffer_messages) - keep_count
-                segment = buffer_messages[:trim_size]            # oldest messages
-                current_memory_text, _ = await build_memory_block(db, user_id)
-                instruction_prompt = (
-                    f"{SYSTEM_EXTRACTION_PROMPT}\n\n"
-                    f"=== CURRENT MEMORIES ===\n{current_memory_text}\n"
-                )
-
-                extraction = await llm_service.extract_memory(
-                    user_id=user_id,
-                    system_prompt=instruction_prompt,
-                    user_history_text=_format_segment(segment),
-                )
-                if extraction is not None:                       # success (may be empty)
-                    await models.save_extracted_memories(db, user_id, extraction)
-                    await models.delete_oldest_buffer_messages(db, user_id, trim_size)
-                    return
-            logger.warning(f"Extraction attempt {attempt}/{MAX_EXTRACTION_ATTEMPTS} failed.")
-
-        # Every attempt failed -> trim anyway so an outage can't grow the buffer unbounded.
-        async with db_session() as db:
-            buffer_messages = await models.get_chat_buffer(db, user_id)
-            if len(buffer_messages) > keep_count:
-                await models.delete_oldest_buffer_messages(db, user_id, len(buffer_messages) - keep_count)
-    except Exception as e:
-        logger.error(f"Extraction pipeline failed for user {user_id}: {e}")
-```
-
----
-
-## 🧹 Memory Compression (`memory_compressor.py`)
-
-To prevent profile bloat and respect context limits, `memory_compressor.py` runs when the
-compiled memory block exceeds `USER_MEMORY_BUDGET_CHARS` (default `10000`). It runs as a
-background task (off the hot path) and uses the shared `llm_service` singleton.
-
-Two correctness/efficiency properties matter here:
-
-1. **Never wipe memory on failure.** `compress_memory` returns `None` when the LLM call fails;
-   in that case the replace step is **skipped**, so existing memory is preserved.
-2. **Single-pass budget enforcement.** Models can't count characters reliably, so after the LLM
-   pass a deterministic enforcement drops the lowest-priority items (oldest events → beliefs →
-   facts) until the block fits — computed **in memory from a single read** and persisted in
-   **one write**, not a per-item read/write loop. A per-user cooldown
-   (`COMPRESSION_COOLDOWN_SECS`) prevents a re-trigger loop.
-
-```python
-# app/services/memory_compressor.py
-from loguru import logger
-from app.config import config
-from app.database.connection import db_session
-from app.database import models
-from app.services.llm_service import llm_service          # shared singleton
-from app.services.memory_loader import build_memory_block
-from app.prompts.compression_prompt import SYSTEM_COMPRESSION_PROMPT
-
-async def compress_user_memory(user_id: int):
-    try:
-        async with db_session() as db:
-            memory_text, _ = await build_memory_block(db, user_id)
-            target = int(config.USER_MEMORY_BUDGET_CHARS * 0.8)
-            system_prompt = (
-                f"{SYSTEM_COMPRESSION_PROMPT}\n\n"
-                f"TARGET CHARACTER BUDGET: {target} characters.\n"
-                f"Your compressed memory profile MUST fit within {target} characters."
-            )
-            compression = await llm_service.compress_memory(user_id, system_prompt, memory_text)
-            if compression is None:
-                logger.warning(f"Compression failed for user {user_id}; keeping existing memory.")
-                return                                     # never wipe on failure
-            await models.replace_user_memory(db, user_id, compression)
-            await _enforce_budget(db, user_id)             # single read + single write
-    except Exception as e:
-        logger.error(f"Compression failed for user {user_id}: {e}")
-```
-
-> The caller (`UserTaskManager.run_compressor`) enforces the per-user cooldown and acquires the
-> shared `memory_lock` so compression never races the extractor.
-
----
-
-## 🔒 Shared Task Concurrency Lock
-Because extraction and compression are executed asynchronously, concurrency issues can arise where the extractor and compressor write or modify user memory simultaneously. 
-
-To prevent data corruption, a unified `memory_lock = asyncio.Lock()` is initialized inside `UserState` inside the `UserTaskManager`. The manager acquires this lock before initiating both the `run_extractor` and `run_compressor` background tasks, guaranteeing sequential executions per user.
-
----
-
-## 👥 Multi-Party Extraction in Groups *(Phase 9, implemented)*
-
-In group chats the buffer is shared (`chat_id`-keyed) and each message carries `sender_id` +
-`sender_name`. Memory has two layers: a **shared group profile** keyed by `chat_id` for
-group-level norms, recurring topics, decisions, and plans, plus **participant profiles** keyed by
-`user_id` for personal facts/beliefs/events. The single entry point
-`extract_and_trim(chat_id)` dispatches DM vs. group with a distinct-human-sender heuristic
-(`_is_group_buffer`: more than one distinct human `sender_id` among the buffered user turns ⇒
-group), so no caller has to change — a DM has exactly one human sender and takes the original
-single-party path unchanged.
-
-The group path, `extract_and_trim_group(chat_id)`:
-
-1. Reads the raw buffer (with sender attribution) and takes the segment to extract — everything
-   except the most recent `CHAT_BUFFER_TRIM` messages — re-read on each of
-   `MAX_EXTRACTION_ATTEMPTS` attempts so messages arriving mid-call fold into the next attempt.
-2. Makes **one** `llm_service.extract_group_memory` call over the whole segment (rendered as
-   `"SenderName: content"` lines), not one call per participant. It returns a
-   `GroupMemoryExtraction` with an optional `group_extraction` block and participant `updates`
-   tagged by participant **name**.
-3. Ensures a shared group profile exists (`user_profiles._id = chat_id`) and records the latest
-   group-extraction status. When `group_extraction` contains durable group-level updates, those are
-   saved into that shared profile.
-4. Maps each tagged name back to a `sender_id` using the segment's **own** normalized name→id
-   map (`_build_name_id_map`). On duplicate display names, **first id wins**; names that can't be
-   resolved are **skipped** rather than misattributed.
-5. Saves each resolved update into that participant's profile via the same normalized, deduped
-   `save_extracted_memories` CRUD, then **atomically trims** the processed segment.
-6. If every attempt fails, the oldest messages are trimmed anyway (all-fail-still-trim), matching
-   the DM contract, so an outage can't grow the buffer unbounded.
-
-DMs are unchanged (a single participant). See [group_chat.md](group_chat.md) and the
-`GroupMemoryExtraction` schema in [llm_integration.md](llm_integration.md).
-
----
-
-## 🌙 Phase 11 — Periodic consolidation (the "dreaming" pass) *(implemented)*
-
-Localized extraction (above) only ever sees one recent buffer window, and compression only fires
-when the compiled profile is over budget. Neither can step back and look at the user's **whole**
-profile over a long horizon. Phase 11 adds that long-horizon pass — a periodic background
-"dreaming" step that reviews the complete profile to refresh the summary/style, merge and
-de-duplicate items, and synthesize a small set of durable **behavioral insights** that only emerge
-across the entire history.
-
-It is modeled directly on compression: **one LLM call, a single-write apply, never-wipe-on-failure,
-deterministic budget enforcement, and metrics**. It runs entirely off the hot path and is
-**enabled by default** on a daily cadence (see
-[configuration.md](configuration.md#-consolidation-phase-11)).
-
-### Pipeline
-
-The flow is: **scheduler → `run_consolidator` (under `memory_lock`) → one `consolidate_memory` call
-→ `apply_consolidation` (single write) → `_enforce_budget`**.
-
-1. **Scheduler** ([health.py](../../app/services/health.py)) — `start_consolidation_scheduler`
-   starts a periodic loop (`_consolidation_loop`) when enabled, mirroring the Phase 10 metrics
-   logger. It is:
-   - **Periodic** — every `CONSOLIDATION_SCAN_INTERVAL_SECS` (default `3600`) it runs one scan.
-   - **Opt-out by interval** — when `CONSOLIDATION_INTERVAL_SECS <= 0` the starter is a no-op and
-     returns `None`, so the feature is entirely off when explicitly disabled. `main.py` starts the
-     scheduler after `init_db()`, under the same asyncio loop.
-   - **Bounded per scan** — each `_run_consolidation_scan` processes at most
-     `CONSOLIDATION_MAX_USERS_PER_SCAN` (default `50`) due users.
-   - **Self-healing** — one user's failure is logged and skipped without aborting the scan, and any
-     loop-iteration error is swallowed so the loop never crashes (it only exits on cancellation).
-2. **`run_consolidator`** ([user_task_manager.py](../../app/services/user_task_manager.py)) —
-   dispatches each due user under that conversation's shared `memory_lock`, so consolidation never
-   races the extractor or compressor for the same id. No per-user cooldown is needed — cadence is
-   governed by `last_consolidated_at` at scan time (see "due" below).
-3. **`consolidate_user_memory`** ([memory_consolidator.py](../../app/services/memory_consolidator.py))
-   — builds the memory block, makes **one** `consolidate_memory` LLM call, applies the result in a
-   single write, then enforces the budget. It increments `consolidation.runs` on entry and
-   `consolidation.success` / `consolidation.failure` on outcome; it never raises into the scheduler.
-4. **`apply_consolidation`** ([models.py](../../app/database/models.py)) — a single-`$set` write
-   (mirroring `replace_user_memory`) that refreshes summary/style (only when present), replaces
-   facts/beliefs/events with the merged layouts, preserves the latest emotional state, writes the
-   bounded `insights` list, and advances `last_consolidated_at` / `updated_at`.
-5. **`_enforce_budget`** — the same deterministic, single-read/single-write enforcement reused from
-   the compressor, so the consolidated profile still fits `USER_MEMORY_BUDGET_CHARS`.
-
-```python
-# app/services/memory_consolidator.py (essence)
-async def consolidate_user_memory(user_id: int) -> None:
-    metrics.incr("consolidation.runs")
-    try:
-        async with db_session() as db:
-            memory_text, _ = await build_memory_block(db, user_id)
-            consolidation = await llm_service.consolidate_memory(user_id, system_prompt, memory_text)
-            if consolidation is None:
-                metrics.incr("consolidation.failure")
-                return                                  # never wipe — and don't advance the clock
-            await models.apply_consolidation(db, user_id, consolidation)
-            await _enforce_budget(db, user_id)          # single read + single write
-            metrics.incr("consolidation.success")
-    except Exception as e:
-        metrics.incr("consolidation.failure")
-```
-
-### The never-wipe contract
-
-Like compression, consolidation **never wipes memory on failure**: `consolidate_memory` returns
-`None` when the LLM call fails or the JSON can't be validated. On `None` the write is **skipped**,
-so existing memory is preserved. Crucially, a `None` result **also does not advance**
-`last_consolidated_at` — because the clock is only set inside `apply_consolidation`, which is never
-reached on failure. That means a failed run leaves the user **still due**, so the next scan retries
-naturally rather than silently waiting a whole interval.
-
-### Behavioral insights — a dedicated, bounded list
-
-Insights are the unique value of this pass: synthesized, higher-level reads on how the user behaves
-or who they are over time (e.g. "Tends to get stressed during exam season; values reassurance
-then"). They are produced into a **dedicated `insights` list** on the user profile, distinct from
-facts (atomic details the user shared) and beliefs (the user's own stated opinions):
-
-- **Bounded** — `apply_consolidation` truncates to `MAX_INSIGHTS` (default `5`), and the prompt is
-  also told the cap, so the list can never grow unbounded.
-- **Rendered in the prompt** — `compile_memory_text`
-  ([memory_loader.py](../../app/services/memory_loader.py)) emits a dedicated
-  `=== BEHAVIORAL INSIGHTS ===` section (it reads `insights` defensively, showing
-  `(No long-term insights yet)` when empty). `ensure_user` initializes `insights=[]` on insert.
-- **Never dropped by budget enforcement** — the deterministic enforcer only sheds the
-  lowest-priority items (oldest events → beliefs → facts). Insights are intentionally **not** in
-  that drop order, so the hard-won long-horizon synthesis survives a tight budget.
-
-**Why a dedicated list rather than folding insights into beliefs?** Beliefs are the user's *own*
-stated convictions; an insight is *the bot's* synthesized inference about patterns. Keeping them
-separate preserves that provenance distinction (so an inferred pattern is never mistaken for
-something the user explicitly said), lets insights be capped and prioritized independently, and
-keeps them safe from budget-driven eviction. The consolidation prompt enforces the same boundary —
-it must not fold an insight into facts or beliefs.
-
-### How "due" is determined
-
-`find_users_due_for_consolidation` ([models.py](../../app/database/models.py)) returns up to `limit`
-users that satisfy **both**:
-
-- **Time** — `last_consolidated_at` is null/absent **OR** older than `now - CONSOLIDATION_INTERVAL_SECS`
-  (this predicate runs in the Mongo query), and
-- **Substance** — the user has at least `CONSOLIDATION_MIN_ITEMS` (default `8`) stored items, counted
-  as `len(facts) + len(beliefs) + len(events)` (applied in Python, since array-length predicates
-  aren't portable to the mongomock test backend).
-
-Collection stops as soon as `limit` qualifying users are found, so the helper's own work is bounded.
-The `CONSOLIDATION_MIN_ITEMS` floor avoids spending an LLM call "dreaming" over a profile too thin to
-yield any durable pattern.
-
-> See [configuration.md](configuration.md#-consolidation-phase-11) for every consolidation key, its
-> default, and tuning guidance, and the `MemoryConsolidation` / `ConsolidatedInsight` schemas in
-> [schemas.py](../../app/services/schemas.py).
-
----
-
-## ⏰ Phase 12 — Temporal context & emotional continuity *(implemented)*
-
-Phase 12 makes the bot feel less amnesiac between conversations with two small, **additive** memory
-features that ride the existing pipeline — no new heavy machinery, no migration, and everything new
-is read **defensively** so older profiles (written before Phase 12) render exactly as before. Both
-features were designed under the same priority order as the rest of the engine:
-**responsiveness → robustness → minimize LLM calls.** Neither adds an LLM call, and the hot path
-gains at most **one** combined Mongo round-trip.
-
-> The proactive check-in scheduler (the third Phase 12 engagement feature) lives off the hot path
-> and is documented in [configuration.md](configuration.md#-proactive-check-ins-phase-12),
-> [observability.md](observability.md#proactive-check-in-metrics-phase-12), and
-> [telegram_bot.md](telegram_bot.md#-engagement-commands-phase-12-implemented).
-
-### Temporal context — "now" and "last talked"
-
-The model previously had no sense of *when* it was talking or how long it had been since the last
-exchange. Phase 12 threads a small, optional time context into the system prompt:
-
-- **A new `## ⏰ TIME CONTEXT` section** in [system_prompt.py](../../app/prompts/system_prompt.py).
-  `build_system_prompt` gains an optional third parameter, `time_context: str = ""`, and renders the
-  section **only when it is non-empty**. Existing two-argument calls (and the empty default) produce
-  the prior prompt byte-for-byte, so nothing else changes.
-- **`last_interaction_at`** — a new timestamp on the user profile. On the **DM hot path only**,
-  `chat_manager.handle_message` records the current UTC time *and* reads the previous value in a
-  **single combined round-trip** via `models.touch_and_get_last_interaction` (a `find_one_and_update`
-  with `return_document=BEFORE`). It does **not** upsert — a user without a profile is a harmless
-  no-op returning `None` — and it never runs on the group path (groups pass an empty `time_context`,
-  so the group prompt is unchanged).
-- **A coarse "last talked" gap.** A pure helper, `build_time_context(now, prev)`, renders the
-  current UTC date/time plus a human gap in **coarse units** — minutes, hours, or days, never raw
-  seconds. On a user's first-ever interaction (`prev is None`) it renders only the date/time and
-  fabricates no gap.
-
-Because the gap is computed from one timestamp and the section is default-empty, this adds no LLM
-call and only the single combined read-then-set to the hot path.
-
-### Gender inference — stable reply context
-
-The bot used to have no notion of the user's gender, so it would sometimes mis-gender people (for
-example, addressing a male user as if he were female). Gender is now an AI-inferred, first-class
-profile field rather than a free-text fact, so it stays stable and is always visible to the reply
-model.
-
-- **Extracted with the rest of memory.** The extraction prompt
-  ([extraction_prompt.py](../../app/prompts/extraction_prompt.py)) instructs the model to set
-  `profile_updates.gender` to one of `male` / `female` / `non-binary` — but **only on a confident
-  signal**: explicit self-identification, self-referential gendered terms ("my wife", "as a guy"),
-  pronouns, or grammatical gender in gendered languages (e.g. Hindi `मैं गया` vs `मैं गई`). When the
-  signal is absent or ambiguous (including guessing from a name alone), it leaves the field null.
-  This works for both the DM and group paths since both share `SYSTEM_EXTRACTION_PROMPT` and the
-  `MemoryExtraction` schema.
-- **Persisted as a top-level field.** `save_extracted_memories`
-  ([models.py](../../app/database/models.py)) writes `gender` only when the extractor emits a value,
-  so an uncertain run never clears a previously-known value. Because `gender` is a dedicated
-  top-level field (seeded as `None` in both profile skeletons), it **survives compression and
-  consolidation** — those phases `$set` only their own fields and never touch it, unlike a fact
-  which could be merged or dropped.
-- **Surfaced in the prompt.** `compile_memory_text`
-  ([memory_loader.py](../../app/services/memory_loader.py)) renders a `Gender:` line inside the
-  `=== USER PROFILE ===` block (showing `Unknown` until inferred), so every reply the model writes
-  has the user's gender in context.
-
-### Emotional continuity — a bounded mood history
-
-ThinkMate already tracked a *current* `emotional_state`, but overwrote it each time, so it could
-never see a **trend**. Phase 12 keeps a short, bounded history:
-
-- **Append on write.** Whenever `save_extracted_memories`
-  ([models.py](../../app/database/models.py)) writes a new `emotional_state`, it also appends a
-  matching entry (`{mood, intensity, trigger, detected_at}`) to a `mood_history` list — in the
-  **same single `$set` write**, no extra round-trip. The list is bounded to `MAX_MOOD_HISTORY`
-  (default `10`); once full, the oldest entry is dropped. `ensure_user` initializes
-  `mood_history: []` on insert.
-- **Render a trend.** Within the existing `=== CURRENT MOOD ===` block,
-  `compile_memory_text` ([memory_loader.py](../../app/services/memory_loader.py)) appends a short
-  oldest→newest trend line (a comma-joined list of recent mood words) after the current-mood line.
-  It reads `mood_history` defensively, so a profile without one renders exactly as before — no extra
-  line, no error.
-- **Exempt from budget shedding.** `mood_history` is its own tiny, bounded list and is **not** part
-  of the deterministic budget enforcer's drop order (oldest events → beliefs → facts). The rendered
-  trend is only ever a handful of short words, so its contribution is small and capped; the enforcer
-  never needs to (and never does) drop it.
-
-### No migration, defensive reads
-
-All new profile fields — `last_interaction_at`, `mood_history`, plus the proactive-feature fields
-`onboarded`, `last_proactive_at`, and `proactive_enabled` — are **additive** and read defensively
-(`doc.get("mood_history") or []`, `doc.get("last_interaction_at")`, `doc.get("proactive_enabled")`).
-There is **no migration step**: a profile created before Phase 12 simply lacks the fields and is
-treated as "never seen on the DM hot path / no mood history yet / eligible-but-not-yet-due," which
-is exactly the desired default.
-
-> See [configuration.md](configuration.md#-engagement--mood-history-phase-12) for `MAX_MOOD_HISTORY`
-> and the proactive keys, and [telegram_bot.md](telegram_bot.md#-engagement-commands-phase-12-implemented)
-> for the `/onboard` and `/checkins` commands.
+## Components
+
+| Module | Responsibility |
+| --- | --- |
+| [chat_manager.py](../../app/services/chat_manager.py) | Append a responding batch, assemble context, generate and store a reply, schedule memory work. |
+| [memory_loader.py](../../app/services/memory_loader.py) | Compile a profile into prompt text and report whether it exceeds the memory budget. |
+| [memory_extractor.py](../../app/services/memory_extractor.py) | Extract updates from older buffer messages, then trim the buffer. |
+| [memory_compressor.py](../../app/services/memory_compressor.py) | Replace an oversized profile with a condensed result and shed items if necessary. |
+| [memory_consolidator.py](../../app/services/memory_consolidator.py) | Review an existing profile, merge items, and synthesize behavioral insights. |
+| [user_task_manager.py](../../app/services/user_task_manager.py) | Coordinate background tasks with an in-process lock per conversation and a compression cooldown. |
+| [health.py](../../app/services/health.py) | Schedule periodic consolidation and proactive check-ins. |
+| [models.py](../../app/database/models.py) | Apply updates and maintain buffers in MongoDB. |
+
+## Reply context and triggers
+
+For a responding batch, `handle_message` appends the combined user text and builds history from the returned buffer. It schedules extraction when the sum of buffered content lengths reaches the applicable threshold. It then loads memory, assembles the persona and system prompt, generates the reply bundle, appends the assistant reply, and schedules compression if the loaded memory was oversized.
+
+Background extraction is not awaited before generation. A reply can therefore use the profile as it existed before that extraction completed. Compression is scheduled after reply generation succeeds; it does not truncate the context of the current request.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CHAT_BUFFER_MAX_CHARS` | `4000` | Extraction trigger for established profiles; not a strict buffer character cap. |
+| `NEW_USER_EXTRACTION_CHARS` | `1000` | Earlier trigger when the stored item count is below `NEW_USER_MEMORY_THRESHOLD`. Capped by `CHAT_BUFFER_MAX_CHARS`. |
+| `NEW_USER_MEMORY_THRESHOLD` | `10` | Count of facts + beliefs + events used to select the earlier trigger. |
+| `CHAT_BUFFER_TRIM` | `8` | Number of recent buffer entries excluded from extraction. |
+| `CHAT_BUFFER_HARD_CAP` | `200` | Maximum retained entries after an append; oldest entries fall out even without extraction. |
+| `USER_MEMORY_BUDGET_CHARS` | `10000` | Compression trigger based on the compiled profile text. |
+| `COMPRESSION_COOLDOWN_SECS` | `300` | Minimum gap between compressor runs for an active conversation state. |
+
+These counts apply to stored entries, which can be combined batches or assistant turns, not necessarily individual Telegram messages. The memory budget excludes the persona, system instructions, active history, and any additional group participant block. It is not a model token or total context limit.
+
+In groups, [messages.py](../../app/handlers/messages.py) also buffers accepted text when the bot does not reply. The shared buffer and group profile use `chat_id`; each person's profile uses `user_id`. The reply prompt includes the group profile and the triggering sender's personal profile. Only the group block's size triggers compression in this reply path. See [group chat](group_chat.md) for routing and buffering details.
+
+## Extraction
+
+`extract_and_trim(chat_id, is_group=...)` uses the explicit Telegram chat type passed through the task manager. Direct callers that omit the hint use a fallback heuristic: more than one distinct human sender selects group extraction. That heuristic can misclassify a group with one active speaker.
+
+Each extraction run makes up to three logical extraction attempts:
+
+1. Read the raw buffer, including sender attribution and timestamps. Return immediately if there are no entries beyond `CHAT_BUFFER_TRIM`.
+2. Select everything except the latest retained entries and render a date-stamped transcript.
+3. Ask the LLM for structured updates. DM extraction also includes the current compiled profile; group extraction currently does not include existing group or participant profiles.
+4. On a non-`None` result, save updates and trim the oldest selected count. A valid empty result still counts as success and the selected history is trimmed.
+5. On `None`, reread the buffer for the next attempt. After three unsuccessful attempts, trim the oldest entries anyway. This intentionally loses unextracted history during sustained LLM failure.
+
+Transport retries inside each logical attempt are separate; see [LLM integration](llm_integration.md). Database or other pipeline exceptions are logged and end the run, rather than entering the `None` retry path.
+
+The extraction prompt asks for English memory text, preservation of proper nouns, and absolute event dates resolved against each message's UTC date. These are model instructions. Event dates are nullable strings, without a calendar-format validator.
+
+### Group attribution
+
+A group attempt uses one `GroupMemoryExtraction` result containing optional shared `group_extraction` and participant `updates`:
+
+- Shared updates are saved under the group `chat_id`.
+- Participant names are matched to sender IDs from the extracted segment using case folding and collapsed whitespace. Unknown names are skipped.
+- If two people share a display name, the first ID seen wins. This deterministic tie-break does not establish correct identity; attribution remains ambiguous.
+- A group profile marker records whether shared memory was saved and how many participant updates were saved or skipped, including on an otherwise empty successful result.
+- Participant writes, the group marker, and buffer trim are separate operations. A failure can leave some updates saved while history remains available for re-extraction.
+
+## Compiling memory
+
+`compile_memory_text` is a pure function that renders summary, inferred gender, communication style, facts, beliefs, behavioral insights, events, current mood, and a recent mood trend. Missing fields produce empty/default sections. `compile_memory_block` pairs that text with `len(text) > USER_MEMORY_BUDGET_CHARS`; `build_memory_block` first fetches the profile.
+
+DM replies record `last_interaction_at` and reset the unanswered-check-in streak with a combined read/update, returning the previous interaction timestamp for a coarse gap. Group replies include current time context without updating the personal interaction timestamp. Time context includes fixed reference UTC offsets, so it is approximate for regions with daylight saving time; it is not a per-user timezone setting.
+
+Gender is inferred by the extraction model into a dedicated field, with instructions to avoid guessing from a name. It is not verified identity. Compression and consolidation do not modify this field.
+
+Extraction mood updates also append to `mood_history`, retaining the latest `MAX_MOOD_HISTORY` entries (default `10`). Compression and consolidation can replace the current mood but do not append to this history. The displayed trend therefore represents extraction-time observations, not every conversational mood change.
+
+## Compression and budget enforcement
+
+Compression sends the compiled profile to the memory model with a target of 80% of `USER_MEMORY_BUDGET_CHARS`. A `None` result skips replacement. A validated result replaces facts, beliefs, and events, including when those returned lists are empty. It updates summary/style only when non-null and mood only when provided; identity, gender, preferences, insights, and mood history remain in the document.
+
+The deterministic post-pass reads the profile once and removes items from the front of the arrays in this order: events, then beliefs, then facts. It recomputes rendered length locally and writes changed arrays once. This is array order, not a sort by event date or significance, so a major event can be removed.
+
+The post-pass stops when the text fits or all three arrays are empty. Summary, style, insights, mood, and section headers are not shortened, so fitting the budget is not guaranteed. Compression also rebuilds item timestamps and clears event emotional context; the original item metadata is not an archive.
+
+## Periodic consolidation
+
+The scheduler checks profiles after each `CONSOLIDATION_SCAN_INTERVAL_SECS` (default `3600`). A profile is due when `last_consolidated_at` is absent/null or older than `CONSOLIDATION_INTERVAL_SECS` (default `86400`), and facts + beliefs + events total at least `CONSOLIDATION_MIN_ITEMS` (default `8`). The query does not filter out shared group profiles.
+
+Each scan selects up to `CONSOLIDATION_MAX_USERS_PER_SCAN` qualifying profiles (default `50`) and processes them sequentially. Item-count filtering occurs in Python, so finding those profiles can read more than 50 documents. Set `CONSOLIDATION_INTERVAL_SECS <= 0` to disable the scheduler.
+
+Consolidation sends the compiled current profile, not the full conversation history. On `None`, it leaves memory and the consolidation timestamp unchanged, allowing a later scan to retry. On a validated result it replaces facts/beliefs/events and insights, updates optional summary/style/mood, advances `last_consolidated_at`, and runs the same budget post-pass. Insights are capped at `MAX_INSIGHTS` (default `5`) and are model inferences rendered separately from user-stated beliefs.
+
+## Concurrency and retention limits
+
+The task manager's `memory_lock` coordinates extraction, compression, and consolidation for the same conversation in one process. Busy requests are skipped, not queued. Chat generation has a separate lock, so normal appends can continue during memory work. Compression cooldown state is in memory and is lost when the state is evicted or the process restarts.
+
+This lock is not a distributed lock. Group extraction holds the group conversation lock while writing participant profiles; it does not acquire each participant's DM lock. Concurrent work from a DM or another group can overwrite read/modify/write updates to the same person. MongoDB makes each write atomic, but the entire read/modify/write sequence and save/trim pipeline are not transactions.
+
+Timestamp-cutoff trimming preserves later appends on the normal path. The timestamp clock is monotonic only within one process. Legacy entries without a cutoff timestamp and whole-buffer deletion use array replacement; hard-cap eviction during a slow extraction can also change the oldest entries counted at trim time. These paths do not provide exact snapshot retention guarantees.
+
+Profiles can contain personal facts, health details, inferred gender, moods, and behavioral insights. They are sent to the configured LLM, and a person's global profile can inform group replies. For reset scope and external backups, see [database: reset and data retention](database.md#reset-and-data-retention).
+
+## Relevant tests
+
+[test_hardening.py](../../tests/test_hardening.py) covers normal concurrent-appends trimming, hard caps, normalized fact deduplication, retry rereads, and failure trimming. [test_group_extraction.py](../../tests/test_group_extraction.py) covers shared/participant saves and unresolved names. [test_compression_safety.py](../../tests/test_compression_safety.py) covers `None` preservation and array shedding. The consolidation [model](../../tests/test_consolidation_models.py), [run](../../tests/test_consolidation_run.py), and [scheduler](../../tests/test_consolidation_scheduler.py) tests cover application and cadence. These mocked tests do not prove model accuracy or cross-process concurrency safety; use the [testing guide](testing_guide.md) for running them.

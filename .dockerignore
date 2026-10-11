@@ -19,7 +19,6 @@ wheels/
 .git/
 .gitignore
 .python-version
-uv.lock
 
 # Project meta not needed at runtime
 .kiro/

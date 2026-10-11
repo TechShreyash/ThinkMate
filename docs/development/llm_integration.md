@@ -1,272 +1,112 @@
-# LLM Integration, Schemas & Centralized Audit Trail
+# LLM integration
 
-This document describes how ThinkMate integrates with LLM backends, the structured-output
-strategy, the single combined reply call, retry behavior, and the MongoDB-backed audit log.
-In other words, it covers the **LLM layer** — the seam between the bot and whichever language
-model provider it talks to, plus everything that keeps those calls reliable, observable, and
-provider-agnostic.
+[LLMService](../../app/services/llm_service.py) is the shared interface to an OpenAI-compatible Chat Completions endpoint. One `AsyncOpenAI` client is created per process. The service handles retries, memory-output validation, reply parsing, audit summaries, and metrics. Endpoint compatibility is an operator responsibility; choosing a base URL does not guarantee that its server supports every response format.
 
-All LLM access goes through one shared `LLMService` instance (`app/services/llm_service.py`,
-exported as `llm_service`) so the whole process reuses a single client and connection pool.
-Routing every call through one service is what makes the patterns below — uniform retries,
-provider-portable JSON, and a single audit trail — possible to enforce in one place.
+See [configuration](configuration.md) for settings, [memory engine](memory_engine.md) for callers, [Telegram bot](telegram_bot.md) for delivery, and [database](database.md) for retained data.
 
-A few terms used throughout this guide:
+## Operations
 
-* **Structured output** — an LLM response that must conform to a fixed JSON shape so the code
-  can parse it deterministically, rather than free-form prose.
-* **Audit trail** — a stored, after-the-fact record of every LLM call (its inputs, outputs, and
-  status) used for debugging and observability, kept in the `llm_audit_log` MongoDB collection.
-* **Hot path** — the latency-sensitive code that runs while a user is waiting for a reply; work
-  that would slow it down is deferred to the background.
+| Method | Model | Output / failure behavior |
+| --- | --- | --- |
+| `generate_reply_bundle` | `LLM_MODEL` | DM: `(reply, reaction)`; group: `(reply, reaction, affinity_delta)`. API failures propagate to the batch processor. |
+| `generate_checkin` | `LLM_MODEL` | Plain text or `None` for blank/declined output and errors. |
+| `extract_memory` | `LLM_EXTRACTION_MODEL` or `LLM_MODEL` | `MemoryExtraction` or `None`. |
+| `extract_group_memory` | `LLM_EXTRACTION_MODEL` or `LLM_MODEL` | `GroupMemoryExtraction` or `None`; the audit key is a chat ID. |
+| `compress_memory` | `LLM_EXTRACTION_MODEL` or `LLM_MODEL` | `MemoryCompression` or `None`. |
+| `consolidate_memory` | `LLM_EXTRACTION_MODEL` or `LLM_MODEL` | `MemoryConsolidation` or `None`. |
 
-What's in this doc:
+All calls are non-streaming and pass `LLM_REQUEST_TIMEOUT_SECS` (default `610`). Requests do not set `max_tokens`, temperature, or a provider-specific reasoning budget. `MAX_RESPONSE_CHARS` is an application delivery cap, applied after generation; it does not limit model generation cost or context size. Telegram delivery additionally chunks text to fit its message limit.
 
-* **Structured outputs** — how JSON is coaxed out of the model and validated, and why
-  `json_object` is the default.
-* **The single combined reply call** — how one call produces both the conversational reply and
-  the optional emoji reaction (and the group-chat affinity signal).
-* **Schema definitions** — the Pydantic models for memory extraction, compression, and the
-  group-chat additions.
-* **The centralized audit trail** — how every LLM call is traced without slowing the user down.
-* **Prompt engineering templates** — the prompt builders under `app/prompts/`.
+Set the client timeout with the actual provider/proxy ceiling in mind. A client timeout can abandon a generation that continues upstream, and a retry may start duplicate work. The repository does not define or prove the external server's timeout.
 
----
+## Retries and call counts
 
-## ⚡ Structured Outputs: `json_object` by default
+The SDK client uses `max_retries=0`. `_with_retries` performs the explicit transport retry policy:
 
-Every structured call is validated against a **Pydantic** schema — Pydantic being the Python
-library that parses and type-checks JSON into typed model objects, rejecting anything malformed.
-The *mechanism* used to get JSON from the model is controlled by `LLM_STRUCTURED_MODE`:
+- Retry `APITimeoutError`, `APIConnectionError`, `RateLimitError`, and `InternalServerError`.
+- Make at most `LLM_MAX_RETRIES + 1` attempts (default `3`).
+- Sleep `LLM_RETRY_BASE_DELAY_SECS * 2**attempt` between retries (default delays `0.5`, then `1.0` seconds).
+- Propagate other errors immediately. Invalid JSON/schema validation is not retried inside this helper.
 
-* **`json_object` (default)** — sends `response_format={"type": "json_object"}` with the
-  schema appended to the system prompt, then validates the result with Pydantic. This is
-  the only mode that works across Gemini proxies, Ollama, LM Studio, and OpenRouter.
-* **`native_parse`** — uses OpenAI's `beta.chat.completions.parse`. Use this **only** on a
-  genuine OpenAI endpoint.
+The extraction pipeline separately retries a `None` result up to three logical attempts, rereading the buffer each time. With default transport retries, one extraction run can make up to nine requests in `json_object` mode. `native_parse` fallback can add another set of requests per logical attempt. A reply, compression, consolidation, or check-in normally starts one logical operation, but can also issue several transport requests.
 
-> ⚠️ **Why not native parse everywhere?** The OpenAI SDK injects `additionalProperties: false`
-> into the JSON schema. Google's Gemini backend rejects that field with a `400 INVALID_ARGUMENT`,
-> so native parsing fails on Gemini-compatible proxies. Defaulting to `json_object` avoids a
-> guaranteed failed round-trip on every extraction/compression. (Verified live, 2026-06-13 —
-> see `docs/development/hardening_plan.md`.)
+## Conversational reply parsing
 
-### Transient-error retries
-`_with_retries` wraps API calls and retries transient failures (timeout, connection, 429,
-5xx) with exponential backoff (`LLM_MAX_RETRIES`, `LLM_RETRY_BASE_DELAY_SECS`). Client errors
-like `400` are not retried, because a malformed request will fail the same way on every attempt.
-
-`_with_retries` is the **only** retry layer: the `AsyncOpenAI` client is constructed with
-`max_retries=0` so the SDK's own (default 2) retries don't stack a second, hidden layer on top
-of ours. Two independent layers would each retry timeouts and multiply concurrent generations
-on the backend.
-
-### Request timeout and the proxy-ordering rule
-Every call passes a per-request timeout sourced from a single setting,
-`LLM_REQUEST_TIMEOUT_SECS` (default `610`). It is deliberately generous — reasoning ("thinking")
-models can legitimately run for minutes, and a short ceiling would abort healthy in-flight
-generations.
-
-The critical rule: **keep the client timeout ABOVE the proxy/server's own request ceiling.**
-The two timeouts are ordered, and the order decides what a timeout *means*:
-
-- **Client < proxy** (the old `30/45/60s` vs a `180s` proxy): the client always gives up first
-  while the proxy keeps generating. Every slow-but-healthy request looks like a failure, gets
-  retried, and the retry spawns a *fresh* upstream generation while the abandoned one is still
-  running — duplicate work that compounds under load.
-- **Client > proxy** (today's `610s` vs the proxy's `600s` non-streaming cap): the proxy is
-  always the first to give up and returns a definitive error. The client never abandons work
-  that's still in flight, so a client-side timeout now only fires when something is genuinely
-  hung past the proxy's ceiling.
-
-If you change the proxy's `REQUEST_TIMEOUT`, raise `LLM_REQUEST_TIMEOUT_SECS` to stay above it.
-(ThinkMate's calls are all non-streaming, so the proxy's non-streaming cap is the one that
-matters; streaming idle-timeouts don't apply here.)
-
----
-
-## 💬 Single combined reply call (`generate_reply_bundle`)
-
-The conversational reply and the optional Telegram emoji reaction are produced in **one**
-LLM call (not two). Folding both into a single call halves the per-message LLM cost and latency.
-`generate_reply_bundle` requests a strict JSON object:
+Reply generation always requests `response_format={"type": "json_object"}`, independently of `LLM_STRUCTURED_MODE`. The prompt asks for:
 
 ```json
-{"reply": "<natural conversational message>", "reaction": "<single emoji or empty>"}
+{"reply": "Hi!", "reaction": "", "affinity_delta": 0.05}
 ```
 
-The `reply` and the `reaction` are **independent choices** the model makes in the same call:
-the `reply` is plain conversational text (emojis within it are fine, per the persona), while
-the `reaction` is a separate Telegram reaction applied to the *user's* message. The reaction is
-normalized against Telegram's accepted emoji set (`app/services/reactions.py`, tolerant of
-variation selectors like `❤️` → `❤`) and dropped if invalid or if `ENABLE_MESSAGE_REACTIONS=False`.
-If the model returns non-JSON, the raw text is used as the reply and no reaction is sent — the
-user always gets an answer. If that raw fallback is itself empty/blank, the batch processor
-substitutes a short graceful line so Telegram never rejects an empty send (see
-[telegram_bot.md](telegram_bot.md)).
+`affinity_delta` is requested and returned only when the group caller sets `with_affinity=True`. The DM contract has two values.
 
-> **No `max_tokens` cap.** The LLM request does not derive a token ceiling from
-> `MAX_RESPONSE_CHARS / CHARS_PER_TOKEN`; doing that risked cutting the JSON envelope off
-> mid-string (invalid JSON → raw-text fallback, and occasionally an empty send). Instead,
-> `MAX_RESPONSE_CHARS` is applied after generation as an app-level cap for LLM replies and
-> proactive check-ins, then the Telegram sender splits delivery into chunks below Telegram's
-> 4096-character message limit. Set `MAX_RESPONSE_CHARS <= 0` to disable the app cap while
-> keeping Telegram-safe chunking.
+Replies use a custom JSON parser, not Pydantic `ReplyBundle` validation. The parser strips optional Markdown fences and accepts a dictionary with a nonblank string `reply`:
 
-> **Group chats (Phase 9, implemented):** calling `generate_reply_bundle(..., with_affinity=True)`
-> (the group path) switches the return contract to `(reply, reaction, affinity_delta)` and asks the
-> model for an optional `affinity_delta` number in `[-0.2, 0.2]` inside the same reply JSON — so the
-> bot's read on the relationship rides along at no extra LLM cost. With `with_affinity=False`
-> (default, DM/addressed path) the prompt and the `(reply, reaction)` return value are byte-for-byte
-> unchanged. `affinity_delta` is `None`/ignored in DMs. See [group_chat.md](group_chat.md).
+- Reactions are normalized by [reactions.py](../../app/services/reactions.py), restricted to its allowed set, and dropped when globally disabled. The chat manager additionally honors the sender's `reactions_enabled` preference.
+- A numeric, non-boolean affinity delta is accepted. The prompt asks for `[-0.2, 0.2]`, but the parser does not enforce that range; the affinity cache clamps the resulting score to `0..1`.
+- Malformed/unusable reply JSON falls back to the unfenced raw text with no reaction or delta. This can expose a malformed JSON envelope as the delivered text. The batch processor substitutes a fallback for empty DM/addressed replies and suppresses empty ambient replies.
+- An API error is audited and re-raised; the batch processor attempts a short failure response. Successful Telegram delivery still depends on Telegram permissions and connectivity.
 
----
+`ReplyBundle` in [schemas.py](../../app/services/schemas.py) describes the intended shape, but is not the runtime parser for this path.
 
-## 📐 Schema Definitions (`app/services/schemas.py`)
+Check-ins use a plain-text response. Blank output or the case-insensitive sentinels `NOTHING`, `none`, `n/a`, and `na` (with trailing `.`/`!` tolerated) produce `None`. The caller stays silent and does not send a check-in. The supplied `memory_text` is used as a grounding guard; the caller must also put that memory into the system prompt, as the current scheduler does.
 
-The unified schemas define memory extraction and compression objects. We maintain a separation between objective **facts** (concrete details) and subjective **beliefs** (user opinions, values, and thoughts).
+## Structured memory output
 
-```python
-# app/services/schemas.py
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
+The memory methods share `_structured_call` and validate responses against Pydantic models from [schemas.py](../../app/services/schemas.py).
 
-# --- FACTS ---
-class FactExtract(BaseModel):
-    category: Literal["personal", "work", "preference", "health", "hobby", "relationship"]
-    content: str
+| `LLM_STRUCTURED_MODE` | Behavior |
+| --- | --- |
+| `json_object` (default) | Append the schema to the system prompt, request a JSON object, strip optional fences, then call `schema.model_validate_json`. |
+| `native_parse` | First call `client.beta.chat.completions.parse` with the schema. On an exception or absent parsed result, fall back to the `json_object` path. |
+| Other string | Uses the `json_object` path; configuration does not validate this setting as an enum. |
 
-class FactUpdate(BaseModel):
-    category: Literal["personal", "work", "preference", "health", "hobby", "relationship"]
-    old_content: str
-    new_content: str
+The default JSON mode requests syntactically valid JSON; schema adherence still depends on the model and application validation. Native parsing requires endpoint support and can increase latency/call count when unsupported.
 
-class FactRemoval(BaseModel):
-    content: str
+On the JSON path, `_strip_fences` turns blank output into `{}`. The memory schemas default their lists to empty, so `{}` can validate as a successful empty result. This is different from `None`, which signals an API/parsing/validation failure. Extraction treats an empty result as success and trims history. Compression/consolidation apply the empty lists and can clear stored memory arrays. The failure-preservation contract applies specifically to `None`, not every unhelpful or empty model output.
 
-# --- SUBJECTIVE BELIEFS ---
-class BeliefExtract(BaseModel):
-    content: str  # e.g., "Believes that remote work increases productivity"
+### Schema reference
 
-class BeliefUpdate(BaseModel):
-    old_content: str
-    new_content: str
+| Model | Fields and constraints |
+| --- | --- |
+| `MemoryExtraction` | Optional `profile_updates`/`emotional_state`; new, updated, and removed lists for facts, beliefs, and events. Lists default empty. |
+| `ProfileUpdate` | Optional communication style and gender (`male`, `female`, `non-binary`). |
+| Fact models | Category is one of `personal`, `work`, `preference`, `health`, `hobby`, `relationship`. Addition uses `content`; update uses `old_content` and `new_content`; removal uses `content`. |
+| Belief models | Addition/removal use `content`; update uses `old_content` and `new_content`. |
+| Event models | Addition: description, nullable date/emotion, significance `major`, `minor`, or `routine`. Update: old/new description, optional date/significance. Removal: description. |
+| `EmotionLog` | Mood string, intensity float defaulting to `0.5`, optional trigger. The described `0..1` intensity range is not constrained by validators. |
+| `GroupMemoryUpdate` | Participant display-name string plus that person's `MemoryExtraction`. Identity resolution happens in the extractor. |
+| `GroupMemoryExtraction` | Optional `group_extraction` and `updates` defaulting empty. Forbids unknown top-level fields, rejecting a plain single-person extraction envelope; it still accepts `{}`. |
+| `MemoryCompression` | Optional summary/style/mood plus `compressed_facts`, `compressed_beliefs`, `compressed_events`. Lists default empty. |
+| `MemoryConsolidation` | Optional summary/style/mood plus `consolidated_facts`, `consolidated_beliefs`, `consolidated_events`, and `insights`. Lists default empty. |
+| `CompressedFact`, `CompressedBelief` | Category/content and content respectively. Shared by compression and consolidation. |
+| `CompressedEvent` | Description, nullable date, significance restricted to `major` or `minor`; no emotional-context field. |
+| `ConsolidatedInsight` | Content string; the storage helper caps the list at `MAX_INSIGHTS`. |
 
-class BeliefRemoval(BaseModel):
-    content: str
+Most models use Pydantic's default handling of extra fields; only the group extraction envelope explicitly forbids them. Date fields are strings, not validated date objects. Text lengths, gender inference accuracy, mood accuracy, and factual truth are not schema guarantees. Array replacement and metadata conversion are documented in [database](database.md#memory-update-semantics).
 
-# --- LIFE EVENTS ---
-class EventExtract(BaseModel):
-    description: str
-    date: Optional[str] = None
-    significance: Literal["major", "minor", "routine"]
-    emotion: Optional[str] = None
+## Prompt sources
 
-class EventUpdate(BaseModel):
-    old_description: str
-    new_description: str
-    date: Optional[str] = None
-    significance: Optional[Literal["major", "minor", "routine"]] = None
+| Source | Purpose |
+| --- | --- |
+| [system_prompt.py](../../app/prompts/system_prompt.py) | Persona, language/style behavior, memory blocks, group attribution, speaker anchor, and optional time context. |
+| [extraction_prompt.py](../../app/prompts/extraction_prompt.py) | Memory CRUD instructions, English normalization, dates, and gender inference. The extractor adds group attribution instructions when needed. |
+| [compression_prompt.py](../../app/prompts/compression_prompt.py) | Condense a current profile; the compressor appends the calculated character target. |
+| [consolidation_prompt.py](../../app/prompts/consolidation_prompt.py) | Merge a current profile and infer durable insights; the consolidator appends the insight cap. |
+| [checkin_prompt.py](../../app/prompts/checkin_prompt.py) | Generate a short grounded opener or decline. |
 
-class EventRemoval(BaseModel):
-    description: str
+`PERSONA_FILE` is loaded by [chat_manager.py](../../app/services/chat_manager.py), cached by path/mtime, and reread on edits. A missing file uses a default persona; a read failure can preserve the cached content. Prompt instructions are requests to the model, not enforced behavioral guarantees.
 
-# --- EMOTIONAL STATE ---
-class EmotionLog(BaseModel):
-    mood: str
-    intensity: float = 0.5
-    trigger: Optional[str] = None
+## Audit and metrics
 
-# --- COMPREHENSIVE EXTRACTION SCHEMA ---
-class MemoryExtraction(BaseModel):
-    profile_updates: Optional[ProfileUpdate] = None
-    new_facts: list[FactExtract] = Field(default_factory=list)
-    updated_facts: list[FactUpdate] = Field(default_factory=list)
-    removed_facts: list[FactRemoval] = Field(default_factory=list)
-    new_beliefs: list[BeliefExtract] = Field(default_factory=list)
-    updated_beliefs: list[BeliefUpdate] = Field(default_factory=list)
-    removed_beliefs: list[BeliefRemoval] = Field(default_factory=list)
-    new_events: list[EventExtract] = Field(default_factory=list)
-    updated_events: list[EventUpdate] = Field(default_factory=list)
-    removed_events: list[EventRemoval] = Field(default_factory=list)
-    emotional_state: Optional[EmotionLog] = None
+`_fire_log` schedules a best-effort MongoDB insert and tracks the task in the service's background task set. It records one audit row for the final logical result, not one per HTTP retry or native-parse failure. The six call types are `chat_reply`, `proactive_checkin`, `memory_extraction`, `group_memory_extraction`, `memory_compression`, and `memory_consolidation`.
 
-# --- COMPRESSION SCHEMA ---
-class MemoryCompression(BaseModel):
-    profile_summary: Optional[str] = None
-    communication_style: Optional[str] = None
-    compressed_facts: list[CompressedFact] = Field(default_factory=list)
-    compressed_beliefs: list[CompressedBelief] = Field(default_factory=list)
-    compressed_events: list[CompressedEvent] = Field(default_factory=list)
-    emotional_state: Optional[EmotionLog] = None
-```
+Rows contain lengths of stringified input/output fields, success/failure status, failure traceback, an ID, and a UTC datetime for TTL expiry. Input lengths describe the original inputs; they do not include every appended schema/format instruction and are not token counts. A malformed reply handled as raw text counts as a successful call. A declined check-in also counts as a successful call.
 
-### Group-chat schemas *(Phase 9, implemented)*
+[metrics.py](../../app/services/metrics.py) records success/failure and latency by call type. Timings include retries and fallback work for the logical operation. Audit writes do not delay generation, but may be lost on interruption or database failure. For storage/index details, see [database](database.md); for reports and checkpoints, see [observability](observability.md).
 
-Three additions support group chat without disturbing the DM contract:
+Conversation history, memory blocks, persona, and prompts are sent to `LLM_BASE_URL`. Length-only audit summaries reduce routine text retention in MongoDB, but error tracebacks may contain sensitive provider details, and the configured provider has its own retention behavior. See [reset and data retention](database.md#reset-and-data-retention) before describing reset as complete erasure.
 
-* **`ReplyBundle.affinity_delta`** — an optional signed `float` on the combined reply schema,
-  populated only on the group path (`with_affinity=True`) and ignored in DMs.
-* **`GroupMemoryUpdate`** — pairs a `participant` name (exactly as rendered in the group segment)
-  with a standard `MemoryExtraction` attributed to that person.
-* **`GroupMemoryExtraction`** — `{ group_extraction?: MemoryExtraction, updates: list[GroupMemoryUpdate] }`,
-  the result of the multi-party extraction call. `group_extraction` is for shared group context;
-  `updates` is for participant-specific memory.
+## Verification
 
-`extract_group_memory(chat_id_or_user_id, system_prompt, user_history_text)` mirrors
-`extract_memory` exactly — same model selection, retry / `json_object` / `native_parse` handling,
-temperature, timeout, and `None`-on-failure contract — but validates against
-`GroupMemoryExtraction`. The first argument is also the key for shared group memory on the group
-path; participant attribution is resolved by the caller from the segment's own name→id map (see
-[memory_engine.md](memory_engine.md)).
-
----
-
-## 🔎 Centralized Database Audit Trail (`llm_audit_log`)
-
-The LLM call types — `chat_reply` (reply **and** reaction), `proactive_checkin`,
-`memory_extraction`, `group_memory_extraction` (multi-party group extraction),
-`memory_compression`, and `memory_consolidation` — are traced in `LLMService`, recording
-input/output lengths, status, and error tracebacks.
-Centralizing this trace in one service means every call type is logged the same way, with no
-per-caller bookkeeping.
-
-Three properties keep this safe at scale:
-
-1. **Off the hot path.** `_fire_log` schedules the write as a background task, so a user's
-   reply is never delayed by an audit insert.
-2. **TTL-friendly timestamp.** `timestamp` is stored as a real `datetime` (not an ISO string)
-   so the TTL index in `init_db` (`AUDIT_LOG_RETENTION_DAYS`) actually expires old entries.
-   (TTL — "time to live" — is MongoDB's mechanism for auto-deleting documents after an age.)
-3. **Bounded size and better privacy.** Prompts, histories, model completions, and parsed JSON are
-   summarized as string lengths before insertion, so a single document can't balloon and routine
-   audit rows do not retain conversation text.
-
-```python
-def _fire_log(self, *args, **kwargs):
-    """Schedule an audit write without blocking the caller (keeps it off the hot path)."""
-    task = asyncio.get_running_loop().create_task(self._log_llm_call(*args, **kwargs))
-    self._bg_tasks.add(task)
-    task.add_done_callback(self._bg_tasks.discard)
-```
-
-* **Success**: `status = "success"`, input/output length metadata, `error = None`.
-* **Failure**: captures the traceback, logs `status = "failed"`. Chat replies re-raise (the
-  batch processor sends a friendly fallback message); **`extract_memory` and `compress_memory`
-  return `None`** so the caller can tell a failed call from a legitimately empty one. The
-  extractor retries on `None` (see [memory_engine.md](memory_engine.md)); the compressor
-  **skips the replace** on `None`, so a failed compression never wipes a user's memory.
-
-> The emoji reaction is part of the `chat_reply` call — there is no separate reaction LLM call.
-
----
-
-
-## ✍️ Prompt Engineering Templates (`app/prompts/`)
-
-Each prompt builder lives in its own module under `app/prompts/` and assembles the text sent to
-the model for a specific job:
-
-1.  **Extraction Prompt (`extraction_prompt.py`)**: Directs the LLM to process a conversation segment, identifying objective facts, subjective beliefs, and timeline milestones, mapping updates relative to the user's current memory card.
-2.  **Compression Prompt (`compression_prompt.py`)**: Instructs the LLM to summarize and trim user details holistically when the memory size breaches the character budget limit (4,000 characters).
-3.  **System Prompt Builder (`system_prompt.py`)**: Assembles the agent's core identity guidelines, the active compiled memory block, and communication constraints dynamically.
+[test_reactions.py](../../tests/test_reactions.py) exercises reply parsing, reaction normalization, and delivery behavior. [test_group_extraction.py](../../tests/test_group_extraction.py) checks group output envelopes. [test_consolidation_llm.py](../../tests/test_consolidation_llm.py) checks consolidation schema defaults and dispatch; [test_compression_safety.py](../../tests/test_compression_safety.py) checks `None` preservation in the caller. These mocked tests validate application contracts without proving real endpoint compatibility or model quality. See [testing guide](testing_guide.md) for the separate live harness.

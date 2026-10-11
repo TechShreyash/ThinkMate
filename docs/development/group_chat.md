@@ -1,408 +1,256 @@
-# Group Chat, Ambient Replies & Affinity
+# Group routing and memory
 
-> **Status: ✅ implemented (Phase 9 in [project_plan.md](../project_plan.md); extended by the
-> implicit-bot-addressing spec).**
-> The configuration knobs live in [configuration.md](configuration.md#-group-chat--ambient-replies);
-> the behavior below reflects the shipped code. DMs are unaffected — the private-chat path is
-> byte-for-byte unchanged.
+ThinkMate supports Telegram groups and supergroups with shared conversation history,
+shared group memory, and personal memory for each participant. This guide explains the
+current reply decision, controls, and storage behavior. See the
+[documentation index](../README.md), [Telegram integration](telegram_bot.md), and
+[configuration reference](configuration.md).
 
-This guide covers ThinkMate's group-chat subsystem: how the bot behaves in multi-user group and
-supergroup chats versus one-on-one direct messages (DMs), how it decides when to join a
-conversation on its own without being spammy or wasting LLM API calls, and how a per-user
-*affinity* score — a learned value between 0 and 1 that measures how welcome the bot is to a given
-person — tunes how chatty it is. Two ideas recur throughout. The *ambient gate* is a cheap,
-no-LLM funnel that filters unaddressed messages before any model call. *Affinity* biases that
-funnel per person, so the bot leans into people who engage and backs off those who do not. On top
-of these, an *implicit-address gate* lets the bot recognize when someone is answering it without a
-tag (the message right after it spoke is usually a direct reply), and two *spam detectors* keep
-automated mass-tagging and greeting-burst floods from tricking the bot into replying.
+## Code map
 
-This guide is organized as a tour of the moving parts followed by the rules that drive them:
-behavior by chat type, the data model behind it, implicit addressing, spam protection, recency
-tracking, the ambient gate, the affinity signals that feed it, the single-write buffer invariant,
-memory/reply language handling, the configuration knobs, and an implementation checklist.
-The pieces, at a glance:
-
-| Concern | Where it lives |
+| Responsibility | Source |
 |---|---|
-| Pure no-LLM helpers + ambient funnel | [`app/services/group_gate.py`](../../app/services/group_gate.py) (`is_addressed`, `is_directed_at_other`, `scan_cheap_triggers`, `scan_negative_signal`, `AmbientGate`) |
-| Implicit-address gate (recency + cooldown) | [`app/services/group_gate.py`](../../app/services/group_gate.py) (`ImplicitAddressGate`, singleton `implicit_gate`) |
-| Mass-tag + greeting-burst spam detection | [`app/services/group_gate.py`](../../app/services/group_gate.py) (`count_distinct_mentions`, `is_mass_tag_spam`, `SpamBurstDetector`, singleton `spam_burst_detector`) |
-| Per-(chat, user) affinity/mode cache | [`app/services/affinity.py`](../../app/services/affinity.py) (`AffinityCache`, singleton `affinity_cache`) |
-| Chat-type routing + addressed/implicit/spam detection | [`app/handlers/messages.py`](../../app/handlers/messages.py) (`_handle_group_message`, `_maybe_ambient_chime`) |
-| Recency commit point (`note_bot_spoke`) + idle pruning | [`app/services/user_task_manager.py`](../../app/services/user_task_manager.py) (`_process_batch`, `_evict_idle`) |
-| `/quiet` `/chatty` commands | [`app/handlers/commands.py`](../../app/handlers/commands.py) |
-| Multi-party reply + affinity fold | [`app/services/chat_manager.py`](../../app/services/chat_manager.py) |
-| Multi-party memory extraction | [`app/services/memory_extractor.py`](../../app/services/memory_extractor.py) (`extract_and_trim_group`) |
-| English-memory + reply language/script prompts | [`app/prompts/extraction_prompt.py`](../../app/prompts/extraction_prompt.py), [`app/prompts/system_prompt.py`](../../app/prompts/system_prompt.py) |
-| `chat_members` / buffer attribution | [`app/database/models.py`](../../app/database/models.py) (see [database.md](database.md)) |
+| Input guards, group enabled check, routing, traces | [`messages.py`](../../app/handlers/messages.py) |
+| Addressing, spam detectors, implicit and ambient gates | [`group_gate.py`](../../app/services/group_gate.py) |
+| Per-member affinity and mode cache | [`affinity.py`](../../app/services/affinity.py) |
+| Personal and group command controls | [`commands.py`](../../app/handlers/commands.py) |
+| Per-chat batching, reply delivery, recency tracking, pruning | [`user_task_manager.py`](../../app/services/user_task_manager.py) |
+| Shared and personal memory in reply prompts | [`chat_manager.py`](../../app/services/chat_manager.py) |
+| Group and participant extraction | [`memory_extractor.py`](../../app/services/memory_extractor.py) |
+| Buffer, profile, member, and settings persistence | [`models.py`](../../app/database/models.py) |
 
-## Behavior by chat type
+## Which messages enter group routing?
 
-The first decision for any incoming message is what kind of chat it arrived in, because the reply
-policy differs sharply between a private DM and a busy group. *Addressed* means the message
-targets the bot directly — an @mention, the bot's name, or a reply to one of the bot's messages.
-The rules by chat type:
+The text router accepts human-authored text with a real sender. Middleware drops other
+bots and rate-limited messages. The router ignores channel conversations, anonymous or
+channel-authored `sender_chat` text, automatic forwards, forwarded text, and slash
+commands handled elsewhere. Group text longer than `MAX_INPUT_CHARS` is silently dropped.
 
-| Chat type | Behavior |
-|---|---|
-| **Private (DM)** | Reply to every *conversational* message. **Bot (slash) commands are excluded** — they are not treated as conversation and are not replied to. |
-| **Group / supergroup** | **Always** reply when *addressed* (bot @mentioned, bot's name used, or a reply to the bot's message). Otherwise, if the bot spoke recently and the message is not aimed at someone else, treat it as an **implicit address** and reply directly (throttled by a per-chat cooldown). Otherwise run the **ambient gate** — sometimes chime in on the wider conversation (birthdays, jokes, questions…), modulated by affinity. Mass-tag and greeting-burst **spam** never trigger any of these. |
-| **Channel** | Ignored. |
+Next, `_handle_group_message()` reads the group's enabled flag. Disabled groups do not
+continue to identity refresh, buffering, routing, or generation for newly arriving
+conversational text. A settings-read failure treats the group as enabled.
 
-> **Bot commands in DMs are never treated as conversation.** Registered commands
-> (`/start`, `/help`, `/onboard`, `/checkins`, `/profile`, `/reset`, `/reactions`) are handled by their dedicated command
-> handlers. Any unregistered slash command (e.g. `/foo`) falls through to the catch-all
-> text handler, which ignores it — no LLM reply and no memory enqueue. Normal
-> conversational messages are still replied to as before.
+For admitted group text, the router refreshes the sender's identity best-effort, resolves
+the bot's identity, records spam observations, and applies these decisions in order:
 
-## Group kill switch (`/groupbot on|off`)
+1. **Explicit address:** a Telegram reply to the bot, a bot username mention, or the
+   bot name as a standalone match. Spam changes this rule as described below.
+2. **Implicit follow-up:** untagged text within the bot's recency window, not directed
+   at another person or classified as spam, and outside the implicit cooldown.
+3. **Ambient candidate:** remaining messages pass through cooldown, trigger or scan
+   tick, and an affinity-weighted random decision.
+4. **Context only:** messages that do not pass a reply gate are buffered without an
+   LLM reply.
 
-Any group admin (or a globally-configured `ADMIN_USER_IDS` operator) can turn the bot completely
-on or off for a whole group:
+Private chats use the direct conversation path and do not run group spam, recency,
+ambient, or affinity gates. See [Telegram integration](telegram_bot.md) for non-text
+media notices and command handling.
 
-* **`/groupbot off`** — the bot goes fully silent in that chat. `_handle_group_message` checks the
-  per-chat flag at the very top and returns immediately when the group is disabled: **no reply, no
-  ambient chime, no implicit reply, no identity capture, no memory extraction, and no buffer
-  write.** It is as if the bot were not in the group at all.
-* **`/groupbot on`** — re-enables the bot. Because slash commands are handled by
-  [`commands.py`](../../app/handlers/commands.py) (not the conversational text handler), `/groupbot on`
-  always works even while the group is disabled.
+All group behavior depends on messages Telegram actually delivers to the bot. Privacy
+mode and membership permissions can limit that input; unseen group messages cannot
+contribute to history, recency counters, or memory.
 
-The flag is stored in the `group_settings` collection (`_id = chat_id`, `enabled: bool`) via
-`models.set_group_enabled`, and read on every group message via `models.is_group_enabled`. The
-default is **enabled** — a group that was never toggled (no document) is active, and the read
-degrades to "enabled" on any DB error, so a transient hiccup can never silently mute the bot.
-Authorization uses `bot.get_chat_member` to confirm administrator/creator status; the commands
-reply with a short notice when used outside a group or by a non-admin. Both commands are
-env-mappable/disable-able like every other command (see
-[configuration.md](configuration.md#️-commands-rename--disable), key `groupbot`).
+## Group controls
 
-## Group-wide chattiness (`/groupmode quiet|chatty|normal`)
-
-The per-user `/quiet` and `/chatty` commands only change the bot's behavior toward the **one person
-who ran them**, in that group. To control chattiness for the **whole group at once**, a group admin
-(or an `ADMIN_USER_IDS` operator) uses the single group-wide command `/groupmode`, which takes
-**priority over every member's personal setting**:
-
-* **`/groupmode quiet`** — sets the group mode to `quiet`. The bot stops chiming in on its own for
-  everyone here (it still replies when addressed or replied-to). This overrides any member's
-  personal `/chatty`.
-* **`/groupmode chatty`** — sets the group mode to `chatty`. The bot joins in more for everyone here,
-  overriding any member's personal `/quiet`.
-* **`/groupmode normal`** — clears the override (mode `auto`), so each member's own `/quiet` /
-  `/chatty` applies again. (`/groupmode` with no argument reports the current setting.)
-
-The effective mode used by the ambient gate is resolved in `_maybe_ambient_chime` as:
-
-```text
-effective_mode = group_mode if group_mode in ("quiet", "chatty") else member_mode
-```
-
-So a group-level override always wins when set; `auto` defers to the member. The group mode is
-stored as `group_mode` in `group_settings` via `models.set_group_mode` and read on the ambient path
-via `models.get_group_mode` (defaulting to `auto`, and degrading to `auto` on any read error). The
-override only affects the **ambient chime-in** path (the same path `/quiet` / `/chatty` affect) — it
-does not change explicit-address or implicit-follow-up replies. The command is
-env-mappable/disable-able (key `groupmode`).
-
-## Data model
-
-The group features rest on three storage decisions: where messages are buffered, where extracted
-memory lives, and where affinity is stored. Keeping these separate is what lets a single
-group-aware path serve DMs unchanged.
-
-* **Buffers are keyed by `chat_id`** (in a DM, `chat_id == user_id`, so DMs are unchanged).
-  Each buffered message carries `sender_id` + `sender_name`, so group context is multi-party
-  ("Alice: …", "Bob: …") and memory can be attributed to the right person.
-* **Memory has a shared layer and a personal layer.** Group extraction makes one LLM call over the
-  segment. Shared group-level facts, norms, recurring topics, decisions, and plans are saved to a
-  group profile keyed by `chat_id`; personal facts/beliefs/events are tagged by participant name,
-  mapped back to each `sender_id` (using the segment's own name→id map), and saved to that
-  person's profile.
-* **Affinity** lives in `chat_members` (`_id = "{chat_id}:{user_id}"`): `affinity` (0–1,
-  default 0.5), `mode` (`auto` / `quiet` / `chatty`). Cached in memory, written through on change.
-* **Group on/off + group-wide mode** live in `group_settings` (`_id = chat_id`, `enabled: bool`,
-  `group_mode: str`) — the `/groupbot on|off` kill switch and the `/groupmode quiet|chatty|normal`
-  chattiness override above.
-
-## Implicit addressing (replying without being tagged)
-
-In real conversations people answer the bot without tagging it — the message right after the bot
-speaks is usually a direct reply to it. The **implicit-address gate** (`ImplicitAddressGate` in
-[`group_gate.py`](../../app/services/group_gate.py), singleton `implicit_gate`) recognizes those
-moments. It is a pure, no-LLM decision helper that mirrors `AmbientGate`'s shape: bounded in-memory
-per-chat maps keyed by `chat_id`, an injectable `now` for deterministic tests, a decision/commit
-split, and a `prune` hook wired into the idle sweep.
-
-The router consults it **only** on non-explicitly-addressed group messages, strictly between the
-explicit-address check and the ambient gate. A message is an *implicit address* when **all** hold:
-
-* the bot has spoken in this chat before (`note_bot_spoke` has recorded a last-spoke time);
-* the message falls inside the **Bot_Recency_Window** — meaning **both** bounds hold (logical AND,
-  the conservative reading): the bot's last message is within `GROUP_IMPLICIT_RECENCY_SECS` of now,
-  **and** at most `GROUP_IMPLICIT_RECENCY_MAX_MSGS` human messages have arrived since the bot spoke
-  (the follow-up must be both *soon* and *not buried* under other people's chatter);
-* the message is not **directed at another participant** (`is_directed_at_other`: it replies to a
-  non-bot message, or it @mentions another user);
-* the message is not spam (see below).
-
-`decide(...)` returns `(is_implicit, reason)` where `reason` is one of `"spam"`, `"no_bot_activity"`,
-`"directed_at_other"`, `"out_of_window"`, or `"implicit"`, so the router can log *why* a message was
-or wasn't treated as a direct reply. It is a pure predicate — no state mutation, never raises
-(malformed input degrades to not-implicit so the message simply falls through to the ambient gate,
-Req 1.6).
-
-**Throttle (Implicit_Cooldown).** To stop the bot dominating a burst of follow-ups, at most one
-implicit reply fires per `GROUP_IMPLICIT_COOLDOWN_SECS` per chat. When a message is implicit *and*
-`cooldown_elapsed(chat_id, now)` is true, the router commits the throttle with
-`mark_implicit_reply` **before** enqueueing (so even an empty/failed reply still holds the window,
-Req 3.3), logs the decision with the chat id (Req 3.2), and enqueues with `reason="reply"`. If more
-than one participant sends an implicit address inside one cooldown window, only the first is
-answered directly; the rest fall through to the ambient gate (Req 4.4).
-
-**Counter ordering.** `implicit_gate.note_human_message(chat_id, now)` is called *after* `decide`
-on every path, so the current message is never counted among its own "intervening" predecessors.
-The immediate follow-up to a bot message therefore evaluates with `intervening == 0` — the strongest
-implicit candidate. `note_human_message` only advances the counter once the bot has spoken (there is
-no window to fill before the bot's first message).
-
-**Affinity.** The explicit `+0.05` mention/reply-to-bot bump stays on the addressed path only — an
-implicit address is neither a mention nor a reply-to-bot, so it earns no routing bump. The
-sentiment-based `affinity_delta` from the reply call still folds in (implicit replies go through the
-same `reason="reply"` generation path), so affinity signals keep applying without new semantics.
-
-## Spam protection (mass-tagging and greeting bursts)
-
-Group chats attract userbots that farm attention by tagging members with short greetings. Two
-no-LLM detectors keep the bot from replying to or amplifying that noise. Both feed a single combined
-`spam` flag (`spam = is_mass or is_burst`) computed once, up front, that drives three downstream
-decisions: the spam-aware explicit check, the implicit detector, and ambient trigger suppression.
-
-**Mass-tag spam (single message).** `is_mass_tag_spam(text, entities, *, threshold)` counts the
-*distinct* participants a message @mentions (`count_distinct_mentions`: `mention` entities by
-case-folded handle, `text_mention` entities by carried `user.id`, de-duplicated) and flags the
-message as spam when the count is strictly greater than `GROUP_MASS_TAG_SPAM_THRESHOLD`. The bot's
-own mention is **not** excluded from the count — a bulk tag that happens to sweep up the bot is
-exactly the spam case. Fully defensive: any internal error degrades to `False` ("not spam") so a
-classification bug can never suppress a legitimate reply (Req 9.6).
-
-**Greeting-burst spam (over time).** A userbot can also tag members one-by-one in rapid succession
-with near-identical low-content greetings ("hi @a", "hi @b", "hi @c"…) — no single message trips the
-mention-count threshold. `SpamBurstDetector` (singleton `spam_burst_detector`) is a **stateful**
-no-LLM detector that catches this. It keeps, **per `(chat_id, user_id)` sender**, a `deque` of recent
-`(arrival_time, mention_stripped_content)` pairs, bounded by both the time window
-`GROUP_SPAM_BURST_WINDOW_SECS` and a hard cap `GROUP_SPAM_BURST_TRACK_MAX`. Keying by sender means a
-burst is only flagged when the **same person** repeats near-identical messages — one member's
-repetition can never cause another member's message to be classified as spam, which also matches the
-real threat (a single userbot flooding). Its single entry point,
-`observe(chat_id, text, entities, now, user_id=None)`:
-
-1. strips `@mention`/`text_mention` entity slices from the text (regex `@\w+` fallback when entities
-   are absent or malformed), then case-folds and whitespace-collapses the remainder — so "hi @alice"
-   and "hi @bob" both reduce to "hi" and compare as identical (Req 10.1);
-2. evicts this sender's history entries older than the window;
-3. counts retained entries that are *near-identical* — `difflib.SequenceMatcher(None, a, b).ratio()
-   >= GROUP_SPAM_BURST_SIMILARITY` (standard library, deterministic, dependency-free);
-4. appends `(now, content)` (hard-capped at `GROUP_SPAM_BURST_TRACK_MAX`);
-5. including the just-added message, returns `True` when the near-identical count reaches
-   `GROUP_SPAM_BURST_COUNT`, else `False`.
-
-`user_id` is optional (defaults to `None`) so callers/tests that don't track a sender share a single
-per-chat bucket; the router passes the real `message.from_user.id`. A lone or sub-threshold greeting
-is never flagged (Req 10.8). `observe` must run on **every** group message so its time-windowed
-history is complete regardless of which path the message takes; it is fully defensive (errors degrade
-to "not burst", Req 10.14) and is deterministic given `now`, so it unit- and property-tests with a
-fresh instance and an injected clock.
-
-> **Trade-off.** Because burst history is per-sender, a *coordinated* raid using many distinct
-> accounts that each post only once or twice is not caught by the burst detector (the single-message
-> `GROUP_MASS_TAG_SPAM_THRESHOLD` still catches one message that tags a crowd). This is a deliberate
-> choice so an innocent member is never penalized for another member's repetition.
-
-**Spam-aware explicit address.** Spam-awareness is layered in the router rather than folded into the
-pure `is_addressed` (which several tests pin), so the explicit decision reads:
-
-```
-reply_to_bot      -> Explicit_Address      # a deliberate reply-to-bot survives spam (Req 9.5, 10.7)
-elif spam         -> NOT Explicit_Address   # a bare bot @mention buried in bulk/burst spam (Req 9.4, 10.6)
-else              -> is_addressed(...)       # unchanged addressed path (Req 10.9)
-```
-
-A deliberate Telegram *reply* to one of the bot's own messages is the one signal automated
-mass-tagging cannot fake, so it still counts as explicit even under spam — a real person quoting the
-bot is never silenced. But a bare bot @mention swept into a bulk tag list or a greeting-burst
-message does **not** promote the message to explicit. Spam also suppresses cheap-trigger ambient
-firing (see the ambient gate section).
-
-## Recency tracking and the commit point
-
-The implicit gate needs to know when the bot last spoke. That is recorded at the one place that
-knows a bot message actually went out: `UserTaskManager._process_batch`, in the branch that performs
-`await last_message.answer(reply_text)`. For a group chat it calls
-`implicit_gate.note_bot_spoke(chat_id, time.time())` (wrapped defensively so a tracking failure never
-breaks delivery). `note_bot_spoke` sets the last-spoke time **and** resets the since-bot human
-counter to 0, so the recency window reopens from the bot's latest message.
-
-It is deliberately **not** called when an ambient chime-in produced an empty/declined reply (nothing
-was sent) — the recency window only opens when the bot genuinely spoke. Idle per-chat state for both
-`implicit_gate` and `spam_burst_detector` is pruned by the existing idle sweep in
-`UserTaskManager._evict_idle` (alongside `ambient_gate` and `affinity_cache`), keeping memory bounded
-(Req 6.4, 10.13).
-
-## The ambient gate (never abuses the LLM)
-
-
-*Ambient* replies are the messages the bot volunteers when nobody addressed it directly. The hard
-part is picking those moments without spamming the chat or burning an LLM call on every line, so
-the decision runs through a staged funnel that only reaches the model at the very end.
-
-Every group message is recorded to the buffer (cheap, for context + learning). Whether to
-*reply* runs through `AmbientGate` in [`group_gate.py`](../../app/services/group_gate.py) — a
-pure, no-LLM funnel holding only a little in-memory per-chat state. The LLM is touched only at
-the end, for the few candidates that survive. `AmbientGate.decide()` returns
-`(should_chime, stage)` so the caller can log *which* stage dropped a message (observability,
-Req 7.2); `should_chime()` is a thin boolean wrapper for callers that only need the verdict.
-
-1. **Per-chat cooldown** (in-memory) — at most one ambient chime-in per `GROUP_AMBIENT_COOLDOWN_SECS`.
-   A chat that has never chimed is treated as "cooldown elapsed". Stage: `"cooldown"`.
-2. **Cheap trigger scan** (`scan_cheap_triggers`, regex/keywords, no LLM) — birthdays, congrats,
-   laughter, group questions, greetings, strong sentiment. The gate advances a per-chat counter
-   and also fires a periodic context-scan *tick* every `GROUP_CONTEXT_SCAN_EVERY` messages. No
-   trigger and not a scan tick → stop. Stage: `"no_trigger"`. **Spam suppresses triggers:**
-   `_maybe_ambient_chime` takes `is_spam` and computes `triggered = scan_cheap_triggers(user_text)
-   and not is_spam`, so greeting/laughter keywords in a mass-tag or greeting-burst message can never
-   fire the gate (Req 9.3, 10.5). The message still flows through `AmbientGate.decide` and drops at
-   `"no_trigger"`, so the single-write invariant is untouched.
-3. **Affinity-weighted probability** — chime-in chance = `GROUP_AMBIENT_BASE_RATE × affinity ×
-   mode_factor` (mode factor: `auto` → 1, `quiet` → 0, `chatty` → 1.5), clamped to `[0, 1]`. A
-   dice roll keeps it organic, not robotic. `quiet` mode → 0. Stage: `"dice"` (drop) / `"pass"`.
-4. **One LLM call** — craft a short chime-in from recent context; it may decline (empty reply →
-   send nothing, suppressed in `user_task_manager._process_batch`).
-
-**Cooldown reset on dispatch.** `decide()`/`should_chime()` never reset the cooldown. The router
-([`messages.py`](../../app/handlers/messages.py)) calls `ambient_gate.mark_chimed(chat_id, now)`
-*before* enqueueing the chime-in, so even a failed or empty model reply still holds the window
-(Req 3.7). Idle per-chat state is bounded by `AmbientGate.prune`. The module exposes a singleton
-`ambient_gate` for the hot path.
-
-**Hybrid:** step 2 catches obvious moments instantly; additionally, once per
-`GROUP_CONTEXT_SCAN_EVERY` messages, the scan tick lets a candidate through (still affinity-gated)
-to catch subtler moments keywords miss. Either way it's ≤ ~1 ambient LLM call per active group
-per cooldown window.
-
-## Affinity signals (no extra LLM calls)
-
-Affinity is the bot's running sense of how welcome it is to each person, and it moves only on
-cheap signals — never a dedicated LLM call. It lives in
-[`affinity.py`](../../app/services/affinity.py)'s `AffinityCache` (write-through
-to `chat_members`, clamped to `[0, 1]`). Signals:
-
-* **Up**: a mention / reply-to-bot is a routing-level engagement signal — the router bumps the
-  speaker `+0.05` in [`messages.py`](../../app/handlers/messages.py).
-* **Down**: cheap keyword detection (`scan_negative_signal`: "stop / quiet / spam / annoying /
-  shut up") applies a small down-bump (`-0.1`) to the speaker in
-  [`chat_manager.py`](../../app/services/chat_manager.py).
-* **Sentiment**: the reply call the bot is *already* making returns an optional `affinity_delta`
-  field (groups only, via `generate_reply_bundle(..., with_affinity=True)`) — folded into the
-  speaker's affinity at no extra LLM cost. Ignored in DMs. See [llm_integration.md](llm_integration.md).
-* **Explicit**: `/quiet` (mode→quiet, suppress ambient) and `/chatty` (mode→chatty, boost), set
-  via `affinity_cache.set_mode` in [`commands.py`](../../app/handlers/commands.py). In a DM both
-  commands reply with a graceful no-op explanation (affinity has no meaning when the bot always
-  replies).
-
-## The single-write buffer invariant
-
-Group context is only trustworthy if every message lands in the buffer exactly once — no drops,
-no duplicates. Every group message must be buffered exactly once. The router enforces this by
-splitting the write by path:
-
-* **Addressed** messages are enqueued and the normal `enqueue_message → handle_message` path
-  appends the user message itself (exactly like a DM), so the handler does **not** write them.
-* **Implicit replies** take the same path as addressed messages: the router enqueues them with
-  `reason="reply"` and does **not** write the buffer itself, so the enqueue path is their sole writer
-  (Req 3.4).
-* **Non-addressed** messages never reach `handle_message`, so the handler is their only writer —
-  it appends them (with `sender_id`/`sender_name`) before handing off to the ambient gate.
-
-Net result: each group message is buffered once — addressed and implicit-reply by the enqueue path,
-non-addressed by the handler/ambient path. DM behavior is byte-for-byte unchanged: DMs never reach
-the implicit detector or the spam scans (Req 5.1).
-
-## Config knobs
-
-These knobs tune the ambient gate's pacing, the implicit-address gate, the spam detectors, and the
-affinity defaults; each is documented with its default in the configuration guide.
-
-**Ambient + affinity:** `GROUP_AMBIENT_COOLDOWN_SECS`, `GROUP_AMBIENT_BASE_RATE`,
-`GROUP_CONTEXT_SCAN_EVERY`, `AFFINITY_DEFAULT`.
-
-**Implicit addressing + spam** (all read live from `config`, env-overridable, each with a loader
-default):
-
-| Knob | Default | What it tunes |
+| Control | Who can change it | Effect |
 |---|---|---|
-| `GROUP_IMPLICIT_RECENCY_SECS` | `120.0` | Bot_Recency_Window elapsed-time bound — max seconds since the bot spoke for a follow-up to be implicit. |
-| `GROUP_IMPLICIT_RECENCY_MAX_MSGS` | `5` | Bot_Recency_Window intervening-message bound — max human messages since the bot spoke. |
-| `GROUP_IMPLICIT_COOLDOWN_SECS` | `15.0` | Implicit_Cooldown — at most one implicit direct reply per chat per window. |
-| `GROUP_MASS_TAG_SPAM_THRESHOLD` | `5` | Distinct-@mention count above which a single message is mass-tag spam (strict `>`). |
-| `GROUP_SPAM_BURST_SIMILARITY` | `0.85` | `difflib` ratio at/above which two mention-stripped contents are near-identical. |
-| `GROUP_SPAM_BURST_COUNT` | `3` | Near-identical messages within the window that classify a greeting burst. |
-| `GROUP_SPAM_BURST_WINDOW_SECS` | `60.0` | Time window over which burst near-identical messages are counted. |
-| `GROUP_SPAM_BURST_TRACK_MAX` | `20` | Hard cap on tracked recent messages per chat (bounds memory). |
+| `/quiet` | Any member, for themselves in this group | Personal ambient probability becomes zero. |
+| `/chatty` | Any member, for themselves in this group | Personal ambient probability gets a 1.5 multiplier. |
+| `/groupmode quiet` | Telegram group administrator/creator or a listed global operator | Set ambient probability to zero for everyone. |
+| `/groupmode chatty` | Same authorization | Use a 1.5 ambient multiplier for everyone, overriding personal quiet mode. |
+| `/groupmode normal` | Same authorization | Store `auto`, so personal modes apply again. |
+| `/groupbot off` | Same authorization | Stop admitting new conversational group text. |
+| `/groupbot on` | Same authorization | Admit conversational group text again. |
 
-See `docs/development/configuration.md`.
+A bare `/groupbot` or `/groupmode` reports status and is available to anyone. Global
+operators are IDs in `ADMIN_USER_IDS`; otherwise the command verifies the caller with
+`bot.get_chat_member()`. Lookup failure denies a change. Outside groups, group-wide
+controls explain their scope; `/quiet` and `/chatty` are no-ops in DMs. Triggers may be
+renamed or disabled, as described in [Telegram integration](telegram_bot.md).
 
-## Memory language & reply language/script (Part B)
+**Ambient mode precedence:** group `quiet` or `chatty` overrides each member's mode.
+Group `auto` uses the speaker's personal mode. These modes affect only ambient
+participation; explicit and implicit replies still qualify. There is no personal
+command to restore `auto` after `/quiet` or `/chatty`.
 
-Two prompt-only behaviors round out the natural-conversation goal. They are **independent** of each
-other and of the routing logic above.
+**Off-switch scope:** `/groupbot off` is checked in the text router, not by every
+handler or worker. Commands remain usable, media that replies to the bot may still get
+the text-only notice, and a membership join can still produce an introduction. Already
+queued replies and background memory work are not canceled or rechecked when the flag
+changes. The switch does not delete existing memory or history.
 
-* **Memory is always stored in English.** A top-level *LANGUAGE NORMALIZATION* rule in
-  `SYSTEM_EXTRACTION_PROMPT` ([`extraction_prompt.py`](../../app/prompts/extraction_prompt.py))
-  directs the `Memory_Extractor` to store every fact/belief/event in English regardless of the
-  conversation language — translating (not transliterating) non-English content to natural English,
-  while preserving proper nouns, names, and quoted identifiers in their original form (e.g. Hindi
-  "मुझे पुणे में नौकरी मिली" → fact `"Got a job in Pune"`). The `_GROUP_EXTRACTION_NOTE` reinforces
-  this per participant for multi-party segments.
-* **Replies match the user's language and script.** The *Language & script* bullet in
-  `DEFAULT_SYSTEM_PROMPT_TEMPLATE` ([`system_prompt.py`](../../app/prompts/system_prompt.py)) directs
-  the `Reply_Generator` to reply in the user's current language, judged from the recent flow of the
-  conversation (not one isolated message) and switching when recent usage shifts. For Hindi it
-  matches the *script*: Hinglish (Hindi in Latin letters) → reply in Hinglish; Devanagari Hindi →
-  reply in Devanagari.
+## Explicit addressing
 
-The two are explicitly independent: language/script matching applies to the **reply only** and does
-not change how memories are stored (always English).
+`_get_bot_identity()` caches a successful `bot.get_me()` result for the process. The
+addressing name uses nonblank `BOT_NAME`, otherwise the Telegram first name; username
+and name checks are case-insensitive. A failed lookup returns a temporary empty
+identity so later messages can retry.
 
-## Implementation checklist
+A reply to one of the bot's own messages is the strongest explicit signal. Otherwise
+`is_addressed()` checks the username mention and configured/fallback name. The name
+match can occur anywhere in the text; it does not require that the sentence begins
+with the name.
 
-The lettered items (L1–L6) track the shipped layers of the group-chat feature; every box is
-checked, matching the Phase 9 status noted at the top of this guide.
+Explicitly addressed text is enqueued with `reason="reply"` and attempts a `+0.05`
+affinity bump for its sender. It bypasses ambient probability and implicit cooldown,
+but remains subject to input limits, group enablement, queue capacity, and delivery
+errors. It is therefore a routing policy, not a guarantee that every mention produces
+a delivered reply.
 
-- [x] L1. Bot identity (mention/reply-to-bot detection) + chat-type routing — `is_addressed`
-  in [`group_gate.py`](../../app/services/group_gate.py); routing + cached `get_me()` identity in
-  [`messages.py`](../../app/handlers/messages.py).
-- [x] L2. `chat_id`-keyed buffers with sender attribution; multi-party history rendering —
-  `add_message_to_buffer(..., sender_id, sender_name)` ([database.md](database.md)) and the
-  multi-party `"Name: content"` render in [`chat_manager.py`](../../app/services/chat_manager.py).
-- [x] L3. Affinity store (`chat_members`) + `/quiet` `/chatty` — `AffinityCache`
-  ([`affinity.py`](../../app/services/affinity.py)) and the commands in
-  [`commands.py`](../../app/handlers/commands.py).
-- [x] L4. Ambient hybrid gate (triggers + cooldown + affinity probability + context scan) —
-  `AmbientGate.decide` ([`group_gate.py`](../../app/services/group_gate.py)).
-- [x] L5. Multi-party per-user memory extraction in groups — `extract_and_trim_group`
-  ([`memory_extractor.py`](../../app/services/memory_extractor.py)).
-- [x] L6. Tests for routing, gate funnel, affinity, multi-party extraction — see
-  [testing_guide.md](testing_guide.md).
-- [x] L7. Implicit-address gate (Bot_Recency_Window + Implicit_Cooldown, recency commit at
-  `note_bot_spoke`) — `ImplicitAddressGate`/`is_directed_at_other`
-  ([`group_gate.py`](../../app/services/group_gate.py)), commit + prune in
-  [`user_task_manager.py`](../../app/services/user_task_manager.py).
-- [x] L8. Mass-tag + greeting-burst spam protection and the spam-aware explicit-address rule —
-  `is_mass_tag_spam`/`SpamBurstDetector` ([`group_gate.py`](../../app/services/group_gate.py)) wired
-  into `_handle_group_message`/`_maybe_ambient_chime`
-  ([`messages.py`](../../app/handlers/messages.py)).
-- [x] L9. English-memory normalization + reply language/script matching (Part B) — prompt rules in
-  [`extraction_prompt.py`](../../app/prompts/extraction_prompt.py) and
-  [`system_prompt.py`](../../app/prompts/system_prompt.py).
+## Implicit follow-ups
+
+`ImplicitAddressGate` holds in-memory state per chat. Untagged text qualifies when:
+
+- the worker has recorded a successful conversational bot send in this group;
+- elapsed time since that send is at most `GROUP_IMPLICIT_RECENCY_SECS`;
+- the number of preceding human text messages since that send is at most
+  `GROUP_IMPLICIT_RECENCY_MAX_MSGS`;
+- it neither replies to another participant nor contains a Telegram mention entity
+  targeting conversation elsewhere;
+- it is not classified as spam.
+
+Both recency bounds must hold. The current message is counted after the decision, so
+an immediate follow-up has zero intervening messages. This is a recency heuristic;
+it does not semantically determine whether an untagged message answers the bot.
+
+A qualifying message is enqueued with `reason="reply"` only when the per-chat
+`GROUP_IMPLICIT_COOLDOWN_SECS` has elapsed. The router commits that cooldown before
+enqueueing, so a generation failure or queue drop still consumes the interval. Other
+qualifying follow-ups during cooldown fall through to the ambient gate. Implicit
+routing does not get the explicit `+0.05` affinity bump.
+
+After successful conversational group text delivery, `_process_batch()` calls
+`note_bot_spoke()`, resetting the recency time and human counter. Empty ambient output
+does not reset recency. Command responses, membership introductions, and media notices
+are not registered as bot activity by this mechanism.
+
+## Spam detection and its limits
+
+Two cheap detectors run before group address decisions:
+
+- **Mass tags:** `count_distinct_mentions()` counts distinct handles from `mention`
+  entities and user IDs from `text_mention` entities. A message is spam when that
+  count is strictly greater than `GROUP_MASS_TAG_SPAM_THRESHOLD`; the bot's own
+  mention also counts. Missing entities can leave mass tags undetected.
+- **Repeated bursts:** `SpamBurstDetector` strips mention slices and remaining
+  `@tokens`, normalizes case/whitespace, and compares against recent text from the
+  same `(chat_id, user_id)`. Similarity uses `difflib.SequenceMatcher`; the current
+  message is spam when enough near-identical messages fall within the configured
+  window. History is capped per sender. Despite its greeting-burst name, the
+  implementation does not require a greeting, mention, or low-content message;
+  other repeated text can match too.
+
+The combined spam flag blocks mention/name promotion to explicit addressing and
+blocks implicit addressing. A direct Telegram reply to the bot remains explicit even
+if classified as spam. Detector failures degrade to not-spam.
+
+Spam also forces the ambient keyword trigger to false. **It does not veto a periodic
+context-scan tick**, so a spam message can still pass the ambient gate on that tick
+when its probability allows it. Spam text that is retained remains available as
+conversation context. This feature is a reply-routing heuristic, not group moderation:
+it does not delete messages or ban senders, and sender-local burst tracking does not
+catch coordinated repetition from many accounts.
+
+## Ambient participation and affinity
+
+`AmbientGate.decide()` performs no DB or LLM call. The caller first loads the speaker's
+affinity and effective mode, then the gate applies:
+
+1. **Cooldown:** stop if less than `GROUP_AMBIENT_COOLDOWN_SECS` has elapsed since the
+   last ambient dispatch.
+2. **Trigger or scan tick:** advance the counter for candidates that survive cooldown.
+   Continue on a cheap trigger or every `GROUP_CONTEXT_SCAN_EVERY` eligible candidates.
+   A nonpositive scan interval disables periodic ticks. Cheap patterns cover English
+   greetings, birthdays, congratulations, laughter, question openers, and sentiment,
+   plus laughter emojis.
+3. **Probability:** continue when a random draw is below
+   `clamp(GROUP_AMBIENT_BASE_RATE * affinity * mode_factor, 0, 1)`.
+   Factors are `auto=1`, `quiet=0`, and `chatty=1.5`.
+
+With loader defaults (`base_rate=0.25`, `affinity=0.5`), an otherwise eligible candidate
+has a 12.5% chance in auto mode and 18.75% in chatty mode. Cooldown and trigger checks
+still apply.
+
+Before enqueueing a passing candidate, the router calls `mark_chimed()`. Failed,
+queued-but-dropped, or empty generation therefore still holds the ambient cooldown.
+`reason="ambient"` uses the same group reply generation path; the worker uses the
+reason for empty-output suppression and sender-batch precedence. It does not select a
+separate ambient system prompt. Empty ambient output sends no text or reaction.
+
+Affinity is stored per `(chat_id, user_id)` and clamped to `[0, 1]`. Its cache reads
+through and writes through to MongoDB. Signals are the explicit routing bump, an
+optional `affinity_delta` from the existing reply call, and a `-0.1` keyword bump for
+`stop`, `quiet`, `spam`, `annoying`, or `shut up`. The negative scan runs during
+generation, not on every passive message. No dedicated sentiment LLM call is made.
+
+Gate decisions and caches are process-local; restarts reset cooldown/recency/burst
+history. The task manager's lazy idle sweeper prunes those maps and cached members.
+Persisted affinity, modes, profiles, and buffers survive restarts.
+
+## Buffering, batching, and memory
+
+| Data | Persistence |
+|---|---|
+| Conversation history | `chat_buffers[chat_id]`, including `sender_id`, `sender_name`, role, content, timestamp. |
+| Shared group memory | `user_profiles[chat_id]`, using the same profile representation as personal memory. |
+| Personal participant memory | `user_profiles[user_id]`, shared across that person's DMs and groups. |
+| Member affinity and personal mode | `chat_members["{chat_id}:{user_id}"]`. |
+| Enabled flag and ambient override | `group_settings[chat_id]`; defaults are enabled and `auto`. |
+
+The buffer has one writer for each routing path:
+
+- Explicit, implicit, and passing ambient candidates are enqueued without a handler
+  buffer write. `handle_message()` appends their combined sender turn.
+- Ambient drops, including defended affinity/gate-evaluation failures, are appended
+  by `_maybe_ambient_chime()` and do not enter generation.
+
+This prevents duplicate writes on passing ambient messages. It is not an exact
+one-record-per-Telegram-message guarantee: batching combines each sender's queued text,
+input/throttle/off/queue guards can drop messages, and the buffer hard cap trims older
+entries. A multi-sender batch processes sender groups in first-seen sender order,
+which can differ from the original interleaving.
+
+Group reply history is rendered with speaker names. Prompts include both shared group
+memory and the triggering sender's personal memory; profiles are separate documents,
+but personal memory is available to group generation. Other participants' full
+personal profiles are not loaded for that reply.
+
+When generation observes the extraction threshold, it starts background extraction
+with `is_group=True`. Passive buffering alone does not schedule extraction. The group
+extractor makes one structured call over a segment, saves shared memory to the group
+profile, and saves participant updates after mapping names back to IDs from the
+segment. Unknown participant names are skipped. Duplicate display names are ambiguous:
+the current map keeps the first sender ID for a normalized name.
+
+Prompt rules ask extraction to normalize memory into English and ask replies to follow
+the recent conversation's language and script. These are model instructions, not a
+validator-enforced storage or response guarantee. See [memory engine](memory_engine.md),
+[database](database.md), and [LLM integration](llm_integration.md).
+
+## Tuning and verification
+
+The authoritative defaults live in [`Config`](../../app/config.py); the
+[configuration reference](configuration.md) covers:
+
+- Ambient and affinity: `GROUP_AMBIENT_COOLDOWN_SECS`, `GROUP_AMBIENT_BASE_RATE`,
+  `GROUP_CONTEXT_SCAN_EVERY`, `AFFINITY_DEFAULT`.
+- Implicit replies: `GROUP_IMPLICIT_RECENCY_SECS`, `GROUP_IMPLICIT_RECENCY_MAX_MSGS`,
+  `GROUP_IMPLICIT_COOLDOWN_SECS`.
+- Spam: `GROUP_MASS_TAG_SPAM_THRESHOLD`, `GROUP_SPAM_BURST_SIMILARITY`,
+  `GROUP_SPAM_BURST_COUNT`, `GROUP_SPAM_BURST_WINDOW_SECS`, `GROUP_SPAM_BURST_TRACK_MAX`.
+- Delivery and controls: `GROUP_INTRO_ON_JOIN`, `ENABLE_MESSAGE_REACTIONS`,
+  `ADMIN_USER_IDS`, command overrides, and shared input/queue/rate limits.
+
+Routing traces distinguish addressed replies, implicit decisions, spam detections,
+and ambient drop stages (`cooldown`, `no_trigger`, `dice`) or passing candidates.
+`FORWARD_DIAGNOSTICS` can mirror traces to the configured log channel; see
+[observability](observability.md).
+
+Representative coverage lives in [routing tests](../../tests/test_group_routing.py),
+[implicit router tests](../../tests/test_group_router_implicit.py),
+[ambient gate tests](../../tests/test_ambient_gate.py),
+[affinity and command tests](../../tests/test_affinity_and_commands.py),
+[recency commit tests](../../tests/test_recency_commit.py), and
+[group extraction tests](../../tests/test_group_extraction.py), alongside the `test_prop_*`
+property tests. See the [testing guide](testing_guide.md) for test setup and the
+[roadmap](../roadmap.md) for remaining behavior gaps.

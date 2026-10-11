@@ -1,159 +1,102 @@
-# Hardening & Scaling Plan (Production)
+# Current safeguards and known limitations
 
-> Living document. This is the source of truth for the production-hardening effort.
-> Last updated: 2026-06-13. Boxes are checked as work lands. Read this before touching
-> the LLM, memory, or concurrency code.
+This page replaces the historical production-hardening checklist with a description
+of the current implementation. The filename is retained for existing links. Checked
+items in old plans, deployment anecdotes, and provider timing samples are not evidence
+of production readiness or load capacity. Use [testing](testing_guide.md) to validate a
+change and [observability](observability.md) to inspect a running deployment.
 
-This page is the working plan for making ThinkMate robust enough to run as a live
-production service. It is a *living document*: the checklists below are updated in place
-as work lands, so a checked box (`[x]`) means the change is shipped and an unchecked box
-(`[ ]`) means it is still planned. If you are about to change the LLM service, the memory
-engine, or anything touching concurrency, read this first so your change fits the agreed
-direction instead of fighting it.
+## Implemented safeguards
 
-## Overview
+| Area | Current behavior | Source |
+| --- | --- | --- |
+| Startup | Mongo ping before polling; audit indexes initialized; missing persona warning/fallback | [`main.py`](../../main.py), [`connection.py`](../../app/database/connection.py), [`chat_manager.py`](../../app/services/chat_manager.py) |
+| LLM retries | Shared client, SDK retries disabled; bounded exponential retries for transient errors | [`llm_service.py`](../../app/services/llm_service.py) |
+| Structured output | Reply/reaction bundle; memory Pydantic validation; configurable JSON-object/native parsing with fallback | [`llm_service.py`](../../app/services/llm_service.py), [`schemas.py`](../../app/services/schemas.py) |
+| Input routing | Sender/non-conversational guards, startup-stale cutoff, per-user rate limit, text-length limit, slash-command skip | [`middlewares.py`](../../app/handlers/middlewares.py), [`messages.py`](../../app/handlers/messages.py) |
+| Reply delivery | Character cap, Telegram-safe chunks, group reply fallback, normalized reactions, blocked/restricted handling | [`telegram_text.py`](../../app/services/telegram_text.py), [`user_task_manager.py`](../../app/services/user_task_manager.py) |
+| Batching/state | Per-chat pending cap, chat/memory locks, idle state/cache pruning | [`user_task_manager.py`](../../app/services/user_task_manager.py) |
+| Buffers | Mongo `$push`/`$slice` message cap; timestamp-based `$pull` trim for normal timestamped buffers | [`models.py`](../../app/database/models.py) |
+| Memory updates | Normalized dedup/matching; failed extraction returns a distinct sentinel; compression/consolidation skip replacement on LLM failure | [`models.py`](../../app/database/models.py), [`memory_extractor.py`](../../app/services/memory_extractor.py), [`memory_compressor.py`](../../app/services/memory_compressor.py), [`memory_consolidator.py`](../../app/services/memory_consolidator.py) |
+| Memory maintenance | Compression cooldown, single-read/at-most-one-write budget shedding, capped mood/insight lists | [`memory_compressor.py`](../../app/services/memory_compressor.py), [`models.py`](../../app/database/models.py) |
+| Operations | Best-effort audit writes, attempted TTL retention, metrics checkpointing, gated reports, loop-protected forwarding | [Observability runbook](observability.md) |
+| Group behavior | Explicit/implicit/ambient gates, mass-tag/burst checks, per-member and group mode controls | [Group chat guide](group_chat.md) |
+| Proactive behavior | Inactivity/attempt-gap/item-count checks, opt-out, UTC quiet hours, unanswered-streak pause, delivery-failure opt-out | [`health.py`](../../app/services/health.py), [`models.py`](../../app/database/models.py) |
 
-The plan is organized so you can read it top to bottom and understand both *why* the work
-is being done and *what* exactly is being changed:
+These safeguards describe code paths and their scope. They do not guarantee that the
+LLM returns accurate memories, that network operations succeed, or that storage stays
+within a fixed global limit.
 
-- **Context & Goals** — who the bot serves today, what the runtime looks like, and the
-  ordered priorities the effort optimizes for.
-- **Decisions locked in** — the architectural choices that are settled, so they are not
-  relitigated mid-flight.
-- **LLM proxy capability findings** — what the live LLM proxy (the OpenAI-compatible HTTP
-  endpoint the bot talks to) actually supports, verified by hitting it directly.
-- **Hot-path cost model** — the "hot path" (the latency-sensitive code that runs on every
-  user message) and how many LLM and database calls it makes before and after this work.
-- **Phased checklist** — the concrete tasks, grouped into Phases A–H, each box tracking a
-  single landed change.
+## Failure policies and data loss
 
-Subsystem deep-dives that this plan refers to live in their own guides, most often
-[memory_engine.md](memory_engine.md) and
-[performance_and_scaling.md](performance_and_scaling.md).
+**Extraction exhaustion trades memory capture for bounded buffers.** The pipeline
+tries up to three times, rereading the buffer, then trims older unextracted messages
+if all attempts fail. The hard cap can also discard older messages before extraction
+succeeds. Those turns will not become durable memories. A valid empty extraction is a
+successful call and may trim without adding memories. See [memory engine](memory_engine.md).
 
-## Context & Goals
+**Budget shedding is lossy.** Compression and consolidation keep existing memory on
+LLM failure; successful results can replace details. The deterministic budget pass
+then removes entries from the front of the event, belief, and fact arrays in that order; it does not sort them by event date. It preserves other
+metadata, so a very small budget may remain unsatisfied. A memory-character budget is
+not a complete prompt-token or Mongo document-size cap.
 
-ThinkMate is a **live production** Telegram companion bot:
+**Atomic trim has a defined scope.** Normal timestamped buffers use `$pull` on a
+cutoff and preserve newer appends. Legacy messages without timestamps use positional
+replacement, and deleting the whole observed buffer uses a whole-array replacement.
+Timestamp ordering is enforced within one process, not across replicas.
 
-- **~50k active users, continuously growing.** Priorities (in order): responsiveness,
-  robustness of every API call, minimizing LLM calls, reply quality, memory quality.
-- **Runtime today:** single-instance long-polling, in-memory per-user state, MongoDB Atlas
-  (`production-cluster`), an OpenAI-compatible **Gemini/Gemma proxy**
-  (`gemini-3.1-flash-lite` for chat, `gemma-4-31b-it` for extraction).
-- **Deployment is out of scope** for this effort — we test locally (mongomock / local
-  Mongo, never the production cluster).
+**Background work is best-effort.** Pending updates/jobs are not durably queued for
+replay. Audits are tracked in the LLM service but not explicitly drained on shutdown;
+extraction/compression tasks created by the chat manager are not all included in
+`main.py`'s scheduler shutdown list. A crash/restart can lose in-flight work and metrics
+since the last successful checkpoint.
 
-"Long-polling" means the bot repeatedly asks Telegram for new updates over a single
-connection rather than receiving them via a public webhook; "in-memory per-user state"
-means each user's working context lives in the process's RAM rather than an external store.
-Both choices keep the single-instance runtime simple, which is exactly why the priorities
-above lead with responsiveness and per-call robustness.
+## Privacy and operator access
 
-### Decisions locked in (2026-06-13)
+Normal LLM audits retain lengths rather than full prompts/completions, but errors
+store tracebacks that can contain provider/validation details. Local logs include
+routing identifiers/names and message previews. A configured Telegram logs destination
+receives actual extracted memory summaries and best-effort reset backups containing
+profile/buffer data. Audit TTL does not erase those copies.
 
-These are settled so they are not reopened while the phased work is in flight. Each row
-records the choice and the reasoning behind it.
+An empty `ADMIN_USER_IDS` permits ops reports to **every DM user**. A non-empty list
+restricts sender IDs but permits their reports in groups. `/profile` and confirmed
+`/reset` operate on the invoking user's ID; group transcripts and shared/member
+records are separate. Reset does not erase audits, all group references, local logs,
+or Telegram copies. Current reset success text overstates backup success; verify an
+uploaded backup before assuming recovery. There is no built-in restore command.
 
-| Topic | Decision |
-|---|---|
-| Framework | **Keep aiogram 3.x.** It is not the bottleneck; switching is pure risk. |
-| Reactions | **Merge into one call** returning strict JSON `{reply, reaction}` (json_object mode). |
-| Scaling | **Harden single-instance.** No Redis. Fix leaks/races, bound memory, cut calls. |
-| Memory | **Improve the structured approach** (facts/beliefs/events). No vector DB. |
-| Reply model | **Optimize within flash-lite** (prompt, memory, params). Keep model configurable. |
+Review the [observability runbook](observability.md) and [database guide](database.md)
+when changing logging or deletion behavior.
 
-## LLM proxy capability findings (verified live, 2026-06-13)
+## Concurrency and scaling limits
 
-Before committing to a structured-output strategy, each request mode was tried directly
-against the live proxy. The table records what worked and the consequence for our code.
-Here, "structured output" means asking the model to return machine-parseable JSON rather
-than free-form text.
+The supported topology is one long-polling process. Locks/queues/caches, gate windows,
+and compression cooldowns are process-local. Group extraction writes participant
+profiles under a group lock, so it is not serialized with the participant's DM or
+another group's work. Profile read-modify-write operations and `/reset` need further
+coordination to prevent conflicting in-flight writes.
 
-| Mode | Result | Consequence |
-|---|---|---|
-| Plain chat completion | ✅ works (~1.4–2.4s) | Reaction leaks into text if unstructured. |
-| `response_format={"type":"json_object"}` | ✅ **works, high quality** | **Primary structured-output mechanism for all calls.** |
-| `client.beta.chat.completions.parse` (native) | ❌ 400 `additionalProperties` | Never use against this proxy — wastes a round-trip. |
-| `response_format` `json_schema` strict | ❌ 400 `additionalProperties` | Gemini rejects `additionalProperties`. Avoid. |
+Queue caps are per chat; active states, LLM requests, due-user scans, and log-forwarding
+buffers lack a global hard cap. The batching maximum is checked when a new message
+arrives, not as a strict end-to-end deadline. Readiness checks Mongo connectivity only;
+a green report says nothing about LLM/Telegram delivery. No repository benchmark
+substantiates a 50,000-user capacity claim. See
+[performance and scaling](performance_and_scaling.md).
 
-**Implication:** the current `extract_memory`/`compress_memory` "native parse first, fall
-back to JSON" pattern always fails the first attempt → JSON mode must be the default path,
-gated by config so a future OpenAI deployment can re-enable native parse.
+## Practical validation before a runtime change
 
-## Hot-path cost model (per user message batch)
+1. Read the relevant subsystem and its source before changing retry, trim, reset, or
+   profile replacement semantics.
+2. Run focused regression tests with the `dev` extra and development configuration;
+   keep LLM/Telegram/background calls mocked. See [testing](testing_guide.md).
+3. Validate live endpoint/model capabilities separately using an isolated database.
+   Provider compatibility and historic latency samples are not transferable guarantees.
+4. Observe startup warnings, actual TTL indexes, report authorization, drop counts,
+   and slow-path behavior in a development deployment.
+5. When changing concurrency, test simultaneous conversation/member/profile operations
+   and failure during writes/delivery, not just a single sequential happy path.
 
-The "hot path" is the code that runs for every batch of user messages, so every call it
-makes is multiplied across ~50k users; trimming it is the highest-leverage win. The counts
-below are per user message batch, before and after this effort:
-
-Before → after this effort:
-
-- LLM calls: **2 → 1** (reply + reaction merged) on the chat path; extraction/compression
-  drop a wasted failed `.parse()` round-trip each.
-- Mongo round-trips on chat path: ~5 → ~3 (combine buffer write+read; cache persona).
-- Audit log writes moved **off** the chat hot path (fire-and-forget) + TTL retention.
-
-Here "fire-and-forget" means the write is kicked off without blocking the reply on its
-completion, and "TTL retention" (time-to-live) means old audit rows expire automatically so
-the collection cannot grow without bound.
-
----
-
-## Phased checklist
-
-The work is grouped into phases by subsystem. Each box is a single landed change: `[x]`
-means it is implemented and merged, `[ ]` means it is still outstanding. Phases A–G cover
-the core hardening pass; Phase H captures efficiency and resilience follow-ups.
-
-### Phase A — LLM service: robustness + fewer calls
-- [x] A1. Add `LLM_STRUCTURED_MODE` config (`json_object` default | `native_parse`). Skip the dead native-parse path for Gemini.
-- [x] A2. Single shared `LLMService` instance reused everywhere (fix per-call instantiation in compressor).
-- [x] A3. Bounded retry w/ backoff for transient errors (timeout, connection, 429, 5xx); short caps on the chat path.
-- [x] A4. DRY the JSON-clean + Pydantic-validate logic into one helper.
-- [x] A5. New `generate_reply_bundle()` → `(reply, reaction)` in one json_object call. Graceful fallback to plain reply if JSON parse fails.
-- [x] A6. Audit logging: store `timestamp` as `datetime` (TTL-able), truncate large bodies, fire-and-forget on chat path.
-
-### Phase B — Memory engine (structured, robust)
-- [x] B1. **Atomic buffer trim** via `$pull` on a cutoff timestamp (fixes silent message loss race).
-- [x] B2. Cap `chat_buffers.messages` growth with `$push`/`$slice` safety net.
-- [x] B3. Normalize text (casefold/strip) for fact/belief/event CRUD matching → fewer stale duplicates.
-- [x] B4. Dedup on write; enforce compression budget deterministically + per-user cooldown (fixes compression re-trigger loop).
-- [x] B5. Tune extraction & compression prompts for quality; handle empty/garbage output gracefully.
-
-### Phase C — Database layer
-- [x] C1. `datetime.utcnow()` → `datetime.now(timezone.utc)` everywhere.
-- [x] C2. Startup Mongo `ping` (fail fast); TTL index on `llm_audit_log`.
-- [x] C3. Combine buffer write+read via `find_one_and_update` to cut round-trips.
-
-### Phase D — Telegram layer
-- [x] D1. Implement the `/start` inline command list and `/reset` (reset wipes that user's profile + buffer).
-- [x] D2. Remove dead `AutoTypingMiddleware` (manual typing loop is the real path).
-- [x] D3. Null guards (`from_user`, null LLM content). Bound throttling dict (evict stale users).
-- [x] D4. Use `generate_reply_bundle` in the batch processor (one call).
-
-### Phase E — Concurrency / state
-- [x] E1. Bound/evict idle `UserState` entries (fix unbounded `_states` growth at 50k).
-- [x] E2. Review & tighten batch-cancellation races.
-
-### Phase F — Standards, cleanup, docs
-- [x] F1. Type hints, docstrings, module headers; remove dead code (stale `run_llm_live.py`, dead `/profile` empty-check).
-- [x] F2. Fix stale "SQLite" strings/log lines (main.py, README). `.gitignore logs/`, untrack `bot.log`.
-- [x] F3. Update all docs to match reality (architecture, llm_integration, database, configuration, README, project_plan).
-
-### Phase G — Tests (local only)
-- [x] G1. Tests for combined reply bundle, atomic trim race, compression cooldown, `/reset`, normalized dedup.
-- [x] G2. Fix/replace stale `run_llm_live.py`. Keep mongomock; never hit production Atlas.
-- [x] G3. Full suite green; zero deprecation warnings.
-
-### Phase H — Efficiency & resilience follow-ups
-- [x] H1. **Extraction retry + bounded trim.** `extract_and_trim` retries up to 3 times, re-reading the buffer each attempt (mid-call arrivals folded in); `extract_memory` returns `None` on failure (distinct from empty). On total failure it trims anyway so the buffer stays bounded during an outage.
-- [x] H2. **Compression-failure safety.** `compress_memory` returns `None` on failure and the compressor **skips** `replace_user_memory`, so a failed compression never wipes memory.
-- [x] H3. **Single-pass budget enforcement.** Replaced the per-item read/write loop in `_enforce_budget` with a single read + in-memory drop of lowest-priority items + single write.
-- [x] H4. **pyproject hygiene.** Real metadata, runtime deps mirror `requirements.txt`, `requires-python` matches docs, `[tool.pytest.ini_options]` with `pythonpath`/`asyncio_mode`.
-
-### Horizontal scale (future, out of scope here)
-The single-instance design is deliberate and handles 50k+ users; the ceiling is LLM throughput.
-The exact, mechanical scale-out path (state behind a `StateStore` interface → Redis, distributed
-locks, webhooks behind a load balancer, MongoDB sharding on `user_id`) is documented in
-[performance_and_scaling.md](performance_and_scaling.md#horizontal-scale-migration-path-future).
-The data model, prompts, memory algorithms, and service APIs do not change.
+[Project roadmap](../roadmap.md) records remaining work; this page records
+current safeguards and limitations. [Documentation index](../README.md).

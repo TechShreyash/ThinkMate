@@ -5,26 +5,24 @@
 # no exposed ports, no bundled database.
 
 FROM python:3.14.8-slim
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /usr/local/bin/uv
 
 # - PYTHONUNBUFFERED: stream logs straight to stdout (Coolify/Docker capture them)
 # - PYTHONDONTWRITEBYTECODE: no .pyc clutter
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_PYTHON_DOWNLOADS=never \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
-# Runtime dependencies only — mirrors [project].dependencies in pyproject.toml.
+# Runtime dependencies use the same lockfile as local development.
 # Test-only deps (pytest, hypothesis, mongomock) are intentionally excluded to
 # keep the image small.
-RUN pip install \
-    "aiogram>=3.15.0" \
-    "python-dotenv>=1.0.1" \
-    "motor>=3.6.0" \
-    "openai>=1.55.0" \
-    "pydantic>=2.0.0" \
-    "loguru>=0.7.2"
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project --python /usr/local/bin/python
 
 # Application code + the persona file the bot loads at startup.
 COPY app/ ./app/

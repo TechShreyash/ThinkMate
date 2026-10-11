@@ -1,24 +1,27 @@
 """Application entrypoint: verify MongoDB, init indexes, register middlewares/routers,
 and start long-polling the Telegram bot.
 """
+
 import asyncio
 import contextlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from aiogram import Bot, Dispatcher
 from loguru import logger
+
 from app.config import config
-from app.handlers import main_router
-from app.handlers.commands import setup_bot_commands, _fmt_uptime
-from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
 from app.database.connection import init_db, ping_db
+from app.handlers import main_router
+from app.handlers.commands import _fmt_uptime, setup_bot_commands
+from app.handlers.middlewares import DbSessionMiddleware, ThrottlingMiddleware
 from app.services import log_forwarder
 from app.services.error_log_sink import make_error_log_sink
 from app.services.health import (
+    flush_metrics,
+    load_persisted_metrics,
+    start_consolidation_scheduler,
     start_metrics_logger,
     start_metrics_persister,
-    load_persisted_metrics,
-    flush_metrics,
-    start_consolidation_scheduler,
     start_proactive_scheduler,
 )
 
@@ -91,6 +94,7 @@ async def main():
     # Validate the configured persona file after the warning sink is installed so a
     # broken PERSONA_FILE is visible in logs and forwarded to the Logs_Channel.
     from app.services.chat_manager import validate_persona_file
+
     validate_persona_file()
 
     # Optional proactive check-in scheduler (Phase 12). Needs the aiogram bot to
@@ -116,7 +120,7 @@ async def main():
     await setup_bot_commands(bot)
 
     # Announce startup on the logs channel (best-effort; never blocks polling).
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     try:
         me = await bot.get_me()
         who = f"@{me.username}" if me.username else "ThinkMate"
@@ -147,7 +151,7 @@ async def main():
         logger.info("Shutting down: cancelling background tasks...")
         # Announce shutdown on the logs channel before the HTTP session is closed
         # (best-effort; the send is guarded and never raises).
-        uptime = datetime.now(timezone.utc) - started_at
+        uptime = datetime.now(UTC) - started_at
         await log_forwarder.send(
             bot,
             None,
@@ -169,5 +173,5 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt, SystemExit:
         logger.info("ThinkMate bot stopped.")
