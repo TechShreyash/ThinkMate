@@ -7,8 +7,10 @@ compression (rate-limited) when the memory profile outgrows its budget.
 """
 
 import asyncio
+import json
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -25,17 +27,16 @@ from app.services.memory_loader import (
     load_profile_doc,
 )
 
-# Representative UTC offsets so the model never needs to do its own timezone math.
-# Covers: South Asia, US East/West, UK, Central Europe, Gulf, East Asia.
-# Standard offsets are close enough — the model can handle minor DST shifts.
-_REFERENCE_ZONES: list[tuple[str, float]] = [
-    ("India", 5.5),
-    ("US-East", -5),
-    ("US-West", -8),
-    ("UK", 0),
-    ("Europe-Central", 1),
-    ("Dubai", 4),
-    ("Japan", 9),
+# Named reference cities preserve local clocks across daylight-saving transitions.
+# These references do not identify the user's own timezone.
+_REFERENCE_ZONES: list[tuple[str, str]] = [
+    ("India", "Asia/Kolkata"),
+    ("US-East", "America/New_York"),
+    ("US-West", "America/Los_Angeles"),
+    ("UK", "Europe/London"),
+    ("Europe-Central", "Europe/Berlin"),
+    ("Dubai", "Asia/Dubai"),
+    ("Japan", "Asia/Tokyo"),
 ]
 
 
@@ -43,15 +44,25 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
     """A short time-context string for the system prompt: current UTC time, reference
     local times for major zones, and a coarse 'last talked' gap when a previous
     interaction exists (never raw seconds, never a gap on first contact)."""
+    # Callers normally supply UTC; normalize aware offsets and treat naive values
+    # as UTC, consistent with the Mongo timestamps accepted below.
+    now = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
     lines = [f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M')}"]
-    # Compact local-time references so the model can answer date/time questions
-    # from users worldwide without doing timezone arithmetic.
     refs = []
-    for label, offset_hours in _REFERENCE_ZONES:
-        local = now + timedelta(hours=offset_hours)
+    for label, zone_name in _REFERENCE_ZONES:
+        try:
+            local = now.astimezone(ZoneInfo(zone_name))
+        except ZoneInfoNotFoundError:
+            # Some hosts lack tzdata. UTC remains authoritative; omit unavailable
+            # clocks instead of labelling an approximate fixed offset as local time.
+            continue
         refs.append(f"{label} {local.strftime('%H:%M %b %d')}")
-    lines.append("Local times: " + " · ".join(refs))
-    lines.append("For any other region, derive the local time from UTC.")
+    if refs:
+        lines.append("Local times: " + " · ".join(refs))
+    lines.append(
+        "For any other region, use its UTC offset for this date, including daylight "
+        "saving time. These are reference cities; do not assume the user's timezone."
+    )
     if last_interaction_at is not None:
         try:
             if (
@@ -68,9 +79,8 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
             else:
                 ago = f"{secs // 86400} day(s) ago"
             lines.append(f"Last talked with this user: {ago}")
-        # Optional metadata must not interrupt reply handling.
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except (TypeError, ValueError, OverflowError) as exc:
+            logger.debug("Invalid last-interaction timestamp; skipping gap: {}", exc)
     return "\n".join(lines)
 
 
@@ -84,42 +94,71 @@ _warned_missing_persona_paths: set[str] = set()
 _NEGATIVE_AFFINITY_STEP = -0.1
 
 
+def _read_persona_file(path: str) -> str:
+    """Read valid, nonblank UTF-8 persona text, accepting an optional UTF-8 BOM."""
+    with open(path, "r", encoding="utf-8-sig") as persona_file:
+        content = persona_file.read()
+    if not content.strip():
+        raise ValueError("persona file is empty or whitespace-only")
+    return content
+
+
+def _persona_fallback(path: str) -> str:
+    """Keep a last good read only when it belongs to this configured file."""
+    if _persona_cache["path"] == path and _persona_cache["content"]:
+        return _persona_cache["content"]
+    return _DEFAULT_PERSONA
+
+
+def _warn_persona_failure(path: str, exc: Exception) -> None:
+    if path in _warned_missing_persona_paths:
+        return
+    _warned_missing_persona_paths.add(path)
+    fallback = (
+        "last successfully loaded persona for this file"
+        if _persona_cache["path"] == path and _persona_cache["content"]
+        else "fallback default persona"
+    )
+    logger.warning(
+        "Configured PERSONA_FILE {!r} could not be read at {!r}; using {} instead. "
+        "Fix PERSONA_FILE or create a nonblank UTF-8 file. Error: {}",
+        config.PERSONA_FILE,
+        path,
+        fallback,
+        exc,
+    )
+
+
 def validate_persona_file() -> bool:
-    """Warn once when ``PERSONA_FILE`` points at a missing/unreadable file."""
-    path = config.PERSONA_FILE
+    """Warn once when the configured persona is unreadable, invalid UTF-8, or blank."""
+    path = os.path.abspath(config.PERSONA_FILE)
     try:
-        os.path.getmtime(path)
-    except OSError as exc:
-        abspath = os.path.abspath(path)
-        if abspath not in _warned_missing_persona_paths:
-            _warned_missing_persona_paths.add(abspath)
-            logger.warning(
-                "Configured PERSONA_FILE {!r} could not be read at {!r}; using fallback "
-                "default persona instead. Fix PERSONA_FILE or create the file. Error: {}",
-                path,
-                abspath,
-                exc,
-            )
+        _read_persona_file(path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        _warn_persona_failure(path, exc)
         return False
+    _warned_missing_persona_paths.discard(path)
     return True
 
 
 def _load_persona() -> str:
-    """Return the persona text, re-reading the file only when it changes on disk."""
-    path = config.PERSONA_FILE
+    """Cache valid content by absolute path, nanosecond modification time, and size.
+
+    A failed refresh retains this file's last good text. Changing PERSONA_FILE never
+    reuses the previous file's persona; a new unreadable path gets the default.
+    """
+    path = os.path.abspath(config.PERSONA_FILE)
     try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        validate_persona_file()
-        return _DEFAULT_PERSONA
-    if _persona_cache["path"] != path or _persona_cache["mtime"] != mtime:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                _persona_cache.update(path=path, mtime=mtime, content=f.read())
-        except OSError as e:
-            logger.warning(f"Could not read persona file {path}: {e}")
-            return _persona_cache["content"] or _DEFAULT_PERSONA
-    return _persona_cache["content"]
+        stat = os.stat(path)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if _persona_cache["path"] != path or _persona_cache["mtime"] != signature:
+            content = _read_persona_file(path)
+            _persona_cache.update(path=path, mtime=signature, content=content)
+        _warned_missing_persona_paths.discard(path)
+        return _persona_cache["content"]
+    except (OSError, UnicodeError, ValueError) as exc:
+        _warn_persona_failure(path, exc)
+        return _persona_fallback(path)
 
 
 async def handle_message(
@@ -161,18 +200,20 @@ async def handle_message(
     )
     buffer_chars = sum(len(m["content"]) for m in messages)
 
-    # History rendering: DMs stay single-party (exact current behavior); groups are
-    # rendered multi-party so the model can distinguish speakers. Every turn — including
-    # the bot's own past replies — is prefixed with the speaker's stored name, so the
-    # transcript reads as a consistent named multi-party log ("Alice: …", "Bob: …",
-    # "<bot>: …"). The model is told (in the system prompt's GROUP CHAT section) that the
-    # name before the first colon is attribution, not message text, and that it must not
-    # prefix its own reply with a name.
+    # Keep group attribution separate from message text. Names and pasted multiline
+    # text stay within JSON strings, so they cannot create additional speaker labels.
+    # The API role still distinguishes real user turns from the bot's earlier replies.
     if is_group:
         active_history = []
         for m in messages:
-            name = m.get("sender_name") or ""
-            content = f"{name}: {m['content']}" if name else m["content"]
+            content = json.dumps(
+                {
+                    "sender_id": m.get("sender_id"),
+                    "sender_name": m.get("sender_name") or "",
+                    "text": m["content"],
+                },
+                ensure_ascii=False,
+            )
             active_history.append({"role": m["role"], "content": content})
     else:
         active_history = [
@@ -193,8 +234,7 @@ async def handle_message(
             extraction_threshold = min(
                 config.NEW_USER_EXTRACTION_CHARS, config.CHAT_BUFFER_MAX_CHARS
             )
-    # Optional metadata must not interrupt reply handling.
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - threshold lookup must not break replies
         logger.debug(
             f"new-user extraction threshold check failed for chat {chat_id}: {e}"
         )

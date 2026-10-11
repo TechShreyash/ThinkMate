@@ -167,7 +167,24 @@ async def test_generate_checkin_returns_text_and_records_success():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sentinel", ["NOTHING", "none", "n/a"])
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        "NOTHING",
+        "none",
+        "n/a",
+        "na!",
+        '"NOTHING"',
+        "'nothing!'",
+        '"none".',
+        "“NOTHING”",
+        "‘n/a’",
+        "```\nNOTHING\n```",
+        '```json\n"n/a"\n```',
+        "```text\nNOTHING\n```",
+        "```plaintext\n'none'\n```",
+    ],
+)
 async def test_generate_checkin_decline_sentinel_returns_none(sentinel):
     """Decline sentinels mean 'send nothing' (Req 7.3)."""
     with (
@@ -180,6 +197,30 @@ async def test_generate_checkin_decline_sentinel_returns_none(sentinel):
         result = await llm_service.generate_checkin(1, "sys", "some real memory")
 
     assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "Nothing beats a weekend hike. Any trails on your list?",
+        '"Nothing beats a weekend hike. Any trails on your list?"',
+        "```text\nNothing beats a weekend hike. Any trails on your list?\n```",
+        "'NOTHING",
+    ],
+)
+async def test_generate_checkin_preserves_non_decline_text(opener):
+    """Sentinel matching must not swallow a real message or strip its formatting."""
+    with (
+        patch.object(
+            llm_service.client.chat.completions, "create", new_callable=AsyncMock
+        ) as mock_create,
+        patch.object(llm_service, "_fire_log"),
+    ):
+        mock_create.return_value = _fake_response(opener)
+        result = await llm_service.generate_checkin(1, "sys", "some real memory")
+
+    assert result == opener
 
 
 @pytest.mark.asyncio

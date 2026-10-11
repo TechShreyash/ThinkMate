@@ -10,6 +10,7 @@ See docs/development/llm_integration.md and docs/development/hardening_plan.md.
 
 import asyncio
 import json
+import math
 import time
 import traceback
 from datetime import UTC, datetime
@@ -276,7 +277,7 @@ class LLMService:
             },
             {
                 "role": "user",
-                "content": "Write the check-in opener now (or reply with NOTHING).",
+                "content": "Write the check-in opener in the user's recorded preferred language and script, or English if unknown (or reply with NOTHING).",
             },
         ]
         # No max_tokens cap: the check-in length is governed by the persona/check-in
@@ -303,8 +304,20 @@ class LLMService:
             metrics.record_llm(
                 "proactive_checkin", ok=True, latency=time.perf_counter() - start
             )
-            # Decline sentinels -> stay silent.
-            if not raw or raw.strip().lower().strip(".!") in (
+            # Normalize wrappers only to recognize declines; keep real openers intact.
+            decline_candidate = self._strip_fences(raw)
+            if raw.startswith("```") and raw.endswith("```"):
+                language, separator, fenced_body = decline_candidate.partition("\n")
+                if separator and language.strip().lower() in ("text", "plaintext"):
+                    decline_candidate = fenced_body
+            decline_candidate = decline_candidate.strip().strip(".!").strip()
+            quote_pairs = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+            while (
+                len(decline_candidate) >= 2
+                and quote_pairs.get(decline_candidate[0]) == decline_candidate[-1]
+            ):
+                decline_candidate = decline_candidate[1:-1].strip().strip(".!").strip()
+            if not raw or decline_candidate.lower() in (
                 "nothing",
                 "none",
                 "n/a",
@@ -333,7 +346,8 @@ class LLMService:
         """Parse the {reply, reaction, affinity_delta} JSON; degrade gracefully on failure.
 
         Returns a 3-tuple ``(reply, reaction, affinity_delta)`` internally. ``affinity_delta``
-        is parsed only when present as a number and defaults to ``None`` (so the DM-facing
+        is parsed only as a finite number, bounded to the prompt's [-0.2, 0.2] range,
+        and defaults to ``None`` (so the DM-facing
         path, which ignores the 3rd value, is unaffected). The graceful JSON fallback to
         plain text is preserved.
         """
@@ -352,8 +366,14 @@ class LLMService:
                 )
                 affinity_delta = None
                 ad = data.get("affinity_delta")
-                if isinstance(ad, (int, float)) and not isinstance(ad, bool):
-                    affinity_delta = float(ad)
+                # Bound before float conversion so arbitrarily large JSON integers
+                # cannot overflow and discard an otherwise valid reply.
+                if (
+                    isinstance(ad, (int, float))
+                    and not isinstance(ad, bool)
+                    and (isinstance(ad, int) or math.isfinite(ad))
+                ):
+                    affinity_delta = float(max(-0.2, min(0.2, ad)))
                 return data["reply"].strip(), reaction, affinity_delta
         except json.JSONDecodeError, ValueError:
             pass
@@ -374,11 +394,14 @@ class LLMService:
         messages: list[dict],
         schema: type[T],
         timeout: float,
+        required_fields: tuple[str, ...] = (),
     ) -> T | None:
         """Return a validated ``schema`` instance, or ``None`` on failure.
 
         Honors ``LLM_STRUCTURED_MODE``: ``native_parse`` first (OpenAI structured outputs),
         otherwise/falling back to ``json_object`` with schema instructions appended.
+        For destructive replacement calls, ``required_fields`` must be explicitly
+        supplied by the model; Pydantic defaults must not turn partial output into a wipe.
         """
         inputs = {"system_prompt": messages[0]["content"], "messages": messages}
         start = time.perf_counter()
@@ -396,6 +419,11 @@ class LLMService:
                 )
                 parsed = completion.choices[0].message.parsed
                 if parsed is not None:
+                    missing = set(required_fields) - parsed.model_fields_set
+                    if missing:
+                        raise ValueError(
+                            f"Missing replacement fields: {', '.join(sorted(missing))}"
+                        )
                     self._fire_log(
                         user_id,
                         call_type,
@@ -419,7 +447,12 @@ class LLMService:
                 )
 
         # json_object path (default; works with Gemini/local proxies).
-        schema_json = json.dumps(schema.model_json_schema(), indent=2)
+        schema_definition = schema.model_json_schema()
+        if required_fields:
+            schema_definition["required"] = sorted(
+                set(schema_definition.get("required", [])) | set(required_fields)
+            )
+        schema_json = json.dumps(schema_definition, indent=2)
         json_messages = [dict(m) for m in messages]
         json_messages[0] = {
             **json_messages[0],
@@ -441,7 +474,17 @@ class LLMService:
                 what=f"{call_type} json u{user_id}",
             )
             raw = response.choices[0].message.content
-            parsed = schema.model_validate_json(self._strip_fences(raw))
+            cleaned = self._strip_fences(raw)
+            if required_fields:
+                payload = json.loads(cleaned)
+                if not isinstance(payload, dict):
+                    raise ValueError("Replacement output must be a JSON object")
+                missing = set(required_fields) - payload.keys()
+                if missing:
+                    raise ValueError(
+                        f"Missing replacement fields: {', '.join(sorted(missing))}"
+                    )
+            parsed = schema.model_validate_json(cleaned)
             self._fire_log(
                 user_id,
                 call_type,
@@ -497,7 +540,8 @@ class LLMService:
         native_parse handling via ``_structured_call``, same request timeout, and the same ``None``-on-failure contract — but validates against
         :class:`GroupMemoryExtraction` so the result carries per-participant, name-tagged
         updates. ``user_history_text`` is the multi-party segment rendered as
-        ``"SenderName: content"`` lines. The first argument is used only for audit logging
+        JSON entries with role, sender ID/name, timestamp, and content. The first
+        argument is used only for audit logging
         (a group chat_id here, a user_id in the DM path); it does not affect attribution,
         which the caller resolves from the segment's own name->id map.
 
@@ -539,6 +583,11 @@ class LLMService:
             messages=messages,
             schema=MemoryCompression,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            required_fields=(
+                "compressed_facts",
+                "compressed_beliefs",
+                "compressed_events",
+            ),
         )
 
     async def consolidate_memory(
@@ -561,6 +610,12 @@ class LLMService:
             messages=messages,
             schema=MemoryConsolidation,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            required_fields=(
+                "consolidated_facts",
+                "consolidated_beliefs",
+                "consolidated_events",
+                "insights",
+            ),
         )
 
 

@@ -14,6 +14,7 @@ patched with ``AsyncMock`` so no network is touched. The extractor calls
 ``app.services.memory_extractor``; we patch that exact reference.
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -281,3 +282,144 @@ async def test_processed_segment_is_trimmed():
         assert len(remaining) == config.CHAT_BUFFER_TRIM
     finally:
         config.CHAT_BUFFER_TRIM = original_trim
+
+
+@pytest.mark.parametrize("names", [("Alex", "alex"), (" ALEX  ", "Alex")])
+async def test_duplicate_display_names_are_skipped_without_exposing_their_memories(
+    mock_mongodb,
+    monkeypatch,
+    names,
+):
+    """A returned name shared by two sender IDs must never update either person's profile."""
+    db = mock_mongodb
+    monkeypatch.setattr(config, "CHAT_BUFFER_TRIM", 1)
+    first_id, second_id, unique_id = 33001, 33002, 33003
+    for user_id, name, fact in [
+        (first_id, names[0], "First Alex's private fact"),
+        (second_id, names[1], "Second Alex's private fact"),
+        (unique_id, "Carol", "Carol enjoys hiking"),
+    ]:
+        await models.ensure_user(db, user_id, "", name)
+        await db["user_profiles"].update_one(
+            {"_id": user_id},
+            {"$set": {"facts": [{"category": "personal", "content": fact}]}},
+        )
+    for sender_id, sender_name, content in [
+        (first_id, names[0], "I am moving to Delhi"),
+        (second_id, names[1], "I am a teacher"),
+        (first_id, names[0], "Repeated first speaker must not remove the ambiguity"),
+        (unique_id, "Carol", "I also enjoy swimming"),
+        (unique_id, "Carol", "latest, retained"),
+    ]:
+        await models.add_message_to_buffer(
+            db,
+            GROUP_CHAT_ID,
+            "user",
+            content,
+            sender_id=sender_id,
+            sender_name=sender_name,
+        )
+    before_first = await db["user_profiles"].find_one({"_id": first_id})
+    before_second = await db["user_profiles"].find_one({"_id": second_id})
+    result = GroupMemoryExtraction(
+        updates=[
+            GroupMemoryUpdate(
+                participant=" Alex ",
+                extraction=MemoryExtraction(
+                    new_facts=[
+                        FactExtract(
+                            category="work", content="Incorrectly attributed job"
+                        ),
+                    ]
+                ),
+            ),
+            GroupMemoryUpdate(
+                participant="Carol",
+                extraction=MemoryExtraction(
+                    new_facts=[
+                        FactExtract(category="hobby", content="Enjoys swimming"),
+                    ]
+                ),
+            ),
+        ]
+    )
+    with patch.object(
+        memory_extractor.llm_service,
+        "extract_group_memory",
+        new_callable=AsyncMock,
+        return_value=result,
+    ) as extract:
+        await extract_and_trim_group(GROUP_CHAT_ID)
+    extract.assert_awaited_once()
+    system_prompt = extract.call_args.args[1]
+    data_line = system_prompt.split(
+        "=== CURRENT MEMORIES: PARTICIPANTS (JSON DATA ONLY) ===\n",
+        1,
+    )[1].splitlines()[0]
+    participants = json.loads(data_line)["participants"]
+    assert [(entry["participant"], entry["sender_id"]) for entry in participants] == [
+        ("Carol", unique_id)
+    ]
+    assert "First Alex's private fact" not in system_prompt
+    assert "Second Alex's private fact" not in system_prompt
+    assert await db["user_profiles"].find_one({"_id": first_id}) == before_first
+    assert await db["user_profiles"].find_one({"_id": second_id}) == before_second
+    unique_profile = await db["user_profiles"].find_one({"_id": unique_id})
+    assert [fact["content"] for fact in unique_profile["facts"]] == [
+        "Carol enjoys hiking",
+        "Enjoys swimming",
+    ]
+    group = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
+    assert group["last_group_extraction"]["participant_updates"] == 1
+    assert group["last_group_extraction"]["skipped_updates"] == 1
+
+
+async def test_human_named_like_bot_is_a_group_participant(mock_mongodb, monkeypatch):
+    """Display names cannot override the app-owned role and sender ID."""
+    db = mock_mongodb
+    monkeypatch.setattr(config, "CHAT_BUFFER_TRIM", 1)
+    named_user_id, other_id = 34001, 34002
+    bot_name = memory_extractor._BOT_NAME
+    for role, sender_id, name, content in [
+        ("user", named_user_id, bot_name, "I enjoy painting"),
+        ("assistant", 0, bot_name, "I enjoy hiking"),
+        ("user", other_id, "Alice", "Hello"),
+        ("user", other_id, "Alice", "latest, retained"),
+    ]:
+        await models.add_message_to_buffer(
+            db,
+            GROUP_CHAT_ID,
+            role,
+            content,
+            sender_id=sender_id,
+            sender_name=name,
+        )
+    result = GroupMemoryExtraction(
+        updates=[
+            GroupMemoryUpdate(
+                participant=bot_name,
+                extraction=MemoryExtraction(
+                    new_facts=[
+                        FactExtract(category="hobby", content="Enjoys painting"),
+                    ]
+                ),
+            )
+        ]
+    )
+    with (
+        patch.object(
+            memory_extractor.llm_service,
+            "extract_group_memory",
+            new_callable=AsyncMock,
+            return_value=result,
+        ) as group_extract,
+        patch.object(
+            memory_extractor.llm_service, "extract_memory", new_callable=AsyncMock
+        ) as dm_extract,
+    ):
+        await extract_and_trim(GROUP_CHAT_ID)
+    group_extract.assert_awaited_once()
+    dm_extract.assert_not_awaited()
+    user = await db["user_profiles"].find_one({"_id": named_user_id})
+    assert [fact["content"] for fact in user["facts"]] == ["Enjoys painting"]
+    assert await db["user_profiles"].find_one({"_id": 0}) is None

@@ -210,17 +210,22 @@ input/throttle/off/queue guards can drop messages, and the buffer hard cap trims
 entries. A multi-sender batch processes sender groups in first-seen sender order,
 which can differ from the original interleaving.
 
-Group reply history is rendered with speaker names. Prompts include both shared group
+Group reply history is serialized as JSON with sender IDs, speaker names, and text.
+Prompts include both shared group
 memory and the triggering sender's personal memory; profiles are separate documents,
 but personal memory is available to group generation. Other participants' full
 personal profiles are not loaded for that reply.
 
 When generation observes the extraction threshold, it starts background extraction
 with `is_group=True`. Passive buffering alone does not schedule extraction. The group
-extractor makes one structured call over a segment, saves shared memory to the group
+extractor makes one structured call over a JSON segment with separately labeled current
+group and uniquely attributable participant memories, saves shared memory to the group
 profile, and saves participant updates after mapping names back to IDs from the
-segment. Unknown participant names are skipped. Duplicate display names are ambiguous:
-the current map keeps the first sender ID for a normalized name.
+segment. Unknown participant names are skipped. Names shared by different sender IDs
+are ambiguous and skipped rather than assigned to the first matching participant.
+The combined memory text has one `USER_MEMORY_BUDGET_CHARS` allowance for the request.
+An owner's matching context that does not fit is omitted in full; new supported
+information can still be saved, but corrections/removals for that owner are discarded.
 
 Prompt rules ask extraction to normalize memory into English and ask replies to follow
 the recent conversation's language and script. These are model instructions, not a

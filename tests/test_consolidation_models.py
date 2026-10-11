@@ -222,6 +222,16 @@ async def test_apply_consolidation_writes_coherent_profile_and_truncates_insight
 
         async with connection.db_session() as db:
             await models.ensure_user(db, user_id, "testuser", "Test User")
+            original_mood = {
+                "mood": "content",
+                "intensity": 0.6,
+                "trigger": "stable routine",
+                "detected_at": datetime(2024, 1, 1, tzinfo=UTC),
+            }
+            await db["user_profiles"].update_one(
+                {"_id": user_id},
+                {"$set": {"emotional_state": original_mood}},
+            )
 
             before = await db["user_profiles"].find_one({"_id": user_id})
             assert "last_consolidated_at" not in before  # not set on insert
@@ -244,8 +254,8 @@ async def test_apply_consolidation_writes_coherent_profile_and_truncates_insight
         assert doc["events"][0]["description"] == "Started a new job"
         assert doc["events"][0]["significance"] == "major"
 
-        # Emotional state preserved.
-        assert doc["emotional_state"]["mood"] == "content"
+        # Maintenance preserves the observation and its original age.
+        assert doc["emotional_state"] == before["emotional_state"]
 
         # Timestamps set.
         assert doc.get("last_consolidated_at") is not None

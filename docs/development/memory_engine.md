@@ -44,8 +44,8 @@ In groups, [messages.py](../../app/handlers/messages.py) also buffers accepted t
 Each extraction run makes up to three logical extraction attempts:
 
 1. Read the raw buffer, including sender attribution and timestamps. Return immediately if there are no entries beyond `CHAT_BUFFER_TRIM`.
-2. Select everything except the latest retained entries and render a date-stamped transcript.
-3. Ask the LLM for structured updates. DM extraction also includes the current compiled profile; group extraction currently does not include existing group or participant profiles.
+2. Select everything except the latest retained entries and serialize transcript entries as JSON data with role, sender attribution, timestamps, and text.
+3. Ask the LLM for structured updates. DM extraction includes the current compiled profile; group extraction includes separately labeled group and uniquely attributable participant profiles. Memory content is serialized as JSON data so embedded headings remain part of the supplied text.
 4. On a non-`None` result, save updates and trim the oldest selected count. A valid empty result still counts as success and the selected history is trimmed.
 5. On `None`, reread the buffer for the next attempt. After three unsuccessful attempts, trim the oldest entries anyway. This intentionally loses unextracted history during sustained LLM failure.
 
@@ -59,23 +59,25 @@ A group attempt uses one `GroupMemoryExtraction` result containing optional shar
 
 - Shared updates are saved under the group `chat_id`.
 - Participant names are matched to sender IDs from the extracted segment using case folding and collapsed whitespace. Unknown names are skipped.
-- If two people share a display name, the first ID seen wins. This deterministic tie-break does not establish correct identity; attribution remains ambiguous.
+- Names shared by different sender IDs are ambiguous and skipped, preventing updates from being assigned to the first matching person.
 - A group profile marker records whether shared memory was saved and how many participant updates were saved or skipped, including on an otherwise empty successful result.
 - Participant writes, the group marker, and buffer trim are separate operations. A failure can leave some updates saved while history remains available for re-extraction.
 
+Group extraction limits the combined supplied memory text to `USER_MEMORY_BUDGET_CHARS`; transcript, metadata, instructions, and schema add further request content. An owner's memory is omitted in full when it does not fit, retaining the participant identity and an explicit availability flag. New supported information can still be saved, but updates/removals for an owner whose matching context was omitted are discarded. This keeps large groups from multiplying the full personal-profile budget by the number of participants.
+
 ## Compiling memory
 
-`compile_memory_text` is a pure function that renders summary, inferred gender, communication style, facts, beliefs, behavioral insights, events, current mood, and a recent mood trend. Missing fields produce empty/default sections. `compile_memory_block` pairs that text with `len(text) > USER_MEMORY_BUDGET_CHARS`; `build_memory_block` first fetches the profile.
+`compile_memory_text` is a pure function that renders summary, inferred gender, communication style, facts, beliefs, behavioral insights, events, the latest recorded mood, and a recent mood trend. Mood context includes UTC observation timestamps (or `unknown` for legacy entries) and explicitly marks the latest mood as a past observation. Missing fields produce empty/default sections. `compile_memory_block` pairs that text with `len(text) > USER_MEMORY_BUDGET_CHARS`; `build_memory_block` first fetches the profile.
 
-DM replies record `last_interaction_at` and reset the unanswered-check-in streak with a combined read/update, returning the previous interaction timestamp for a coarse gap. Group replies include current time context without updating the personal interaction timestamp. Time context includes fixed reference UTC offsets, so it is approximate for regions with daylight saving time; it is not a per-user timezone setting.
+DM replies record `last_interaction_at` and reset the unanswered-check-in streak with a combined read/update, returning the previous interaction timestamp for a coarse gap. Group replies include current time context without updating the personal interaction timestamp. Time context uses named reference cities with date-aware daylight-saving offsets; unavailable timezone data causes a reference to be omitted while UTC remains available. Reference cities are not a per-user timezone setting.
 
 Gender is inferred by the extraction model into a dedicated field, with instructions to avoid guessing from a name. It is not verified identity. Compression and consolidation do not modify this field.
 
-Extraction mood updates also append to `mood_history`, retaining the latest `MAX_MOOD_HISTORY` entries (default `10`). Compression and consolidation can replace the current mood but do not append to this history. The displayed trend therefore represents extraction-time observations, not every conversational mood change.
+Extraction mood updates also append to `mood_history`, retaining the latest `MAX_MOOD_HISTORY` entries (default `10`). Compression and consolidation preserve the mood, its original `detected_at`, and history even if the model emits a mood: reorganizing stored memory provides no new mood evidence. The displayed trend represents extraction-time observations, not every conversational mood change.
 
 ## Compression and budget enforcement
 
-Compression sends the compiled profile to the memory model with a target of 80% of `USER_MEMORY_BUDGET_CHARS`. A `None` result skips replacement. A validated result replaces facts, beliefs, and events, including when those returned lists are empty. It updates summary/style only when non-null and mood only when provided; identity, gender, preferences, insights, and mood history remain in the document.
+Compression sends the compiled profile to the memory model with a target of 80% of `USER_MEMORY_BUDGET_CHARS`. A `None` result skips replacement. A validated result replaces facts, beliefs, and events, including when those returned lists are empty. It updates summary/style only when non-null; identity, gender, preferences, insights, recorded mood, and mood history remain in the document.
 
 The deterministic post-pass reads the profile once and removes items from the front of the arrays in this order: events, then beliefs, then facts. It recomputes rendered length locally and writes changed arrays once. This is array order, not a sort by event date or significance, so a major event can be removed.
 
@@ -87,7 +89,7 @@ The scheduler checks profiles after each `CONSOLIDATION_SCAN_INTERVAL_SECS` (def
 
 Each scan selects up to `CONSOLIDATION_MAX_USERS_PER_SCAN` qualifying profiles (default `50`) and processes them sequentially. Item-count filtering occurs in Python, so finding those profiles can read more than 50 documents. Set `CONSOLIDATION_INTERVAL_SECS <= 0` to disable the scheduler.
 
-Consolidation sends the compiled current profile, not the full conversation history. On `None`, it leaves memory and the consolidation timestamp unchanged, allowing a later scan to retry. On a validated result it replaces facts/beliefs/events and insights, updates optional summary/style/mood, advances `last_consolidated_at`, and runs the same budget post-pass. Insights are capped at `MAX_INSIGHTS` (default `5`) and are model inferences rendered separately from user-stated beliefs.
+Consolidation sends the compiled current profile, not the full conversation history. On `None`, it leaves memory and the consolidation timestamp unchanged, allowing a later scan to retry. On a validated result it replaces facts/beliefs/events and insights, updates optional summary/style, advances `last_consolidated_at`, and runs the same budget post-pass. Insights are capped at `MAX_INSIGHTS` (default `5`) and are model inferences rendered separately from user-stated beliefs.
 
 ## Concurrency and retention limits
 
@@ -101,4 +103,4 @@ Profiles can contain personal facts, health details, inferred gender, moods, and
 
 ## Relevant tests
 
-[test_hardening.py](../../tests/test_hardening.py) covers normal concurrent-appends trimming, hard caps, normalized fact deduplication, retry rereads, and failure trimming. [test_group_extraction.py](../../tests/test_group_extraction.py) covers shared/participant saves and unresolved names. [test_compression_safety.py](../../tests/test_compression_safety.py) covers `None` preservation and array shedding. The consolidation [model](../../tests/test_consolidation_models.py), [run](../../tests/test_consolidation_run.py), and [scheduler](../../tests/test_consolidation_scheduler.py) tests cover application and cadence. These mocked tests do not prove model accuracy or cross-process concurrency safety; use the [testing guide](testing_guide.md) for running them.
+[test_hardening.py](../../tests/test_hardening.py) covers normal concurrent-appends trimming, hard caps, normalized fact deduplication, retry rereads, and failure trimming. [test_group_extraction.py](../../tests/test_group_extraction.py) covers shared/participant saves and unresolved names. [Extraction context tests](../../tests/test_extraction_context.py) verify JSON attribution, exact-key corrections, and bounded group memory requests through the real SDK with mocked HTTP. [Mood preservation tests](../../tests/test_memory_mood_preservation.py) cover maintenance preserving observations and timestamps. [test_compression_safety.py](../../tests/test_compression_safety.py) covers `None` preservation and array shedding. The consolidation [model](../../tests/test_consolidation_models.py), [run](../../tests/test_consolidation_run.py), and [scheduler](../../tests/test_consolidation_scheduler.py) tests cover application and cadence. These mocked tests do not prove model accuracy or cross-process concurrency safety; use the [testing guide](testing_guide.md) for running them.

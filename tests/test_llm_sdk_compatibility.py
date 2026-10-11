@@ -81,6 +81,39 @@ async def test_reply_passes_through_real_sdk_and_httpx2(sdk_service):
     assert requests[0].extensions["timeout"]["read"] == config.LLM_REQUEST_TIMEOUT_SECS
 
 
+@pytest.mark.parametrize(
+    ("raw_delta", "expected"),
+    [
+        ("0.05", 0.05),
+        ("-0.05", -0.05),
+        ("100", 0.2),
+        ("-100", -0.2),
+        ("9" * 400, 0.2),
+        ("NaN", None),
+        ("Infinity", None),
+        ("-1e309", None),
+        ("true", None),
+        ('"0.05"', None),
+        ("null", None),
+    ],
+)
+async def test_group_affinity_is_bounded_without_losing_reply(
+    sdk_service, raw_delta, expected
+):
+    def handler(request):
+        content = '{"reply":"Hello!","reaction":"","affinity_delta":' + raw_delta + "}"
+        return httpx2.Response(200, json=_completion(content))
+
+    service = sdk_service(handler)
+    result = await service.generate_reply_bundle(
+        -123,
+        "system",
+        [{"role": "user", "content": "Hi"}],
+        with_affinity=True,
+    )
+    assert result == ("Hello!", None, expected)
+
+
 async def test_native_parse_uses_sdk_schema_without_fallback(sdk_service, monkeypatch):
     requests = []
     content = '{"new_facts":[{"category":"hobby","content":"Enjoys gardening."}]}'

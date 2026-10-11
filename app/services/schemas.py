@@ -76,9 +76,10 @@ class EventExtract(BaseModel):
         description=(
             "Absolute calendar date of the event in ISO form: 'YYYY-MM-DD' when the day is "
             "known, or 'YYYY-MM' / 'YYYY' when only the month or year is known. Resolve "
-            "relative references ('today', 'yesterday', 'last week') into an actual date "
-            "using the per-message timestamps and the CURRENT DATE provided. NEVER store "
-            "vague words like 'today' or 'recent'. Use null when no time info is available."
+            "relative references against the timestamp of the message containing them, "
+            "never the extraction run's current date. Do not invent a day for 'last week', "
+            "'recently', or similarly imprecise timing. Use null when timing cannot be "
+            "faithfully represented, retaining supported approximate timing in the description."
         ),
     )
     significance: Literal["major", "minor", "routine"]
@@ -202,7 +203,10 @@ class MemoryCompression(BaseModel):
     compressed_facts: list[CompressedFact] = Field(default_factory=list)
     compressed_beliefs: list[CompressedBelief] = Field(default_factory=list)
     compressed_events: list[CompressedEvent] = Field(default_factory=list)
-    emotional_state: EmotionLog | None = None
+    emotional_state: EmotionLog | None = Field(
+        None,
+        description="Return null. Compression cannot establish a new mood; the app preserves the recorded observation.",
+    )
 
 
 # --- CONSOLIDATION SCHEMAS ---
@@ -223,4 +227,7 @@ class MemoryConsolidation(BaseModel):
     consolidated_beliefs: list[CompressedBelief] = Field(default_factory=list)
     consolidated_events: list[CompressedEvent] = Field(default_factory=list)
     insights: list[ConsolidatedInsight] = Field(default_factory=list)
-    emotional_state: EmotionLog | None = None
+    emotional_state: EmotionLog | None = Field(
+        None,
+        description="Return null. Consolidation cannot establish a new mood; the app preserves the recorded observation.",
+    )

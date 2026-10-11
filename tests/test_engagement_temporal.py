@@ -19,8 +19,11 @@ provides ``db``); the reply LLM is patched with ``AsyncMock`` (chat_manager impo
 **Validates: Requirements 1.3, 1.4, 1.6, 2.4, 2.5**
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfoNotFoundError
+
+import pytest
 
 from app.database import models
 from app.services import chat_manager
@@ -153,3 +156,71 @@ async def test_group_path_does_not_touch_last_interaction(mock_mongodb):
     # last_interaction_at remains unset by the group path.
     doc = await db["user_profiles"].find_one({"_id": chat_id})
     assert doc.get("last_interaction_at") is None
+
+
+@pytest.mark.parametrize(
+    ("month", "expected"),
+    [
+        (1, ["US-East 07:00", "US-West 04:00", "UK 12:00", "Europe-Central 13:00"]),
+        (7, ["US-East 08:00", "US-West 05:00", "UK 13:00", "Europe-Central 14:00"]),
+    ],
+)
+def test_reference_clocks_follow_winter_and_summer_offsets(month, expected):
+    now = datetime(2024, month, 1, 12, tzinfo=UTC)
+    result = chat_manager.build_time_context(now, None)
+    for reference in expected:
+        assert reference in result
+    assert "India 17:30" in result
+
+
+def test_reference_clocks_roll_over_local_dates():
+    now = datetime(2024, 1, 1, 22, 45, tzinfo=UTC)
+    result = chat_manager.build_time_context(now, None)
+    assert "India 04:15 Jan 02" in result
+    assert "Japan 07:45 Jan 02" in result
+    assert "US-West 14:45 Jan 01" in result
+
+
+def test_time_context_normalizes_aware_current_time_before_rendering_and_gap():
+    india_offset = timezone(timedelta(hours=5, minutes=30))
+    now = datetime(2024, 1, 1, 17, 30, tzinfo=india_offset)
+    previous_mongo_timestamp = datetime(2024, 1, 1, 11)
+    result = chat_manager.build_time_context(now, previous_mongo_timestamp)
+    assert "Current time (UTC): 2024-01-01 12:00" in result
+    assert "India 17:30" in result
+    assert "Last talked with this user: 1 hour(s) ago" in result
+
+
+def test_time_context_accepts_naive_current_time_as_utc():
+    now = datetime(2024, 1, 1, 12)
+    previous = datetime(2024, 1, 1, 11, 30, tzinfo=UTC)
+    result = chat_manager.build_time_context(now, previous)
+    assert "Current time (UTC): 2024-01-01 12:00" in result
+    assert "India 17:30" in result
+    assert "Last talked with this user: 30 minute(s) ago" in result
+
+
+def test_missing_timezone_data_omits_only_unavailable_clocks(monkeypatch):
+    real_zone_info = chat_manager.ZoneInfo
+
+    def selective_zone_info(name):
+        if name.startswith("America/"):
+            raise ZoneInfoNotFoundError(name)
+        return real_zone_info(name)
+
+    monkeypatch.setattr(chat_manager, "ZoneInfo", selective_zone_info)
+    result = chat_manager.build_time_context(datetime(2024, 7, 1, 12, tzinfo=UTC), None)
+    assert "US-East" not in result
+    assert "US-West" not in result
+    assert "India 17:30" in result
+    assert "UK 13:00" in result
+
+
+def test_time_context_keeps_utc_when_no_timezone_database_is_available(monkeypatch):
+    def missing_zone_info(name):
+        raise ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(chat_manager, "ZoneInfo", missing_zone_info)
+    result = chat_manager.build_time_context(datetime(2024, 7, 1, 12, tzinfo=UTC), None)
+    assert "Current time (UTC): 2024-07-01 12:00" in result
+    assert "Local times:" not in result

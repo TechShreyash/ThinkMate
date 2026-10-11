@@ -43,13 +43,13 @@ Reply generation always requests `response_format={"type": "json_object"}`, inde
 Replies use a custom JSON parser, not Pydantic `ReplyBundle` validation. The parser strips optional Markdown fences and accepts a dictionary with a nonblank string `reply`:
 
 - Reactions are normalized by [reactions.py](../../app/services/reactions.py), restricted to its allowed set, and dropped when globally disabled. The chat manager additionally honors the sender's `reactions_enabled` preference.
-- A numeric, non-boolean affinity delta is accepted. The prompt asks for `[-0.2, 0.2]`, but the parser does not enforce that range; the affinity cache clamps the resulting score to `0..1`.
+- A finite numeric, non-boolean affinity delta is bounded to the prompt's `[-0.2, 0.2]` range. Nonfinite values are ignored; the affinity cache also clamps the resulting score to `0..1`.
 - Malformed/unusable reply JSON falls back to the unfenced raw text with no reaction or delta. This can expose a malformed JSON envelope as the delivered text. The batch processor substitutes a fallback for empty DM/addressed replies and suppresses empty ambient replies.
 - An API error is audited and re-raised; the batch processor attempts a short failure response. Successful Telegram delivery still depends on Telegram permissions and connectivity.
 
 `ReplyBundle` in [schemas.py](../../app/services/schemas.py) describes the intended shape, but is not the runtime parser for this path.
 
-Check-ins use a plain-text response. Blank output or the case-insensitive sentinels `NOTHING`, `none`, `n/a`, and `na` (with trailing `.`/`!` tolerated) produce `None`. The caller stays silent and does not send a check-in. The supplied `memory_text` is used as a grounding guard; the caller must also put that memory into the system prompt, as the current scheduler does.
+Check-ins use a plain-text response. Blank output or the case-insensitive sentinels `NOTHING`, `none`, `n/a`, and `na` (with trailing `.`/`!`, quotes, or Markdown code fences tolerated) produce `None`. Normal opener text is preserved. The caller stays silent and does not send a check-in. The supplied `memory_text` is used as a grounding guard; the caller must also put that memory into the system prompt, as the current scheduler does.
 
 ## Structured memory output
 
@@ -63,7 +63,7 @@ The memory methods share `_structured_call` and validate responses against Pydan
 
 The default JSON mode requests syntactically valid JSON; schema adherence still depends on the model and application validation. Native parsing requires endpoint support and can increase latency/call count when unsupported.
 
-On the JSON path, `_strip_fences` turns blank output into `{}`. The memory schemas default their lists to empty, so `{}` can validate as a successful empty result. This is different from `None`, which signals an API/parsing/validation failure. Extraction treats an empty result as success and trims history. Compression/consolidation apply the empty lists and can clear stored memory arrays. The failure-preservation contract applies specifically to `None`, not every unhelpful or empty model output.
+On the JSON path, `_strip_fences` turns blank output into `{}`. Extraction schemas default their lists to empty, so an empty extraction can still validate as success and trim history. Compression and consolidation additionally require every replacement array to be explicitly present in the actual response, before schema defaults are applied; blank or incomplete responses return `None` and preserve existing memory. The same presence check applies to native parsed responses. Explicit complete empty arrays remain valid, so this guard does not detect a model intentionally returning an unhelpful but complete replacement.
 
 ### Schema reference
 
@@ -77,8 +77,8 @@ On the JSON path, `_strip_fences` turns blank output into `{}`. The memory schem
 | `EmotionLog` | Mood string, intensity float defaulting to `0.5`, optional trigger. The described `0..1` intensity range is not constrained by validators. |
 | `GroupMemoryUpdate` | Participant display-name string plus that person's `MemoryExtraction`. Identity resolution happens in the extractor. |
 | `GroupMemoryExtraction` | Optional `group_extraction` and `updates` defaulting empty. Forbids unknown top-level fields, rejecting a plain single-person extraction envelope; it still accepts `{}`. |
-| `MemoryCompression` | Optional summary/style/mood plus `compressed_facts`, `compressed_beliefs`, `compressed_events`. Lists default empty. |
-| `MemoryConsolidation` | Optional summary/style/mood plus `consolidated_facts`, `consolidated_beliefs`, `consolidated_events`, and `insights`. Lists default empty. |
+| `MemoryCompression` | Optional summary/style plus `compressed_facts`, `compressed_beliefs`, `compressed_events`. Lists default empty. Legacy mood field should be null and is ignored during writes. |
+| `MemoryConsolidation` | Optional summary/style plus `consolidated_facts`, `consolidated_beliefs`, `consolidated_events`, and `insights`. Lists default empty. Legacy mood field should be null and is ignored during writes. |
 | `CompressedFact`, `CompressedBelief` | Category/content and content respectively. Shared by compression and consolidation. |
 | `CompressedEvent` | Description, nullable date, significance restricted to `major` or `minor`; no emotional-context field. |
 | `ConsolidatedInsight` | Content string; the storage helper caps the list at `MAX_INSIGHTS`. |
@@ -95,7 +95,7 @@ Most models use Pydantic's default handling of extra fields; only the group extr
 | [consolidation_prompt.py](../../app/prompts/consolidation_prompt.py) | Merge a current profile and infer durable insights; the consolidator appends the insight cap. |
 | [checkin_prompt.py](../../app/prompts/checkin_prompt.py) | Generate a short grounded opener or decline. |
 
-`PERSONA_FILE` is loaded by [chat_manager.py](../../app/services/chat_manager.py), cached by path/mtime, and reread on edits. A missing file uses a default persona; a read failure can preserve the cached content. Prompt instructions are requests to the model, not enforced behavioral guarantees.
+`PERSONA_FILE` is loaded by [chat_manager.py](../../app/services/chat_manager.py), cached by absolute path/modification time/file size, and reread on detected edits. Missing, blank, or invalid files use the default, or the last good content from that same path when available. Prompt instructions are requests to the model, not enforced behavioral guarantees.
 
 ## Audit and metrics
 

@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from app.config import config
@@ -63,6 +65,17 @@ async def test_replace_user_memory():
     async with connection.db_session() as db:
         user_id = 22222
         await models.ensure_user(db, user_id, "compuser", "Compressed User")
+        original_mood = {
+            "mood": "calm",
+            "intensity": 0.7,
+            "trigger": "weekend",
+            "detected_at": datetime(2024, 1, 1, tzinfo=UTC),
+        }
+        await db["user_profiles"].update_one(
+            {"_id": user_id},
+            {"$set": {"emotional_state": original_mood}},
+        )
+        before = await db["user_profiles"].find_one({"_id": user_id})
 
         # Add some initial facts and events in MongoDB
         await db["user_profiles"].update_one(
@@ -125,7 +138,5 @@ async def test_replace_user_memory():
         assert events[0]["event_date"] == "2026-01-15"
         assert events[0]["significance"] == "major"
 
-        # 4. Verify mood logged directly
-        assert profile["emotional_state"]["mood"] == "calm"
-        assert profile["emotional_state"]["intensity"] == 0.7
-        assert profile["emotional_state"]["trigger"] == "weekend"
+        # 4. Maintenance preserves the observation and its original age.
+        assert profile["emotional_state"] == before["emotional_state"]

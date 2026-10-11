@@ -110,7 +110,7 @@ Each logical LLM operation records `user_id`, `call_type`, `inputs`, `outputs`, 
 - Event updates keep the original date and significance when their replacement values are null, and preserve original emotional context and creation time when the old entry is found.
 - Mood updates also append a bounded mood-history entry. Non-null style/gender updates do not clear earlier values when omitted.
 
-`replace_user_memory` and `apply_consolidation` replace the fact/belief/event arrays with the model's returned lists. They rebuild item timestamps and clear event emotional context. Consolidation also replaces insights and advances its timestamp. Null summary/style/mood fields preserve the corresponding previous values. A valid result with empty lists empties the arrays; callers skip replacement only for `None`.
+`replace_user_memory` and `apply_consolidation` replace the fact/belief/event arrays with the model's returned lists. They rebuild item timestamps and clear event emotional context. Consolidation also replaces insights and advances its timestamp. Null summary/style fields preserve the corresponding previous values. Both helpers always preserve the recorded mood, its observation time, and mood history; maintenance output cannot establish a new mood. A valid result with empty lists empties the arrays; callers skip replacement only for `None`.
 
 Individual MongoDB writes are atomic. Loading, transforming, and saving a profile is not one atomic transaction. The conversation lock reduces overlapping writes for a single ID in one process, but does not protect a participant profile against simultaneous extraction from another group or DM. Group writes and history trim are separate operations. See [memory engine](memory_engine.md).
 

@@ -1,6 +1,18 @@
+from datetime import UTC, datetime
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import config
+
+
+def _recorded_time(value) -> str:
+    """Render UTC observation times without treating a missing timestamp as now."""
+    if isinstance(value, datetime):
+        value = (
+            value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        )
+        return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return str(value) if value else "unknown"
 
 
 def compile_memory_text(doc: dict) -> str:
@@ -20,7 +32,7 @@ def compile_memory_text(doc: dict) -> str:
 
     mood_str = ""
     if emotional_state:
-        mood_str = f"Mood: {emotional_state.get('mood', 'calm')} (intensity: {emotional_state.get('intensity', 0.5)})"
+        mood_str = f"Mood: {emotional_state.get('mood') or 'not recorded'} (intensity: {emotional_state.get('intensity', 0.5)})"
         trigger = emotional_state.get("trigger")
         if trigger:
             mood_str += f", Triggered by: {trigger}"
@@ -85,12 +97,16 @@ def compile_memory_text(doc: dict) -> str:
         lines.append("(No timeline events logged)")
     lines.append("")
 
-    # Section 5: Current Mood
+    # Section 5: Latest recorded mood, which may be stale.
     lines.append("=== CURRENT MOOD ===")
     if mood_str:
         lines.append(mood_str)
+        lines.append(
+            f"Recorded at (UTC): {_recorded_time(emotional_state.get('detected_at'))}"
+        )
+        lines.append("Past observation; not evidence of the user's mood now.")
     else:
-        lines.append("Mood: calm")
+        lines.append("Mood: not recorded")
 
     # Mood trend (Phase 12 emotional continuity; read defensively, bounded).
     mood_history = doc.get("mood_history") or []
@@ -98,6 +114,10 @@ def compile_memory_text(doc: dict) -> str:
         recent = mood_history[-config.MAX_MOOD_HISTORY :]
         trend = ", ".join(m.get("mood", "?") for m in recent)
         lines.append(f"Recent mood trend (oldest→newest): {trend}")
+        lines.append(
+            "Mood observation times (UTC, same order): "
+            + ", ".join(_recorded_time(m.get("detected_at")) for m in recent)
+        )
 
     return "\n".join(lines)
 

@@ -6,7 +6,7 @@ Covers Requirements 1.1, 1.2, 1.5, 1.6, 1.7, 2.7 of the group-chat spec:
   call on the 2-tuple DM path (no ``with_affinity=True``), the same ``chat_buffers._id``
   (``== user_id``), and a single-party ``{role, content}`` history (no ``"Name: "``
   prefixing) even though sender attribution is stored on each message.
-- The group path renders multi-party history (``"Alice: hi"``) and calls the reply with
+- The group path renders JSON speaker attribution and calls the reply with
   ``with_affinity=True`` (the 3-tuple group path).
 - ``enqueue_message`` keys its pending/batching state on ``chat_id``.
 
@@ -17,6 +17,7 @@ target is ``app.services.chat_manager.llm_service.generate_reply_bundle`` becaus
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -159,10 +160,14 @@ async def test_group_handle_message_multiparty():
             mock_reply.assert_called_once()
             assert mock_reply.call_args.kwargs.get("with_affinity") is True
 
-            # The user turn is rendered multi-party, prefixed "Alice: hi".
+            # The user turn carries structured speaker attribution.
             history = mock_reply.call_args.args[2]
             user_turns = [t for t in history if t["role"] == "user"]
-            assert any(t["content"] == "Alice: hi" for t in user_turns)
+            assert any(
+                json.loads(t["content"])
+                == {"sender_id": 111, "sender_name": "Alice", "text": "hi"}
+                for t in user_turns
+            )
 
             # affinity_delta == 0.0 means the fold is skipped (no bump for that signal),
             # and "hi" is not a negative-signal keyword, so no affinity churn at all.
@@ -171,7 +176,7 @@ async def test_group_handle_message_multiparty():
 
 @pytest.mark.asyncio
 async def test_group_history_labels_bot_turns_and_prompt_has_group_section():
-    """Group history prefixes the bot's own turns with its name, and the system prompt
+    """Group history attributes the bot's own turns, and the system prompt
     carries the multi-party GROUP CHAT section so the model can track who said what."""
     chat_id = -200
 
@@ -209,13 +214,19 @@ async def test_group_history_labels_bot_turns_and_prompt_has_group_section():
             system_prompt = mock_reply.call_args.args[1]
             history = mock_reply.call_args.args[2]
 
-            # The bot's earlier turn is name-prefixed in the multi-party transcript.
+            # The bot's earlier turn retains both its API role and stored name.
             assert any(
-                t["role"] == "assistant" and t["content"].startswith("Botty: ")
+                t["role"] == "assistant"
+                and json.loads(t["content"])
+                == {"sender_id": 0, "sender_name": "Botty", "text": "earlier reply"}
                 for t in history
             )
             # The user turn is still attributed too.
-            assert any(t["content"] == "Bob: yo" for t in history)
+            assert any(
+                json.loads(t["content"])
+                == {"sender_id": 222, "sender_name": "Bob", "text": "yo"}
+                for t in history
+            )
             # The system prompt explains the multi-party group format.
             assert "GROUP CHAT" in system_prompt
 

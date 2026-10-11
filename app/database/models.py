@@ -517,7 +517,7 @@ async def save_extracted_memories(
 async def replace_user_memory(
     db: AsyncIOMotorDatabase, user_id: int, compression: MemoryCompression
 ):
-    """Replace profile summary, style, facts, beliefs, and events with compressed layouts."""
+    """Replace compressed profile content while preserving the last observed mood."""
     now = _utcnow()
     set_fields: dict = {}
 
@@ -525,13 +525,9 @@ async def replace_user_memory(
         set_fields["profile_summary"] = compression.profile_summary
     if compression.communication_style is not None:
         set_fields["communication_style"] = compression.communication_style
-    if compression.emotional_state:
-        set_fields["emotional_state"] = {
-            "mood": compression.emotional_state.mood,
-            "intensity": compression.emotional_state.intensity,
-            "trigger": compression.emotional_state.trigger or "",
-            "detected_at": now,
-        }
+    # A maintenance pass has no new conversation evidence. Even a faithfully
+    # repeated mood must retain its original detection time; only extraction can
+    # establish or change emotional_state.
 
     set_fields["facts"] = [
         {
@@ -614,13 +610,8 @@ async def apply_consolidation(
         set_fields["profile_summary"] = consolidation.profile_summary
     if consolidation.communication_style is not None:
         set_fields["communication_style"] = consolidation.communication_style
-    if consolidation.emotional_state:
-        set_fields["emotional_state"] = {
-            "mood": consolidation.emotional_state.mood,
-            "intensity": consolidation.emotional_state.intensity,
-            "trigger": consolidation.emotional_state.trigger or "",
-            "detected_at": now,
-        }
+    # Consolidation reviews stored history, so its output cannot establish a new
+    # mood or make the last observed mood fresh. Leave emotional_state untouched.
 
     set_fields["facts"] = [
         {
