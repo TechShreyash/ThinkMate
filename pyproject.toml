@@ -19,6 +19,8 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "mongomock>=4.3.0",
     "hypothesis>=6.169.0",
+    "black>=26.10.1",
+    "ruff>=0.17.0",
 ]
 
 [tool.uv]
@@ -29,3 +31,14 @@ prerelease = "disallow"
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py314"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+extend-select = ["I"]

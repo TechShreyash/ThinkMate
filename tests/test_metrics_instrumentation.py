@@ -8,11 +8,12 @@ background extraction/compression bump their run counters.
 All tests use mongomock + pytest-asyncio per ``tests/conftest.py``. The LLM is patched (no
 network); an autouse fixture resets the registry around each test for isolation.
 """
+
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
 from aiogram.types import Message
 
 from app.config import config

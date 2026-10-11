@@ -9,6 +9,7 @@ from threads with no running event loop. This sink therefore:
   forward loop (Req 4.9), and
 * only forwards ``WARNING`` and above (Req 4.5).
 """
+
 import asyncio
 import contextvars
 
@@ -76,20 +77,24 @@ def make_error_log_sink(bot, loop):
                     token = _in_sink.set(True)
                     try:
                         from app.services import log_forwarder
+
                         await log_forwarder.send(bot, None, text)
-                    except Exception:  # noqa: BLE001 - never propagate (Req 4.7)
+                    # Logging failures must not recurse or escape the sink.
+                    except Exception:  # noqa: BLE001, S110
                         pass
                     finally:
                         _in_sink.reset(token)
 
                 try:
                     asyncio.create_task(_send())
-                except Exception:  # noqa: BLE001 - loop not running / shutting down
+                # Logging failures must not recurse or escape the sink.
+                except Exception:  # noqa: BLE001, S110
                     pass
 
             # 4) Hop onto the loop thread without blocking the originating logging call (Req 4.6).
             loop.call_soon_threadsafe(_dispatch)
-        except Exception:  # noqa: BLE001 - the sink must NEVER raise into logging (Req 4.7)
+        # Logging failures must not recurse or escape the sink.
+        except Exception:  # noqa: BLE001, S110
             pass
 
     return sink

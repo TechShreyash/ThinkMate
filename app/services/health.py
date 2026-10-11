@@ -17,10 +17,12 @@ The optional periodic metrics logger (:func:`start_metrics_logger`) logs one
 compact summary line per ``config.METRICS_LOG_INTERVAL_SECS`` interval when
 enabled, and is a harmless no-op when disabled (Requirements 5.1–5.4).
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC
 
 from loguru import logger
 
@@ -63,7 +65,8 @@ def _summary() -> dict:
             "extraction_runs": counters.get("extraction.runs", 0),
             "compression_runs": counters.get("compression.runs", 0),
         }
-    except Exception as exc:  # summary must never raise (Req 3.6)
+    # Health probes report failures instead of raising to callers.
+    except Exception as exc:  # noqa: BLE001
         logger.debug(f"health._summary() failed: {exc}")
         return {}
 
@@ -80,7 +83,8 @@ def liveness() -> dict:
             "uptime_secs": round(time.time() - _PROCESS_START, 1),
             "summary": _summary(),
         }
-    except Exception as exc:  # degrade gracefully, never raise (Req 3.6)
+    # Health probes report failures instead of raising to callers.
+    except Exception as exc:  # noqa: BLE001
         logger.debug(f"health.liveness() failed: {exc}")
         return {"status": "degraded"}
 
@@ -101,7 +105,8 @@ async def readiness(db) -> dict:
 
         await ping_db()
         return {"ready": True, "mongo": "ok"}
-    except Exception as exc:  # catch everything, including timeouts (Req 3.4, 3.6)
+    # Health probes report failures instead of raising to callers.
+    except Exception as exc:  # noqa: BLE001
         logger.debug(f"health.readiness() ping failed: {exc}")
         return {"ready": False, "mongo": "error", "reason": str(exc)}
 
@@ -122,11 +127,12 @@ async def _metrics_logger_loop(interval: float) -> None:
             logger.info(f"[metrics] {_summary()}")
         except asyncio.CancelledError:
             break
-        except Exception as e:  # never crash the loop (Req 5.4)
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
             logger.debug(f"metrics logger iteration failed: {e}")
 
 
-def start_metrics_logger() -> "asyncio.Task | None":
+def start_metrics_logger() -> asyncio.Task | None:
     """Start the periodic metrics logger when enabled; no-op (returns None) when disabled.
 
     Enabled only when config.METRICS_LOG_INTERVAL_SECS > 0 (Req 5.3). Logs one snapshot
@@ -153,27 +159,29 @@ async def load_persisted_metrics() -> None:
     or unreadable document simply leaves the registry empty.
     """
     try:
-        from app.database.connection import db_session
         from app.database import models
+        from app.database.connection import db_session
 
         async with db_session() as db:
             state = await models.load_metrics_state(db)
         if state:
             metrics.load_state(state)
             logger.info("Restored persisted metrics from MongoDB.")
-    except Exception as exc:  # never block startup on metrics restore
+    # Health probes report failures instead of raising to callers.
+    except Exception as exc:  # noqa: BLE001
         logger.debug(f"load_persisted_metrics failed: {exc}")
 
 
 async def flush_metrics() -> None:
     """Write the current metrics snapshot to MongoDB. Best-effort, never raises."""
     try:
-        from app.database.connection import db_session
         from app.database import models
+        from app.database.connection import db_session
 
         async with db_session() as db:
             await models.save_metrics_state(db, metrics.snapshot())
-    except Exception as exc:  # a flush failure must never crash a loop or shutdown
+    # Health probes report failures instead of raising to callers.
+    except Exception as exc:  # noqa: BLE001
         logger.debug(f"flush_metrics failed: {exc}")
 
 
@@ -190,11 +198,12 @@ async def _metrics_persist_loop(interval: float) -> None:
         except asyncio.CancelledError:
             await flush_metrics()  # final flush on graceful shutdown
             break
-        except Exception as e:  # never crash the loop
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
             logger.debug(f"metrics persist iteration failed: {e}")
 
 
-def start_metrics_persister() -> "asyncio.Task | None":
+def start_metrics_persister() -> asyncio.Task | None:
     """Start the periodic metrics persister when enabled; no-op (None) when disabled.
 
     Enabled when config.METRICS_PERSIST_INTERVAL_SECS > 0. When disabled, callers should
@@ -215,8 +224,8 @@ def start_metrics_persister() -> "asyncio.Task | None":
 async def _run_consolidation_scan() -> None:
     """One scan: find due users and dispatch each through the per-user memory_lock."""
     # Lazy imports avoid an import cycle (user_task_manager -> chat_manager -> ...).
-    from app.database.connection import db_session
     from app.database import models
+    from app.database.connection import db_session
     from app.services.user_task_manager import user_task_manager
 
     async with db_session() as db:
@@ -231,7 +240,8 @@ async def _run_consolidation_scan() -> None:
         try:
             await user_task_manager.run_consolidator(user_id)
             processed += 1
-        except Exception as e:  # one user's failure must not abort the scan (Req 1.6)
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Consolidation failed for user {user_id}: {e}")
     logger.info(f"[consolidation] scan: {len(due)} due, {processed} processed.")
 
@@ -243,11 +253,12 @@ async def _consolidation_loop(scan_interval: float) -> None:
             await _run_consolidation_scan()
         except asyncio.CancelledError:
             break
-        except Exception as e:  # never crash the loop (Req 1.7)
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
             logger.debug(f"consolidation scan iteration failed: {e}")
 
 
-def start_consolidation_scheduler() -> "asyncio.Task | None":
+def start_consolidation_scheduler() -> asyncio.Task | None:
     """Start the periodic consolidation scheduler when enabled; no-op (None) when disabled.
 
     Enabled only when config.CONSOLIDATION_INTERVAL_SECS > 0 (Req 1.2). Mirrors
@@ -282,12 +293,12 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
     Always sets last_proactive_at (holds the rate-limit window even on skip/fail).
     Never raises.
     """
-    from app.database.connection import db_session
     from app.database import models
-    from app.services.memory_loader import build_memory_block
-    from app.services.llm_service import llm_service
-    from app.services.chat_manager import _load_persona, build_time_context
+    from app.database.connection import db_session
     from app.prompts.system_prompt import build_system_prompt
+    from app.services.chat_manager import _load_persona, build_time_context
+    from app.services.llm_service import llm_service
+    from app.services.memory_loader import build_memory_block
     from app.services.telegram_text import send_bot_text
 
     async with db_session() as db:
@@ -303,12 +314,22 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
             return "skipped"
         try:
             await send_bot_text(bot, user_id, text, enforce_app_limit=True)
-        except Exception as e:  # Forbidden / blocked / network — stop nagging this user.
-            logger.warning(f"Proactive send failed for user {user_id}: {e}; disabling for them.")
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Proactive send failed for user {user_id}: {e}; disabling for them."
+            )
             await models.set_proactive_enabled(db, user_id, False)
             return "failed"
         # Record the assistant message in the buffer so a reply flows normally.
-        await models.add_message_to_buffer(db, user_id, "assistant", text, sender_id=0, sender_name=config.bot_display_name)
+        await models.add_message_to_buffer(
+            db,
+            user_id,
+            "assistant",
+            text,
+            sender_id=0,
+            sender_name=config.bot_display_name,
+        )
         # Count this delivered check-in toward the unanswered streak; if the user keeps
         # ignoring us they'll be auto-paused once it reaches PROACTIVE_MAX_UNANSWERED.
         await models.increment_proactive_unanswered(db, user_id)
@@ -316,13 +337,16 @@ async def _send_proactive_checkin(bot, user_id: int, *, now) -> str:
 
 
 async def _run_proactive_scan(bot) -> None:
-    from datetime import datetime, timezone
-    from app.database.connection import db_session
+    from datetime import datetime
+
     from app.database import models
+    from app.database.connection import db_session
 
     metrics.incr("proactive.runs")
-    now = datetime.now(timezone.utc)
-    if _in_quiet_hours(now.hour, config.PROACTIVE_QUIET_START_HOUR, config.PROACTIVE_QUIET_END_HOUR):
+    now = datetime.now(UTC)
+    if _in_quiet_hours(
+        now.hour, config.PROACTIVE_QUIET_START_HOUR, config.PROACTIVE_QUIET_END_HOUR
+    ):
         logger.debug("[proactive] in quiet hours; skipping scan.")
         return
     async with db_session() as db:
@@ -338,13 +362,23 @@ async def _run_proactive_scan(bot) -> None:
     for user_id in due:
         try:
             outcome = await _send_proactive_checkin(bot, user_id, now=now)
-            if outcome == "sent": sent += 1; metrics.incr("proactive.sent")
-            elif outcome == "skipped": skipped += 1; metrics.incr("proactive.skipped")
-            else: failed += 1; metrics.incr("proactive.failed")
-        except Exception as e:  # one user's failure must not abort the scan
-            failed += 1; metrics.incr("proactive.failed")
+            if outcome == "sent":
+                sent += 1
+                metrics.incr("proactive.sent")
+            elif outcome == "skipped":
+                skipped += 1
+                metrics.incr("proactive.skipped")
+            else:
+                failed += 1
+                metrics.incr("proactive.failed")
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            metrics.incr("proactive.failed")
             logger.warning(f"Proactive check-in error for user {user_id}: {e}")
-    logger.info(f"[proactive] scan: {len(due)} due, {sent} sent, {skipped} skipped, {failed} failed.")
+    logger.info(
+        f"[proactive] scan: {len(due)} due, {sent} sent, {skipped} skipped, {failed} failed."
+    )
 
 
 async def _proactive_loop(bot, scan_interval: float) -> None:
@@ -354,11 +388,12 @@ async def _proactive_loop(bot, scan_interval: float) -> None:
             await _run_proactive_scan(bot)
         except asyncio.CancelledError:
             break
-        except Exception as e:
+        # Health probes report failures instead of raising to callers.
+        except Exception as e:  # noqa: BLE001
             logger.debug(f"proactive scan iteration failed: {e}")
 
 
-def start_proactive_scheduler(bot) -> "asyncio.Task | None":
+def start_proactive_scheduler(bot) -> asyncio.Task | None:
     """Start the proactive check-in scheduler when enabled; no-op (None) when disabled.
 
     Enabled only when config.PROACTIVE_INTERVAL_SECS > 0. Needs the aiogram bot to send.
@@ -366,6 +401,8 @@ def start_proactive_scheduler(bot) -> "asyncio.Task | None":
     if config.PROACTIVE_INTERVAL_SECS <= 0:
         return None
     try:
-        return asyncio.get_running_loop().create_task(_proactive_loop(bot, config.PROACTIVE_INTERVAL_SECS))
+        return asyncio.get_running_loop().create_task(
+            _proactive_loop(bot, config.PROACTIVE_INTERVAL_SECS)
+        )
     except RuntimeError:
         return None

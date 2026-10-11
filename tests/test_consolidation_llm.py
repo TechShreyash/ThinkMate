@@ -9,11 +9,13 @@ Covers Task 2.4 (Requirements 7.1, 7.2, 9.1):
 Follows tests/conftest.py conventions (mongomock + pytest-asyncio); the structured LLM
 call is patched with ``AsyncMock`` (mirroring tests/test_reactions.py).
 """
-import pytest
+
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.services.llm_service import LLMService, llm_service
-from app.services.schemas import MemoryConsolidation, ConsolidatedInsight
+from app.services.schemas import ConsolidatedInsight, MemoryConsolidation
 
 
 # --- Representative payload ----------------------------------------------- #
@@ -31,7 +33,9 @@ def _representative_payload() -> dict:
             {"description": "Started a new job.", "significance": "major"},
         ],
         "insights": [
-            {"content": "Tends to get stressed near deadlines; values reassurance then."},
+            {
+                "content": "Tends to get stressed near deadlines; values reassurance then."
+            },
         ],
         "emotional_state": {"mood": "calm", "intensity": 0.5},
     }
@@ -50,7 +54,9 @@ def test_memory_consolidation_parses_representative_payload():
     assert model.consolidated_facts[0].content == "Lives in Berlin."
 
     assert len(model.consolidated_beliefs) == 1
-    assert model.consolidated_beliefs[0].content == "Believes consistency beats intensity."
+    assert (
+        model.consolidated_beliefs[0].content == "Believes consistency beats intensity."
+    )
 
     assert len(model.consolidated_events) == 1
     assert model.consolidated_events[0].description == "Started a new job."

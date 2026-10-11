@@ -1,7 +1,8 @@
 from aiogram import Router
+
 from app.handlers.commands import router as commands_router
-from app.handlers.messages import router as messages_router
 from app.handlers.membership import router as membership_router
+from app.handlers.messages import router as messages_router
 from app.handlers.middlewares import ProactiveResetMiddleware
 
 # Any command counts as the user engaging, so clear their unanswered-proactive streak

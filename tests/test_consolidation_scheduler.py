@@ -13,6 +13,7 @@ to an ``AsyncMock`` so no real LLM, network, or memory writes occur:
 Config is saved/restored around every test and any background task is cancelled/awaited
 in a ``finally`` so none leaks between tests (mirrors ``tests/test_metrics_logger.py``).
 """
+
 import asyncio
 from contextlib import suppress
 from unittest.mock import AsyncMock
@@ -65,7 +66,9 @@ async def _seed_due_users(count: int, *, items_per_user: int = 2):
                     "_id": uid,
                     "profile_summary": "",
                     "communication_style": "",
-                    "facts": [{"content": f"fact-{uid}-{i}"} for i in range(items_per_user)],
+                    "facts": [
+                        {"content": f"fact-{uid}-{i}"} for i in range(items_per_user)
+                    ],
                     "beliefs": [],
                     "events": [],
                 }
@@ -73,6 +76,7 @@ async def _seed_due_users(count: int, *, items_per_user: int = 2):
 
 
 # --- Requirement 1.2 / 9.5: disabled when interval <= 0 ---
+
 
 async def test_disabled_when_interval_zero(restore_consolidation_config):
     """Interval of 0.0 starts no task (returns None). Validates: Requirements 1.2, 9.5"""
@@ -96,7 +100,10 @@ async def test_disabled_when_interval_negative(restore_consolidation_config):
 
 # --- Requirement 1.4 / 9.5: bounded work per scan ---
 
-async def test_scan_processes_at_most_max_users(restore_consolidation_config, monkeypatch):
+
+async def test_scan_processes_at_most_max_users(
+    restore_consolidation_config, monkeypatch
+):
     """A scan dispatches at most CONSOLIDATION_MAX_USERS_PER_SCAN due users.
 
     Validates: Requirements 1.4, 9.5
@@ -120,7 +127,10 @@ async def test_scan_processes_at_most_max_users(restore_consolidation_config, mo
 
 # --- Requirement 1.6 / 9.5: one user's failure does not abort the scan ---
 
-async def test_scan_continues_past_failing_user(restore_consolidation_config, monkeypatch):
+
+async def test_scan_continues_past_failing_user(
+    restore_consolidation_config, monkeypatch
+):
     """A user whose run_consolidator raises does not stop the rest of the scan.
 
     Validates: Requirements 1.6, 9.5
@@ -150,6 +160,7 @@ async def test_scan_continues_past_failing_user(restore_consolidation_config, mo
 
 
 # --- Requirement 1.7 / 9.5: the loop self-heals on an iteration error ---
+
 
 async def test_loop_self_heals_on_error(restore_consolidation_config, monkeypatch):
     """An exception inside a scan iteration does not kill the loop. Validates: Requirements 1.7, 9.5"""

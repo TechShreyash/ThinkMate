@@ -7,16 +7,17 @@ helper, the single-field setters, and ``find_users_due_for_proactive`` selection
 mongomock + pytest-asyncio per ``tests/conftest.py``; config saved/restored as in
 ``tests/test_hardening.py``. No real LLM or network.
 """
-from datetime import datetime, timezone, timedelta
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config import config
 from app.database import connection, models
-from app.services.schemas import MemoryExtraction, EmotionLog
-
+from app.services.schemas import EmotionLog, MemoryExtraction
 
 # --- 1. ensure_user initializes engagement fields ---------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_ensure_user_initializes_mood_history_and_onboarded():
@@ -31,6 +32,7 @@ async def test_ensure_user_initializes_mood_history_and_onboarded():
 
 # --- 2. save_extracted_memories appends bounded mood history -----------------------------
 
+
 @pytest.mark.asyncio
 async def test_save_extracted_memories_appends_mood_history():
     async with connection.db_session() as db:
@@ -39,7 +41,8 @@ async def test_save_extracted_memories_appends_mood_history():
 
         # First mood write: happy.
         await models.save_extracted_memories(
-            db, user_id,
+            db,
+            user_id,
             MemoryExtraction(emotional_state=EmotionLog(mood="happy", intensity=0.6)),
         )
         doc = await db["user_profiles"].find_one({"_id": user_id})
@@ -50,8 +53,11 @@ async def test_save_extracted_memories_appends_mood_history():
 
         # Second mood write: stressed -> history grows, emotional_state overwritten.
         await models.save_extracted_memories(
-            db, user_id,
-            MemoryExtraction(emotional_state=EmotionLog(mood="stressed", intensity=0.8)),
+            db,
+            user_id,
+            MemoryExtraction(
+                emotional_state=EmotionLog(mood="stressed", intensity=0.8)
+            ),
         )
         doc = await db["user_profiles"].find_one({"_id": user_id})
         assert len(doc["mood_history"]) == 2
@@ -71,8 +77,11 @@ async def test_mood_history_is_bounded_dropping_oldest():
             moods = ["m1", "m2", "m3", "m4", "m5"]
             for mood in moods:
                 await models.save_extracted_memories(
-                    db, user_id,
-                    MemoryExtraction(emotional_state=EmotionLog(mood=mood, intensity=0.5)),
+                    db,
+                    user_id,
+                    MemoryExtraction(
+                        emotional_state=EmotionLog(mood=mood, intensity=0.5)
+                    ),
                 )
 
             doc = await db["user_profiles"].find_one({"_id": user_id})
@@ -87,13 +96,14 @@ async def test_mood_history_is_bounded_dropping_oldest():
 
 # --- 3. touch_and_get_last_interaction ---------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_touch_and_get_last_interaction_first_call_returns_none_and_sets():
     async with connection.db_session() as db:
         user_id = 80004
         await models.ensure_user(db, user_id, "u", "U")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         prev = await models.touch_and_get_last_interaction(db, user_id, now=now)
         assert prev is None  # no previous interaction recorded
 
@@ -107,19 +117,23 @@ async def test_touch_and_get_last_interaction_returns_previous_and_updates():
         user_id = 80005
         await models.ensure_user(db, user_id, "u", "U")
 
-        first = datetime.now(timezone.utc)
+        first = datetime.now(UTC)
         await models.touch_and_get_last_interaction(db, user_id, now=first)
 
         later = first + timedelta(hours=2)
         prev = await models.touch_and_get_last_interaction(db, user_id, now=later)
         # Returns the previous timestamp (within BSON ms storage resolution)...
         assert prev is not None
-        assert abs(prev.replace(tzinfo=None) - first.replace(tzinfo=None)) < timedelta(milliseconds=1)
+        assert abs(prev.replace(tzinfo=None) - first.replace(tzinfo=None)) < timedelta(
+            milliseconds=1
+        )
 
         # ...and the stored value advances to the newer `now`.
         doc = await db["user_profiles"].find_one({"_id": user_id})
         stored = doc["last_interaction_at"]
-        assert abs(stored.replace(tzinfo=None) - later.replace(tzinfo=None)) < timedelta(milliseconds=1)
+        assert abs(
+            stored.replace(tzinfo=None) - later.replace(tzinfo=None)
+        ) < timedelta(milliseconds=1)
 
 
 @pytest.mark.asyncio
@@ -127,7 +141,7 @@ async def test_touch_and_get_last_interaction_no_upsert_for_missing_profile():
     async with connection.db_session() as db:
         user_id = 80006  # never ensured -> no document
         prev = await models.touch_and_get_last_interaction(
-            db, user_id, now=datetime.now(timezone.utc)
+            db, user_id, now=datetime.now(UTC)
         )
         assert prev is None
         # Must not create a partial document.
@@ -135,6 +149,7 @@ async def test_touch_and_get_last_interaction_no_upsert_for_missing_profile():
 
 
 # --- 4. single-field setters -------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_set_proactive_enabled_writes_only_its_field():
@@ -171,10 +186,12 @@ async def test_set_last_proactive_writes_only_its_field():
         user_id = 80009
         await models.ensure_user(db, user_id, "carol", "Carol")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await models.set_last_proactive(db, user_id, now=now)
         doc = await db["user_profiles"].find_one({"_id": user_id})
-        assert abs(doc["last_proactive_at"].replace(tzinfo=None) - now.replace(tzinfo=None)) < timedelta(milliseconds=1)
+        assert abs(
+            doc["last_proactive_at"].replace(tzinfo=None) - now.replace(tzinfo=None)
+        ) < timedelta(milliseconds=1)
         # Other fields intact.
         assert doc["username"] == "carol"
         assert doc["onboarded"] is False
@@ -182,10 +199,19 @@ async def test_set_last_proactive_writes_only_its_field():
 
 # --- 5. find_users_due_for_proactive selection & gating ----------------------------------
 
-def _profile(user_id, *, last_interaction_at=None, last_proactive_at="__absent__",
-             proactive_enabled="__absent__", item_count=5):
+
+def _profile(
+    user_id,
+    *,
+    last_interaction_at=None,
+    last_proactive_at="__absent__",
+    proactive_enabled="__absent__",
+    item_count=5,
+):
     """Build a raw user_profiles doc for direct insert_one seeding."""
-    facts = [{"category": "personal", "content": f"fact {i}"} for i in range(item_count)]
+    facts = [
+        {"category": "personal", "content": f"fact {i}"} for i in range(item_count)
+    ]
     doc = {"_id": user_id, "facts": facts, "beliefs": [], "events": []}
     if last_interaction_at is not None:
         doc["last_interaction_at"] = last_interaction_at
@@ -202,7 +228,7 @@ async def test_find_users_due_for_proactive_selects_only_eligible():
     config.PROACTIVE_MIN_ITEMS = 3
     try:
         async with connection.db_session() as db:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             # (a) DUE: inactive (3d) + enough items + never nudged + enabled-by-absence.
             await db["user_profiles"].insert_one(
@@ -210,17 +236,27 @@ async def test_find_users_due_for_proactive_selects_only_eligible():
             )
             # (b) NOT due: active (1 min ago).
             await db["user_profiles"].insert_one(
-                _profile(2, last_interaction_at=now - timedelta(minutes=1), item_count=5)
+                _profile(
+                    2, last_interaction_at=now - timedelta(minutes=1), item_count=5
+                )
             )
             # (c) NOT due: inactive but recently nudged.
             await db["user_profiles"].insert_one(
-                _profile(3, last_interaction_at=now - timedelta(days=3),
-                         last_proactive_at=now, item_count=5)
+                _profile(
+                    3,
+                    last_interaction_at=now - timedelta(days=3),
+                    last_proactive_at=now,
+                    item_count=5,
+                )
             )
             # (d) NOT due: inactive but opted out.
             await db["user_profiles"].insert_one(
-                _profile(4, last_interaction_at=now - timedelta(days=3),
-                         proactive_enabled=False, item_count=5)
+                _profile(
+                    4,
+                    last_interaction_at=now - timedelta(days=3),
+                    proactive_enabled=False,
+                    item_count=5,
+                )
             )
             # (e) NOT due: inactive but too few items (< PROACTIVE_MIN_ITEMS).
             await db["user_profiles"].insert_one(
@@ -233,8 +269,8 @@ async def test_find_users_due_for_proactive_selects_only_eligible():
 
             due = await models.find_users_due_for_proactive(
                 db,
-                inactivity_secs=86400,      # 1 day
-                min_interval_secs=172800,   # 2 days
+                inactivity_secs=86400,  # 1 day
+                min_interval_secs=172800,  # 2 days
                 limit=20,
                 now=now,
             )
@@ -249,12 +285,14 @@ async def test_find_users_due_for_proactive_respects_limit():
     config.PROACTIVE_MIN_ITEMS = 3
     try:
         async with connection.db_session() as db:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             # Seed 5 due users; cap the scan at 2.
             for uid in range(101, 106):
                 await db["user_profiles"].insert_one(
-                    _profile(uid, last_interaction_at=now - timedelta(days=3), item_count=5)
+                    _profile(
+                        uid, last_interaction_at=now - timedelta(days=3), item_count=5
+                    )
                 )
 
             due = await models.find_users_due_for_proactive(

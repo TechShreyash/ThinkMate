@@ -5,6 +5,7 @@ Covers ``app/handlers/membership.py``:
 - A join into a private chat (a user starting the bot) sends nothing.
 - The intro references the bot's name and the resolved start-command trigger.
 """
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,7 +18,9 @@ from app.handlers.membership import on_added_to_group
 def _make_event(chat_type: str, chat_id: int = -100777, title: str = "Test Group"):
     """Build a mock ChatMemberUpdated-like event with a mocked bot."""
     bot = MagicMock()
-    bot.get_me = AsyncMock(return_value=SimpleNamespace(username="thinkmate_bot", first_name="ThinkMate"))
+    bot.get_me = AsyncMock(
+        return_value=SimpleNamespace(username="thinkmate_bot", first_name="ThinkMate")
+    )
     bot.send_message = AsyncMock()
     chat = SimpleNamespace(id=chat_id, type=chat_type, title=title)
     return SimpleNamespace(chat=chat, bot=bot)

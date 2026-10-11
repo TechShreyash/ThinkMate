@@ -6,6 +6,7 @@
 
 **Validates: Requirements 6.4, 10.13**
 """
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -14,7 +15,9 @@ from app.services.group_gate import ImplicitAddressGate, SpamBurstDetector
 # chat_id -> last activity time
 _activity = st.dictionaries(
     keys=st.integers(min_value=1, max_value=10_000),
-    values=st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
+    values=st.floats(
+        min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False
+    ),
     min_size=0,
     max_size=12,
 )
@@ -23,8 +26,12 @@ _activity = st.dictionaries(
 @settings(max_examples=200)
 @given(
     activity=_activity,
-    extra=st.floats(min_value=0.0, max_value=500.0, allow_nan=False, allow_infinity=False),
-    max_idle=st.floats(min_value=1.0, max_value=800.0, allow_nan=False, allow_infinity=False),
+    extra=st.floats(
+        min_value=0.0, max_value=500.0, allow_nan=False, allow_infinity=False
+    ),
+    max_idle=st.floats(
+        min_value=1.0, max_value=800.0, allow_nan=False, allow_infinity=False
+    ),
 )
 def test_recency_and_burst_state_pruning(activity, extra, max_idle):
     now = (max(activity.values()) if activity else 0.0) + extra

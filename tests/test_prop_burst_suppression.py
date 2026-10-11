@@ -8,6 +8,7 @@
 
 **Validates: Requirements 10.4, 10.5**
 """
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 

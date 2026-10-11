@@ -18,6 +18,7 @@ invoke this cache for DMs — the DM path never consults or creates ``chat_membe
 class deliberately holds no special private-chat logic; correctness depends on the caller
 routing only group/supergroup speakers here.
 """
+
 import time
 
 from loguru import logger
@@ -89,7 +90,10 @@ class AffinityCache:
 
         logger.debug(
             "affinity bump {}:{} delta={:+.3f} -> {:.3f}",
-            chat_id, user_id, delta, new_affinity,
+            chat_id,
+            user_id,
+            delta,
+            new_affinity,
         )
         return new_affinity
 
@@ -115,7 +119,8 @@ class AffinityCache:
         member is simply re-read from the DB on its next ``get``.
         """
         stale = [
-            key for key, entry in self._cache.items()
+            key
+            for key, entry in self._cache.items()
             if now - entry["last_access"] > max_idle
         ]
         for key in stale:

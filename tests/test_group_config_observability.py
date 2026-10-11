@@ -19,6 +19,7 @@ being observable, since the routing layer logs whatever stage ``decide`` reports
 A second, optional test additionally drives the routing-level drop log through
 ``messages._maybe_ambient_chime`` and captures it via a temporary loguru sink.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -63,7 +64,11 @@ def test_cooldown_knob_blocks_then_releases():
         gate_big = AmbientGate()
         gate_big.mark_chimed(42, t)
         should, stage = gate_big.decide(
-            42, affinity=1.0, mode="auto", triggered=True, now=t + 1.0,
+            42,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=t + 1.0,
             rng=_FixedRng(0.0),
         )
         assert should is False
@@ -74,7 +79,11 @@ def test_cooldown_knob_blocks_then_releases():
         gate_small = AmbientGate()
         gate_small.mark_chimed(42, t)
         should2, stage2 = gate_small.decide(
-            42, affinity=1.0, mode="auto", triggered=True, now=t + 1.0,
+            42,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=t + 1.0,
             rng=_FixedRng(0.0),
         )
         # No longer cooldown-blocked; with a trigger + winning dice it passes.
@@ -104,7 +113,12 @@ def test_base_rate_knob_changes_dice_outcome():
         config.GROUP_AMBIENT_BASE_RATE = 0.2
         gate_low = AmbientGate()
         should_low, stage_low = gate_low.decide(
-            7, affinity=1.0, mode="auto", triggered=True, now=0.0, rng=rng,
+            7,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=0.0,
+            rng=rng,
         )
         assert should_low is False
         assert stage_low == "dice"
@@ -113,7 +127,12 @@ def test_base_rate_knob_changes_dice_outcome():
         config.GROUP_AMBIENT_BASE_RATE = 0.5
         gate_high = AmbientGate()
         should_high, stage_high = gate_high.decide(
-            7, affinity=1.0, mode="auto", triggered=True, now=0.0, rng=rng,
+            7,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=0.0,
+            rng=rng,
         )
         assert should_high is True
         assert stage_high == "pass"
@@ -142,20 +161,35 @@ def test_context_scan_every_knob_controls_tick_cadence():
         rng = _FixedRng(0.0)
 
         should1, stage1 = gate.decide(
-            5, affinity=1.0, mode="auto", triggered=False, now=0.0, rng=rng,
+            5,
+            affinity=1.0,
+            mode="auto",
+            triggered=False,
+            now=0.0,
+            rng=rng,
         )
         assert should1 is False
         assert stage1 == "no_trigger"
 
         should2, stage2 = gate.decide(
-            5, affinity=1.0, mode="auto", triggered=False, now=0.0, rng=rng,
+            5,
+            affinity=1.0,
+            mode="auto",
+            triggered=False,
+            now=0.0,
+            rng=rng,
         )
         assert should2 is False
         assert stage2 == "no_trigger"
 
         # 3rd message: counter % 3 == 0 → scan tick → reaches dice → pass.
         should3, stage3 = gate.decide(
-            5, affinity=1.0, mode="auto", triggered=False, now=0.0, rng=rng,
+            5,
+            affinity=1.0,
+            mode="auto",
+            triggered=False,
+            now=0.0,
+            rng=rng,
         )
         assert should3 is True
         assert stage3 == "pass"
@@ -186,35 +220,55 @@ def test_decide_reports_each_drop_stage():
         gate_cd = AmbientGate()
         gate_cd.mark_chimed(1, 100.0)
         assert gate_cd.decide(
-            1, affinity=1.0, mode="auto", triggered=True, now=101.0,
+            1,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=101.0,
             rng=_FixedRng(0.0),
         ) == (False, "cooldown")
 
         # no_trigger: no cheap trigger and not a scan tick (counter 1, every=12).
         gate_nt = AmbientGate()
         assert gate_nt.decide(
-            2, affinity=1.0, mode="auto", triggered=False, now=0.0,
+            2,
+            affinity=1.0,
+            mode="auto",
+            triggered=False,
+            now=0.0,
             rng=_FixedRng(0.0),
         ) == (False, "no_trigger")
 
         # dice: triggered, but the draw loses (0.9 >= p=0.25).
         gate_dice = AmbientGate()
         assert gate_dice.decide(
-            3, affinity=1.0, mode="auto", triggered=True, now=0.0,
+            3,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=0.0,
             rng=_FixedRng(0.9),
         ) == (False, "dice")
 
         # dice (quiet): mode_factor 0 hard-zeroes p, so a quiet member drops at dice.
         gate_quiet = AmbientGate()
         assert gate_quiet.decide(
-            4, affinity=1.0, mode="quiet", triggered=True, now=0.0,
+            4,
+            affinity=1.0,
+            mode="quiet",
+            triggered=True,
+            now=0.0,
             rng=_FixedRng(0.0),
         ) == (False, "dice")
 
         # pass: triggered and the draw wins (0.0 < p=0.25).
         gate_pass = AmbientGate()
         assert gate_pass.decide(
-            5, affinity=1.0, mode="auto", triggered=True, now=0.0,
+            5,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=0.0,
             rng=_FixedRng(0.0),
         ) == (True, "pass")
     finally:
@@ -236,6 +290,7 @@ async def test_routing_emits_drop_stage_log():
     in the captured output. The sink is always removed in ``finally``.
     """
     from loguru import logger
+
     from app.handlers import messages
 
     sink: list[str] = []
@@ -248,15 +303,20 @@ async def test_routing_emits_drop_stage_log():
         )
         member = {"affinity": 0.5, "mode": "auto"}
 
-        with patch.object(
-            messages.affinity_cache, "get", new=AsyncMock(return_value=member)
-        ), patch.object(
-            messages.ambient_gate, "decide", return_value=(False, "cooldown")
-        ), patch.object(
-            messages.models, "add_message_to_buffer", new=AsyncMock()
-        ) as mock_buffer, patch.object(
-            messages.user_task_manager, "enqueue_message", new=AsyncMock()
-        ) as mock_enqueue:
+        with (
+            patch.object(
+                messages.affinity_cache, "get", new=AsyncMock(return_value=member)
+            ),
+            patch.object(
+                messages.ambient_gate, "decide", return_value=(False, "cooldown")
+            ),
+            patch.object(
+                messages.models, "add_message_to_buffer", new=AsyncMock()
+            ) as mock_buffer,
+            patch.object(
+                messages.user_task_manager, "enqueue_message", new=AsyncMock()
+            ) as mock_enqueue,
+        ):
             await messages._maybe_ambient_chime(
                 fake_message, db=None, user_text="just chatting", sender_name="Bob"
             )

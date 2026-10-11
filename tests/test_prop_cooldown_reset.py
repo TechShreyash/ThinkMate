@@ -6,6 +6,7 @@
 
 **Validates: Requirements 3.3**
 """
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -17,8 +18,12 @@ _COOLDOWN = 30.0
 
 @settings(max_examples=200)
 @given(
-    reply_at=st.floats(min_value=0.0, max_value=10_000.0, allow_nan=False, allow_infinity=False),
-    delta=st.floats(min_value=0.0, max_value=2.0 * _COOLDOWN, allow_nan=False, allow_infinity=False),
+    reply_at=st.floats(
+        min_value=0.0, max_value=10_000.0, allow_nan=False, allow_infinity=False
+    ),
+    delta=st.floats(
+        min_value=0.0, max_value=2.0 * _COOLDOWN, allow_nan=False, allow_infinity=False
+    ),
 )
 def test_cooldown_reset_on_implicit_reply(reply_at, delta):
     orig = config.GROUP_IMPLICIT_COOLDOWN_SECS

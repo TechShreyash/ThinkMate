@@ -10,13 +10,13 @@ burst reply-to-bot survival rule.
 
 **Validates: Requirements 1.1, 1.6, 3.2, 3.4, 5.1, 5.2, 5.3, 5.4, 9.6, 10.3, 10.7, 10.14**
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from loguru import logger
 
 import app.handlers.messages as messages_module
-
 
 _BOT_IDENTITY = {"id": 999, "username": "ThinkMateBot", "name": "ThinkMate"}
 
@@ -114,6 +114,7 @@ def _fresh_burst(*, observe_return=False):
 # Decision order — implicit detector consulted before the ambient gate (Req 1.1)
 # ===========================================================================
 
+
 @pytest.mark.asyncio
 async def test_non_explicit_consults_implicit_before_ambient():
     """A non-explicit message hits the implicit detector before the ambient gate."""
@@ -125,11 +126,19 @@ async def test_non_explicit_consults_implicit_before_ambient():
     order = []
     gate.decide.side_effect = lambda *a, **k: (order.append("decide"), (False, "x"))[1]
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
-            ) as mock_chime:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq,
+        p_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
+        ) as mock_chime,
+    ):
         mock_chime.side_effect = lambda *a, **k: order.append("chime")
         await messages_module.handle_user_message(message, db)
 
@@ -144,6 +153,7 @@ async def test_non_explicit_consults_implicit_before_ambient():
 # Implicit reply — enqueue with no buffer write, cooldown commit, logging
 # ===========================================================================
 
+
 @pytest.mark.asyncio
 async def test_implicit_reply_enqueues_no_buffer_marks_cooldown_and_logs():
     """An implicit reply enqueues reason=reply, writes no buffer, and logs chat id."""
@@ -156,7 +166,7 @@ async def test_implicit_reply_enqueues_no_buffer_marks_cooldown_and_logs():
     sink = []
     sink_id = logger.add(lambda m: sink.append(str(m)), level="DEBUG")
     try:
-        (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
+        p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
         with p_enq as mock_enq, p_buf as mock_buf, p_bump, p_get, p_id, p_gate, p_det:
             await messages_module.handle_user_message(message, db)
 
@@ -165,7 +175,9 @@ async def test_implicit_reply_enqueues_no_buffer_marks_cooldown_and_logs():
             _, kwargs = mock_enq.call_args
             assert kwargs["reason"] == "reply"
             # Single-write invariant: no buffer write on the implicit-reply path.
-            assert not mock_buf.called, "implicit reply must not write the buffer (Req 3.4)"
+            assert (
+                not mock_buf.called
+            ), "implicit reply must not write the buffer (Req 3.4)"
             # Cooldown committed BEFORE enqueue (Req 3.3).
             assert gate.mark_implicit_reply.called
             # Counter advanced after the decision.
@@ -174,9 +186,9 @@ async def test_implicit_reply_enqueues_no_buffer_marks_cooldown_and_logs():
         logger.remove(sink_id)
 
     # Implicit-reply decision logged with the chat id (Req 3.2).
-    assert any("-100777" in line and "implicit" in line.lower() for line in sink), (
-        "implicit-reply decision must be logged with the chat id"
-    )
+    assert any(
+        "-100777" in line and "implicit" in line.lower() for line in sink
+    ), "implicit-reply decision must be logged with the chat id"
 
 
 @pytest.mark.asyncio
@@ -188,11 +200,19 @@ async def test_implicit_classified_but_cooldown_not_elapsed_falls_to_ambient():
     gate = _fresh_gate(decide_return=(True, "implicit"), cooldown=False)
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq as mock_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
-            ) as mock_chime:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq as mock_enq,
+        p_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
+        ) as mock_chime,
+    ):
         await messages_module.handle_user_message(message, db)
 
         reply_calls = [
@@ -207,6 +227,7 @@ async def test_implicit_classified_but_cooldown_not_elapsed_falls_to_ambient():
 # Explicit path unchanged (Req 5.2) + observe-on-every-path (Req 10.3)
 # ===========================================================================
 
+
 @pytest.mark.asyncio
 async def test_explicit_path_enqueues_reply_no_buffer_no_implicit():
     """An explicit @mention enqueues a reply, bumps affinity, skips the detector."""
@@ -216,9 +237,16 @@ async def test_explicit_path_enqueues_reply_no_buffer_no_implicit():
     gate = _fresh_gate()
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq as mock_enq, p_buf as mock_buf, p_bump as mock_bump, p_get, p_id, \
-            p_gate, p_det:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq as mock_enq,
+        p_buf as mock_buf,
+        p_bump as mock_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+    ):
         await messages_module.handle_user_message(message, db)
 
         assert mock_enq.call_count == 1
@@ -238,6 +266,7 @@ async def test_explicit_path_enqueues_reply_no_buffer_no_implicit():
 # Ambient fallthrough — single-write invariant (Req 5.3, 5.4)
 # ===========================================================================
 
+
 @pytest.mark.asyncio
 async def test_ambient_drop_writes_buffer_exactly_once():
     """A non-addressed dropped message is buffered exactly once by the gate."""
@@ -247,17 +276,27 @@ async def test_ambient_drop_writes_buffer_exactly_once():
     gate = _fresh_gate(decide_return=(False, "out_of_window"))
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq as mock_enq, p_buf as mock_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module.ambient_gate,
-                "decide",
-                return_value=(False, "no_trigger"),
-            ):
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq as mock_enq,
+        p_buf as mock_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module.ambient_gate,
+            "decide",
+            return_value=(False, "no_trigger"),
+        ),
+    ):
         await messages_module.handle_user_message(message, db)
 
         # Drop path: buffer written exactly once, no direct reply enqueued.
-        assert mock_buf.call_count == 1, "ambient drop must write the buffer once (Req 5.4)"
+        assert (
+            mock_buf.call_count == 1
+        ), "ambient drop must write the buffer once (Req 5.4)"
         reply_calls = [
             c for c in mock_enq.call_args_list if c.kwargs.get("reason") == "reply"
         ]
@@ -273,24 +312,37 @@ async def test_ambient_pass_writes_via_enqueue_not_buffer():
     gate = _fresh_gate(decide_return=(False, "out_of_window"))
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq as mock_enq, p_buf as mock_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module.ambient_gate, "decide", return_value=(True, "pass")
-            ), \
-            patch.object(messages_module.ambient_gate, "mark_chimed"):
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq as mock_enq,
+        p_buf as mock_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module.ambient_gate, "decide", return_value=(True, "pass")
+        ),
+        patch.object(messages_module.ambient_gate, "mark_chimed"),
+    ):
         await messages_module.handle_user_message(message, db)
 
         ambient_calls = [
             c for c in mock_enq.call_args_list if c.kwargs.get("reason") == "ambient"
         ]
-        assert len(ambient_calls) == 1, "ambient pass must enqueue once (reason=ambient)"
-        assert not mock_buf.called, "ambient pass must not write the buffer (enqueue does)"
+        assert (
+            len(ambient_calls) == 1
+        ), "ambient pass must enqueue once (reason=ambient)"
+        assert (
+            not mock_buf.called
+        ), "ambient pass must not write the buffer (enqueue does)"
 
 
 # ===========================================================================
 # DM unchanged — no detector invoked (Req 5.1)
 # ===========================================================================
+
 
 @pytest.mark.asyncio
 async def test_dm_message_skips_detectors_entirely():
@@ -301,7 +353,7 @@ async def test_dm_message_skips_detectors_entirely():
     gate = _fresh_gate()
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
     with p_enq as mock_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det:
         await messages_module.handle_user_message(message, db)
 
@@ -309,13 +361,16 @@ async def test_dm_message_skips_detectors_entirely():
         assert mock_enq.call_count == 1
         args, _ = mock_enq.call_args
         assert args[1] == 222, "DM enqueues with the user id"
-        assert not gate.decide.called, "DM must not invoke the implicit detector (Req 5.1)"
+        assert (
+            not gate.decide.called
+        ), "DM must not invoke the implicit detector (Req 5.1)"
         assert not det.observe.called, "DM must not invoke the spam burst detector"
 
 
 # ===========================================================================
 # Defensive fallthrough — classifier/decide errors reach the ambient path
 # ===========================================================================
+
 
 @pytest.mark.asyncio
 async def test_decide_raises_degrades_to_ambient():
@@ -327,11 +382,19 @@ async def test_decide_raises_degrades_to_ambient():
     gate.decide.side_effect = RuntimeError("boom")
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
-            ) as mock_chime:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq,
+        p_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
+        ) as mock_chime,
+    ):
         await messages_module.handle_user_message(message, db)
         assert mock_chime.called, "decide failure must fall through to the ambient gate"
 
@@ -346,11 +409,19 @@ async def test_burst_observe_raises_degrades_and_continues():
     det = _fresh_burst()
     det.observe.side_effect = RuntimeError("burst boom")
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
-            ) as mock_chime:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq,
+        p_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
+        ) as mock_chime,
+    ):
         await messages_module.handle_user_message(message, db)
         # Routing continues to the implicit/ambient path despite the observe error.
         assert gate.decide.called
@@ -366,14 +437,22 @@ async def test_mass_tag_scan_raises_degrades_to_not_spam():
     gate = _fresh_gate(decide_return=(False, "out_of_window"))
     det = _fresh_burst()
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det, \
-            patch.object(
-                messages_module, "is_mass_tag_spam", side_effect=RuntimeError("scan boom")
-            ), \
-            patch.object(
-                messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
-            ) as mock_chime:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq,
+        p_buf,
+        p_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+        patch.object(
+            messages_module, "is_mass_tag_spam", side_effect=RuntimeError("scan boom")
+        ),
+        patch.object(
+            messages_module, "_maybe_ambient_chime", new_callable=AsyncMock
+        ) as mock_chime,
+    ):
         await messages_module.handle_user_message(message, db)
         # decide receives is_spam=False (degraded) and routing reaches the gate.
         assert gate.decide.called
@@ -385,6 +464,7 @@ async def test_mass_tag_scan_raises_degrades_to_not_spam():
 # ===========================================================================
 # Burst-classified reply-to-bot still routes through the explicit path (Req 10.7)
 # ===========================================================================
+
 
 @pytest.mark.asyncio
 async def test_burst_reply_to_bot_still_explicit():
@@ -398,9 +478,16 @@ async def test_burst_reply_to_bot_still_explicit():
     gate = _fresh_gate()
     det = _fresh_burst(observe_return=True)
 
-    (p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det) = _patch_common(gate, det)
-    with p_enq as mock_enq, p_buf as mock_buf, p_bump as mock_bump, p_get, p_id, \
-            p_gate, p_det:
+    p_enq, p_buf, p_bump, p_get, p_id, p_gate, p_det = _patch_common(gate, det)
+    with (
+        p_enq as mock_enq,
+        p_buf as mock_buf,
+        p_bump as mock_bump,
+        p_get,
+        p_id,
+        p_gate,
+        p_det,
+    ):
         await messages_module.handle_user_message(message, db)
 
         assert mock_enq.call_count == 1

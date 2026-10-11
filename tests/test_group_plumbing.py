@@ -15,12 +15,12 @@ with ``AsyncMock`` exactly as in ``tests/test_batching_and_concurrency.py``; the
 target is ``app.services.chat_manager.llm_service.generate_reply_bundle`` because
 ``chat_manager`` does ``from app.services.llm_service import llm_service``.
 """
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.config import config
 from app.database import connection, models
 from app.services.chat_manager import handle_message
 from app.services.user_task_manager import UserTaskManager
@@ -88,12 +88,20 @@ async def test_dm_history_is_single_party():
         async with connection.db_session() as db:
             # Seed a couple of prior turns (stored with sender attribution).
             await models.add_message_to_buffer(
-                db, user_id, "user", "first user msg",
-                sender_id=user_id, sender_name="Bob",
+                db,
+                user_id,
+                "user",
+                "first user msg",
+                sender_id=user_id,
+                sender_name="Bob",
             )
             await models.add_message_to_buffer(
-                db, user_id, "assistant", "first reply",
-                sender_id=0, sender_name="ThinkMate",
+                db,
+                user_id,
+                "assistant",
+                "first reply",
+                sender_id=0,
+                sender_name="ThinkMate",
             )
 
             await handle_message(db, user_id, "second user msg")
@@ -121,13 +129,16 @@ async def test_dm_history_is_single_party():
 async def test_group_handle_message_multiparty():
     chat_id = -100
 
-    with patch(
-        "app.services.chat_manager.llm_service.generate_reply_bundle",
-        new_callable=AsyncMock,
-    ) as mock_reply, patch(
-        "app.services.chat_manager.affinity_cache.bump",
-        new_callable=AsyncMock,
-    ) as mock_bump:
+    with (
+        patch(
+            "app.services.chat_manager.llm_service.generate_reply_bundle",
+            new_callable=AsyncMock,
+        ) as mock_reply,
+        patch(
+            "app.services.chat_manager.affinity_cache.bump",
+            new_callable=AsyncMock,
+        ) as mock_bump,
+    ):
         # Group path returns the 3-tuple (reply, reaction, affinity_delta).
         mock_reply.return_value = ("hey all", None, 0.0)
 
@@ -164,20 +175,27 @@ async def test_group_history_labels_bot_turns_and_prompt_has_group_section():
     carries the multi-party GROUP CHAT section so the model can track who said what."""
     chat_id = -200
 
-    with patch(
-        "app.services.chat_manager.llm_service.generate_reply_bundle",
-        new_callable=AsyncMock,
-    ) as mock_reply, patch(
-        "app.services.chat_manager.affinity_cache.bump",
-        new_callable=AsyncMock,
+    with (
+        patch(
+            "app.services.chat_manager.llm_service.generate_reply_bundle",
+            new_callable=AsyncMock,
+        ) as mock_reply,
+        patch(
+            "app.services.chat_manager.affinity_cache.bump",
+            new_callable=AsyncMock,
+        ),
     ):
         mock_reply.return_value = ("ok", None, 0.0)
 
         async with connection.db_session() as db:
             # Seed a prior bot reply so the rendered history includes an assistant turn.
             await models.add_message_to_buffer(
-                db, chat_id, "assistant", "earlier reply",
-                sender_id=0, sender_name="Botty",
+                db,
+                chat_id,
+                "assistant",
+                "earlier reply",
+                sender_id=0,
+                sender_name="Botty",
             )
             await handle_message(
                 db,

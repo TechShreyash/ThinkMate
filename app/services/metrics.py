@@ -16,12 +16,13 @@ Design constraints (see ``.kiro/specs/observability``):
 * **Bounded.** Callers only ever use a small fixed set of metric names, so
   registry memory cannot grow without limit (Requirement 1.9).
 """
+
 from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from loguru import logger
 
@@ -60,7 +61,8 @@ class MetricsRegistry:
         try:
             with self._lock:
                 self._counters[name] = self._counters.get(name, 0) + n
-        except Exception as exc:  # never raise into the caller (Req 2.8)
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.incr({name!r}) failed: {exc}")
 
     def set_gauge(self, name: str, value: float) -> None:
@@ -68,7 +70,8 @@ class MetricsRegistry:
         try:
             with self._lock:
                 self._gauges[name] = value
-        except Exception as exc:
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.set_gauge({name!r}) failed: {exc}")
 
     def observe(self, name: str, value: float) -> None:
@@ -81,9 +84,9 @@ class MetricsRegistry:
                 else:
                     agg["count"] += 1
                     agg["sum"] += value
-                    if value > agg["max"]:
-                        agg["max"] = value
-        except Exception as exc:
+                    agg["max"] = max(agg["max"], value)
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.observe({name!r}) failed: {exc}")
 
     def record_latency(self, name: str, seconds: float) -> None:
@@ -104,7 +107,8 @@ class MetricsRegistry:
         finally:
             try:
                 self.observe(name, time.perf_counter() - start)
-            except Exception as exc:  # the record step must never raise (Req 2.8)
+            # Best-effort metrics must never interrupt message handling.
+            except Exception as exc:  # noqa: BLE001
                 logger.debug(f"metrics.timer({name!r}) record failed: {exc}")
 
     def record_llm(self, call_type: str, *, ok: bool, latency: float) -> None:
@@ -118,7 +122,8 @@ class MetricsRegistry:
             self.incr(f"llm.{prefix}.calls")
             self.incr(f"llm.{prefix}.success" if ok else f"llm.{prefix}.failure")
             self.observe(f"llm.{prefix}.latency", latency)
-        except Exception as exc:
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.record_llm({call_type!r}) failed: {exc}")
 
     def snapshot(self) -> dict:
@@ -142,7 +147,8 @@ class MetricsRegistry:
                         "avg": (total / count) if count else 0,
                     }
             return {"counters": counters, "gauges": gauges, "timers": timers}
-        except Exception as exc:  # stay well-formed even on internal error
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.snapshot() failed: {exc}")
             return {"counters": {}, "gauges": {}, "timers": {}}
 
@@ -182,9 +188,9 @@ class MetricsRegistry:
                     else:
                         existing["count"] += count
                         existing["sum"] += total
-                        if mx > existing["max"]:
-                            existing["max"] = mx
-        except Exception as exc:  # a bad persisted doc must never break startup (Req 2.8)
+                        existing["max"] = max(existing["max"], mx)
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.load_state() failed: {exc}")
 
     def reset(self) -> None:
@@ -194,7 +200,8 @@ class MetricsRegistry:
                 self._counters.clear()
                 self._gauges.clear()
                 self._timers.clear()
-        except Exception as exc:
+        # Best-effort metrics must never interrupt message handling.
+        except Exception as exc:  # noqa: BLE001
             logger.debug(f"metrics.reset() failed: {exc}")
 
 

@@ -19,10 +19,11 @@ baseline to preserve) and must continue to pass after the fix.
 
 **Validates: Requirements 3.1, 3.3, 3.4**
 """
+
 import string
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.handlers.messages as messages_module
 from app.config import config
@@ -114,9 +115,9 @@ async def test_overlong_non_command_text_triggers_length_guard():
         await messages_module.handle_user_message(message, db)
 
         message.answer.assert_called_once_with(LENGTH_GUARD_TEXT)
-        assert not mock_enqueue.called, (
-            "preservation: over-long text must not be enqueued"
-        )
+        assert (
+            not mock_enqueue.called
+        ), "preservation: over-long text must not be enqueued"
 
 
 @pytest.mark.asyncio
@@ -147,9 +148,9 @@ async def test_empty_sender_returns_early():
     ) as mock_enqueue:
         await messages_module.handle_user_message(message, db)
 
-        assert not mock_enqueue.called, (
-            "preservation: message with no sender must not be enqueued"
-        )
-        assert not message.answer.called, (
-            "preservation: message with no sender must not be answered"
-        )
+        assert (
+            not mock_enqueue.called
+        ), "preservation: message with no sender must not be enqueued"
+        assert (
+            not message.answer.called
+        ), "preservation: message with no sender must not be answered"

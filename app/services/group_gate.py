@@ -97,7 +97,7 @@ def _word_token_present(token: str, text: str) -> bool:
     try:
         pattern = re.compile(r"\b" + re.escape(token) + r"\b", re.IGNORECASE)
         return pattern.search(text) is not None
-    except (re.error, TypeError):
+    except re.error, TypeError:
         return False
 
 
@@ -112,11 +112,9 @@ def _mention_present(handle: str, text: str) -> bool:
     if not handle or not text:
         return False
     try:
-        pattern = re.compile(
-            r"(?<![\w@])@" + re.escape(handle) + r"\b", re.IGNORECASE
-        )
+        pattern = re.compile(r"(?<![\w@])@" + re.escape(handle) + r"\b", re.IGNORECASE)
         return pattern.search(text) is not None
-    except (re.error, TypeError):
+    except re.error, TypeError:
         return False
 
 
@@ -173,12 +171,9 @@ def is_addressed(
                 return True
 
         # (c) Bot name as a standalone token (word-boundary, case-insensitive).
-        if bot_name and _word_token_present(bot_name, safe_text):
-            return True
-
-        return False
-    except Exception:
-        # Never raise on malformed input.
+        return bool(bot_name and _word_token_present(bot_name, safe_text))
+    # Routing must degrade gracefully on malformed input.
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -208,7 +203,7 @@ def _has_mention_entity(entities, text: str, handle: str) -> bool:
             continue
         if offset < 0 or length <= 0:
             continue
-        fragment = text[offset:offset + length]
+        fragment = text[offset : offset + length]
         if not handle:
             # No username to compare against; presence of a mention entity is
             # itself a weak positive signal.
@@ -272,11 +267,12 @@ def count_distinct_mentions(text, entities) -> int:
                 continue
             if offset < 0 or length <= 0:
                 continue
-            fragment = safe_text[offset:offset + length].lstrip("@").casefold()
+            fragment = safe_text[offset : offset + length].lstrip("@").casefold()
             if fragment:
                 handles.add(fragment)
         return len(handles) + len(user_ids)
-    except Exception:
+    # Routing must degrade gracefully on malformed input.
+    except Exception:  # noqa: BLE001
         return 0
 
 
@@ -302,7 +298,8 @@ def is_mass_tag_spam(text, entities, *, threshold: int) -> bool:
     """
     try:
         return count_distinct_mentions(text, entities) > threshold
-    except Exception:
+    # Routing must degrade gracefully on malformed input.
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -334,7 +331,8 @@ def is_directed_at_other(*, entities, reply_to_other: bool) -> bool:
         # An empty handle makes ``_has_mention_entity`` a pure "is any mention
         # entity present?" scan, which is exactly what we need here.
         return _has_mention_entity(entities, "", "")
-    except Exception:
+    # Routing must degrade gracefully on malformed input.
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -371,11 +369,9 @@ def scan_cheap_triggers(text: str) -> bool:
             return True
 
         # Exclamation-heavy strong sentiment.
-        if "!!" in text or text.count("!") >= 2:
-            return True
-
-        return False
-    except Exception:
+        return bool("!!" in text or text.count("!") >= 2)
+    # Routing must degrade gracefully on malformed input.
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -396,7 +392,8 @@ def scan_negative_signal(text: str) -> bool:
         return False
     try:
         return any(pattern.search(text) for pattern in _NEGATIVE_PATTERNS)
-    except Exception:
+    # Routing must degrade gracefully on malformed input.
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -722,8 +719,8 @@ class ImplicitAddressGate:
             if within:
                 return True, "implicit"
             return False, "out_of_window"
-        except Exception:
-            # Never raise: degrade to the safe default (not implicit → ambient).
+        # Routing must degrade gracefully on malformed input.
+        except Exception:  # noqa: BLE001
             return False, "out_of_window"
 
     def cooldown_elapsed(self, chat_id: int, now: float) -> bool:
@@ -862,7 +859,9 @@ class SpamBurstDetector:
         # Casefold + collapse whitespace.
         return " ".join(stripped.casefold().split())
 
-    def observe(self, chat_id: int, text, entities, now: float, user_id: int | None = None) -> bool:
+    def observe(
+        self, chat_id: int, text, entities, now: float, user_id: int | None = None
+    ) -> bool:
         """Record a message and classify it as Greeting_Burst_Spam (True) or not.
 
         History is tracked per ``(chat_id, user_id)`` so a burst is only flagged
@@ -921,7 +920,8 @@ class SpamBurstDetector:
 
             # 5. Including the just-added message, threshold the burst count.
             return (near + 1) >= burst_count
-        except Exception:
+        # Routing must degrade gracefully on malformed input.
+        except Exception:  # noqa: BLE001
             return False
 
     def prune(self, now: float, max_idle: float | None = None) -> int:

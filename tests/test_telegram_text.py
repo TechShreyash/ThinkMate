@@ -1,4 +1,5 @@
 """Tests for Telegram-safe text delivery helpers."""
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -37,7 +38,10 @@ async def test_send_bot_text_splits_long_messages_and_keeps_markup_on_first_chun
     chunks = [call.kwargs["text"] for call in bot.send_message.await_args_list]
     assert all(0 < len(chunk) <= SAFE_CHUNK_CHARS for chunk in chunks)
     assert bot.send_message.await_args_list[0].kwargs["reply_markup"] == "keyboard"
-    assert all("reply_markup" not in call.kwargs for call in bot.send_message.await_args_list[1:])
+    assert all(
+        "reply_markup" not in call.kwargs
+        for call in bot.send_message.await_args_list[1:]
+    )
 
 
 @pytest.mark.asyncio

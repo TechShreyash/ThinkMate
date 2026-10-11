@@ -12,15 +12,16 @@ Patch targets (see module imports):
 
 **Validates: Requirements 4.2, 4.4, 4.5, 4.6, 4.7, 4.8, 6.1, 6.2, 6.3**
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+import app.handlers.commands as commands_module
 from app.config import config
 from app.database import connection, models
+from app.handlers.commands import cmd_chatty, cmd_groupmode, cmd_quiet
 from app.services.affinity import AffinityCache
-import app.handlers.commands as commands_module
-from app.handlers.commands import cmd_quiet, cmd_chatty, cmd_groupmode
-
 
 # --------------------------------------------------------------------------- #
 # AffinityCache                                                               #
@@ -204,11 +205,17 @@ async def test_cmd_groupmode_sets_group_wide_mode_for_admin():
     command = MagicMock()
     command.args = "quiet"
 
-    with patch.object(
-        commands_module, "_is_group_admin", new_callable=AsyncMock, return_value=True
-    ), patch.object(
-        commands_module.models, "set_group_mode", new_callable=AsyncMock
-    ) as mock_set:
+    with (
+        patch.object(
+            commands_module,
+            "_is_group_admin",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch.object(
+            commands_module.models, "set_group_mode", new_callable=AsyncMock
+        ) as mock_set,
+    ):
         await cmd_groupmode(message, command, db)
 
     mock_set.assert_awaited_once_with(db, -100, "quiet")
@@ -223,11 +230,17 @@ async def test_cmd_groupmode_normal_maps_to_auto():
     command = MagicMock()
     command.args = "normal"
 
-    with patch.object(
-        commands_module, "_is_group_admin", new_callable=AsyncMock, return_value=True
-    ), patch.object(
-        commands_module.models, "set_group_mode", new_callable=AsyncMock
-    ) as mock_set:
+    with (
+        patch.object(
+            commands_module,
+            "_is_group_admin",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch.object(
+            commands_module.models, "set_group_mode", new_callable=AsyncMock
+        ) as mock_set,
+    ):
         await cmd_groupmode(message, command, db)
 
     mock_set.assert_awaited_once_with(db, -100, "auto")
@@ -241,11 +254,17 @@ async def test_cmd_groupmode_bare_reports_status_without_admin():
     command = MagicMock()
     command.args = None
 
-    with patch.object(
-        commands_module.models, "get_group_mode", new_callable=AsyncMock, return_value="auto"
-    ) as mock_get, patch.object(
-        commands_module.models, "set_group_mode", new_callable=AsyncMock
-    ) as mock_set:
+    with (
+        patch.object(
+            commands_module.models,
+            "get_group_mode",
+            new_callable=AsyncMock,
+            return_value="auto",
+        ) as mock_get,
+        patch.object(
+            commands_module.models, "set_group_mode", new_callable=AsyncMock
+        ) as mock_set,
+    ):
         await cmd_groupmode(message, command, db)
 
     mock_get.assert_awaited_once()

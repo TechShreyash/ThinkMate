@@ -62,10 +62,14 @@ async def test_reply_passes_through_real_sdk_and_httpx2(sdk_service):
 
     def handler(request):
         requests.append(request)
-        return httpx2.Response(200, json=_completion('{"reply":"Hello!","reaction":""}'))
+        return httpx2.Response(
+            200, json=_completion('{"reply":"Hello!","reaction":""}')
+        )
 
     service = sdk_service(handler)
-    result = await service.generate_reply_bundle(123, "system", [{"role": "user", "content": "Hi"}])
+    result = await service.generate_reply_bundle(
+        123, "system", [{"role": "user", "content": "Hi"}]
+    )
 
     assert result == ("Hello!", None)
     assert len(requests) == 1
@@ -125,7 +129,9 @@ async def test_bad_request_is_not_retried(sdk_service):
         requests.append(request)
         return httpx2.Response(
             400,
-            json={"error": {"message": "Invalid request", "type": "invalid_request_error"}},
+            json={
+                "error": {"message": "Invalid request", "type": "invalid_request_error"}
+            },
         )
 
     service = sdk_service(handler)

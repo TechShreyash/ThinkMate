@@ -10,17 +10,19 @@ folded into the next attempt instead of being missed. If every attempt fails (e.
 outage), the processed segment is trimmed anyway so the buffer can't grow without bound —
 a deliberate trade of a bounded amount of un-extracted memory for a healthy buffer.
 """
-from datetime import datetime, timezone
+
+from datetime import UTC, datetime
 
 from loguru import logger
+
 from app.config import config
-from app.database.connection import db_session
 from app.database import models
+from app.database.connection import db_session
+from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
+from app.services import log_forwarder
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block
 from app.services.metrics import metrics
-from app.services import log_forwarder
-from app.prompts.extraction_prompt import SYSTEM_EXTRACTION_PROMPT
 
 # Maximum number of extraction LLM calls per run; each call re-snapshots the latest buffer.
 MAX_EXTRACTION_ATTEMPTS = 3
@@ -41,7 +43,7 @@ def _msg_date(m: dict) -> str:
 
 def _date_context() -> str:
     """A ``=== CURRENT DATE ===`` block giving the model an absolute reference point."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     return f"=== CURRENT DATE ===\n{today}\n"
 
 
@@ -99,8 +101,12 @@ def _format_extraction_summary(extraction) -> str:
         parts.append(f"events ({', '.join(e_parts)})")
 
     # Emotional State
-    if getattr(extraction, "emotional_state", None) and getattr(extraction.emotional_state, "mood", None):
-        parts.append(f"mood: {extraction.emotional_state.mood} (intensity: {extraction.emotional_state.intensity})")
+    if getattr(extraction, "emotional_state", None) and getattr(
+        extraction.emotional_state, "mood", None
+    ):
+        parts.append(
+            f"mood: {extraction.emotional_state.mood} (intensity: {extraction.emotional_state.intensity})"
+        )
 
     return ", ".join(parts)
 
@@ -109,22 +115,25 @@ def _extraction_has_updates(extraction) -> bool:
     """True when a MemoryExtraction contains at least one write-worthy update."""
     if extraction is None:
         return False
-    return any([
-        extraction.profile_updates and (
-            extraction.profile_updates.communication_style
-            or extraction.profile_updates.gender
-        ),
-        extraction.new_facts,
-        extraction.updated_facts,
-        extraction.removed_facts,
-        extraction.new_beliefs,
-        extraction.updated_beliefs,
-        extraction.removed_beliefs,
-        extraction.new_events,
-        extraction.updated_events,
-        extraction.removed_events,
-        extraction.emotional_state,
-    ])
+    return any(
+        [
+            extraction.profile_updates
+            and (
+                extraction.profile_updates.communication_style
+                or extraction.profile_updates.gender
+            ),
+            extraction.new_facts,
+            extraction.updated_facts,
+            extraction.removed_facts,
+            extraction.new_beliefs,
+            extraction.updated_beliefs,
+            extraction.removed_beliefs,
+            extraction.new_events,
+            extraction.updated_events,
+            extraction.removed_events,
+            extraction.emotional_state,
+        ]
+    )
 
 
 # --- Multi-party (group) extraction helpers ---------------------------------- #
@@ -168,7 +177,10 @@ def _is_group_buffer(messages: list[dict]) -> bool:
         if m.get("role") != "user":
             continue
         sid = m.get("sender_id")
-        if sid in (None, 0) or _normalize_name(m.get("sender_name")) == _BOT_NAME.casefold():
+        if (
+            sid in (None, 0)
+            or _normalize_name(m.get("sender_name")) == _BOT_NAME.casefold()
+        ):
             continue
         senders.add(sid)
     return len(senders) > 1
@@ -262,7 +274,9 @@ async def extract_and_trim(chat_id: int, *, is_group: bool | None = None):
         async with db_session() as db:
             raw_messages = await _read_raw_buffer(db, chat_id)
     except Exception as e:  # noqa: BLE001 - never let dispatch peeking crash the task
-        logger.error(f"Extraction dispatch failed to read buffer for chat {chat_id}: {e}")
+        logger.error(
+            f"Extraction dispatch failed to read buffer for chat {chat_id}: {e}"
+        )
         return
 
     if _is_group_buffer(raw_messages):
@@ -319,9 +333,9 @@ async def _extract_and_trim_single(user_id: int):
                     # the segment we processed is the oldest `trim_size` messages, so a
                     # fresh-read oldest-N trim removes exactly those, keeping newer arrivals.
                     await models.delete_oldest_buffer_messages(db, user_id, trim_size)
-                    
+
                     has_updates = _extraction_has_updates(extraction)
-                    
+
                     if has_updates:
                         logger.info(
                             f"Memory extraction done for user {user_id}; updates saved, trimmed {trim_size} messages."
@@ -393,9 +407,7 @@ async def extract_and_trim_group(chat_id: int):
                 # is the only source of truth for attribution (no cross-segment guessing).
                 name_to_id = _build_name_id_map(segment)
 
-                instruction_prompt = (
-                    f"{SYSTEM_EXTRACTION_PROMPT}\n\n{_date_context()}\n{_GROUP_EXTRACTION_NOTE}"
-                )
+                instruction_prompt = f"{SYSTEM_EXTRACTION_PROMPT}\n\n{_date_context()}\n{_GROUP_EXTRACTION_NOTE}"
 
                 result = await llm_service.extract_group_memory(
                     chat_id,
@@ -409,7 +421,9 @@ async def extract_and_trim_group(chat_id: int):
 
                     group_extraction = getattr(result, "group_extraction", None)
                     if _extraction_has_updates(group_extraction):
-                        await models.save_extracted_memories(db, chat_id, group_extraction)
+                        await models.save_extracted_memories(
+                            db, chat_id, group_extraction
+                        )
                         group_saved = True
                         summary = _format_extraction_summary(group_extraction)
                         await log_forwarder.send(
@@ -419,7 +433,9 @@ async def extract_and_trim_group(chat_id: int):
                         )
 
                     for update in result.updates:
-                        resolved_id = name_to_id.get(_normalize_name(update.participant))
+                        resolved_id = name_to_id.get(
+                            _normalize_name(update.participant)
+                        )
                         if resolved_id is None:
                             skipped += 1
                             logger.warning(
@@ -427,12 +443,14 @@ async def extract_and_trim_group(chat_id: int):
                                 f"resolved to a sender in chat {chat_id}; skipping (no misattribution)."
                             )
                             continue
-                        
+
                         p_extraction = update.extraction
                         has_updates = _extraction_has_updates(p_extraction)
-                        
+
                         if has_updates:
-                            await models.save_extracted_memories(db, resolved_id, p_extraction)
+                            await models.save_extracted_memories(
+                                db, resolved_id, p_extraction
+                            )
                             saved += 1
                             summary = _format_extraction_summary(p_extraction)
                             await log_forwarder.send(

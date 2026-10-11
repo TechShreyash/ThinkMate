@@ -18,6 +18,7 @@ def _norm(text: str) -> str:
 
 # --- Requirement 7: store all user memory in English -------------------------------------------
 
+
 def test_extraction_prompt_has_language_normalization_header():
     """The extraction prompt declares a dedicated LANGUAGE NORMALIZATION rule (Req 7.1, 7.2)."""
     assert "language normalization" in _norm(SYSTEM_EXTRACTION_PROMPT)
@@ -63,6 +64,7 @@ def test_group_note_reinforces_english_per_participant():
 
 
 # --- Requirement 8: match the user's language and script in replies ----------------------------
+
 
 def test_system_prompt_replies_in_user_current_language():
     """Reply in the language the user is currently using (Req 8.1)."""

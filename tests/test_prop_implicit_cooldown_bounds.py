@@ -7,6 +7,7 @@
 
 **Validates: Requirements 3.1, 4.1, 4.4**
 """
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -21,7 +22,12 @@ _COOLDOWN = 30.0
     # Arrival offsets (seconds) of a burst of implicit candidates, all strictly
     # inside one cooldown window.
     offsets=st.lists(
-        st.floats(min_value=0.0, max_value=_COOLDOWN - 0.001, allow_nan=False, allow_infinity=False),
+        st.floats(
+            min_value=0.0,
+            max_value=_COOLDOWN - 0.001,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
         min_size=1,
         max_size=12,
     ),

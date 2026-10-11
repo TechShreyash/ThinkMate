@@ -6,15 +6,17 @@ Runs off the hot path (scheduler -> run_consolidator under memory_lock). Mirrors
 ``compress_user_memory``: one LLM call, single-write apply, never-wipe-on-failure,
 deterministic budget enforcement, and metrics.
 """
+
 from loguru import logger
+
 from app.config import config
-from app.database.connection import db_session
 from app.database import models
-from app.services.llm_service import llm_service
-from app.services.memory_loader import build_memory_block
-from app.services.memory_compressor import _enforce_budget
-from app.services.metrics import metrics
+from app.database.connection import db_session
 from app.prompts.consolidation_prompt import SYSTEM_CONSOLIDATION_PROMPT
+from app.services.llm_service import llm_service
+from app.services.memory_compressor import _enforce_budget
+from app.services.memory_loader import build_memory_block
+from app.services.metrics import metrics
 
 
 async def consolidate_user_memory(user_id: int) -> None:
@@ -33,9 +35,13 @@ async def consolidate_user_memory(user_id: int) -> None:
                 f"{SYSTEM_CONSOLIDATION_PROMPT}\n\n"
                 f"MAX INSIGHTS: {config.MAX_INSIGHTS}. Emit at most {config.MAX_INSIGHTS} insights."
             )
-            consolidation = await llm_service.consolidate_memory(user_id, system_prompt, memory_text)
+            consolidation = await llm_service.consolidate_memory(
+                user_id, system_prompt, memory_text
+            )
             if consolidation is None:
-                logger.warning(f"Consolidation failed for user {user_id}; keeping existing memory.")
+                logger.warning(
+                    f"Consolidation failed for user {user_id}; keeping existing memory."
+                )
                 metrics.incr("consolidation.failure")
                 return
             await models.apply_consolidation(db, user_id, consolidation)

@@ -1,4 +1,5 @@
 """Tests for persona-file configuration visibility."""
+
 from loguru import logger
 
 from app.config import config

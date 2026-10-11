@@ -11,12 +11,14 @@ Uses mongomock + pytest-asyncio via the autouse ``mock_mongodb`` fixture and the
 
 _Requirements: 1.2, 1.7, 2.1, 4.1, 4.3, 4.7_
 """
+
 import pytest
+
 from app.config import config
 from app.database import connection, models
 
-
 # --- add_message_to_buffer: sender attribution ---------------------------------
+
 
 @pytest.mark.asyncio
 async def test_buffer_stores_sender_id_and_name():
@@ -24,8 +26,12 @@ async def test_buffer_stores_sender_id_and_name():
     async with connection.db_session() as db:
         chat_id = -1001234567890
         await models.add_message_to_buffer(
-            db, chat_id, "user", "happy birthday Bob!",
-            sender_id=111, sender_name="Alice",
+            db,
+            chat_id,
+            "user",
+            "happy birthday Bob!",
+            sender_id=111,
+            sender_name="Alice",
         )
 
         doc = await db["chat_buffers"].find_one({"_id": chat_id})
@@ -57,7 +63,9 @@ async def test_buffer_dm_call_returns_messages_and_keeps_id():
     async with connection.db_session() as db:
         user_id = 555
         msgs1 = await models.add_message_to_buffer(db, user_id, "user", "Hello bot!")
-        msgs2 = await models.add_message_to_buffer(db, user_id, "assistant", "Hello human!")
+        msgs2 = await models.add_message_to_buffer(
+            db, user_id, "assistant", "Hello human!"
+        )
 
         # Returns the cumulative post-update messages array.
         assert isinstance(msgs1, list) and len(msgs1) == 1
@@ -95,6 +103,7 @@ async def test_buffer_hard_cap_bounds_array():
 
 
 # --- chat_members CRUD ---------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_chat_member_first_upsert_applies_defaults():

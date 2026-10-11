@@ -16,9 +16,10 @@ cancel/await of any background task in ``finally`` (mirrors test_metrics_logger.
 Lazily-imported names (health.py imports ``app.database.models`` and ``llm_service``
 inside the functions) are patched at their source module so the patch is observed.
 """
+
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -28,8 +29,8 @@ from app.database import connection, models
 from app.services import health
 from app.services.metrics import metrics
 
-
 # --- shared helpers / fixtures -----------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def reset_metrics():
@@ -74,7 +75,10 @@ def _counters():
 
 # --- 1. start_proactive_scheduler gating -------------------------------------------------
 
-async def test_start_proactive_scheduler_disabled_when_interval_zero(restore_proactive_config):
+
+async def test_start_proactive_scheduler_disabled_when_interval_zero(
+    restore_proactive_config,
+):
     """Interval of 0.0 starts no task (returns None)."""
     config.PROACTIVE_INTERVAL_SECS = 0.0
     task = health.start_proactive_scheduler(bot=None)
@@ -84,7 +88,9 @@ async def test_start_proactive_scheduler_disabled_when_interval_zero(restore_pro
         await _cancel(task)
 
 
-async def test_start_proactive_scheduler_disabled_when_interval_negative(restore_proactive_config):
+async def test_start_proactive_scheduler_disabled_when_interval_negative(
+    restore_proactive_config,
+):
     """A negative interval starts no task (returns None)."""
     config.PROACTIVE_INTERVAL_SECS = -1.0
     task = health.start_proactive_scheduler(bot=None)
@@ -94,7 +100,9 @@ async def test_start_proactive_scheduler_disabled_when_interval_negative(restore
         await _cancel(task)
 
 
-async def test_start_proactive_scheduler_enabled_returns_task(restore_proactive_config, monkeypatch):
+async def test_start_proactive_scheduler_enabled_returns_task(
+    restore_proactive_config, monkeypatch
+):
     """A positive interval starts a live background task."""
     config.PROACTIVE_INTERVAL_SECS = 0.02
     # Keep the loop inert so the running task never touches the DB/LLM.
@@ -110,23 +118,24 @@ async def test_start_proactive_scheduler_enabled_returns_task(restore_proactive_
 
 # --- 2. _in_quiet_hours pure-function correctness ----------------------------------------
 
+
 def test_in_quiet_hours_wraps_midnight():
     """start>end wraps midnight: hours at/after start OR before end are quiet."""
     # quiet window 22:00 -> 07:00
-    assert health._in_quiet_hours(23, 22, 7) is True   # late night
-    assert health._in_quiet_hours(3, 22, 7) is True    # early morning
-    assert health._in_quiet_hours(22, 22, 7) is True   # inclusive start
-    assert health._in_quiet_hours(7, 22, 7) is False   # exclusive end
+    assert health._in_quiet_hours(23, 22, 7) is True  # late night
+    assert health._in_quiet_hours(3, 22, 7) is True  # early morning
+    assert health._in_quiet_hours(22, 22, 7) is True  # inclusive start
+    assert health._in_quiet_hours(7, 22, 7) is False  # exclusive end
     assert health._in_quiet_hours(12, 22, 7) is False  # midday, awake
 
 
 def test_in_quiet_hours_same_day_window():
     """start<end is a simple [start, end) interval."""
-    assert health._in_quiet_hours(3, 1, 5) is True    # inside
-    assert health._in_quiet_hours(1, 1, 5) is True    # inclusive start
-    assert health._in_quiet_hours(5, 1, 5) is False   # exclusive end
-    assert health._in_quiet_hours(6, 1, 5) is False   # after
-    assert health._in_quiet_hours(0, 1, 5) is False   # before
+    assert health._in_quiet_hours(3, 1, 5) is True  # inside
+    assert health._in_quiet_hours(1, 1, 5) is True  # inclusive start
+    assert health._in_quiet_hours(5, 1, 5) is False  # exclusive end
+    assert health._in_quiet_hours(6, 1, 5) is False  # after
+    assert health._in_quiet_hours(0, 1, 5) is False  # before
 
 
 @pytest.mark.parametrize("hour", [0, 5, 12, 22, 23])
@@ -137,7 +146,10 @@ def test_in_quiet_hours_start_equals_end_is_never_quiet(hour):
 
 # --- 3. scan bounding, resilience, and quiet-hour skip -----------------------------------
 
-async def test_run_proactive_scan_dispatches_once_per_due_user(restore_proactive_config, monkeypatch):
+
+async def test_run_proactive_scan_dispatches_once_per_due_user(
+    restore_proactive_config, monkeypatch
+):
     """Every id returned by find_users_due_for_proactive is dispatched exactly once."""
     config.PROACTIVE_QUIET_START_HOUR = 0
     config.PROACTIVE_QUIET_END_HOUR = 0  # disable quiet hours
@@ -161,7 +173,9 @@ async def test_run_proactive_scan_dispatches_once_per_due_user(restore_proactive
     assert counters["proactive.sent"] == len(due_ids)
 
 
-async def test_run_proactive_scan_continues_past_failing_user(restore_proactive_config, monkeypatch):
+async def test_run_proactive_scan_continues_past_failing_user(
+    restore_proactive_config, monkeypatch
+):
     """One user's raising send must not abort the scan; the rest still process."""
     config.PROACTIVE_QUIET_START_HOUR = 0
     config.PROACTIVE_QUIET_END_HOUR = 0
@@ -192,7 +206,9 @@ async def test_run_proactive_scan_continues_past_failing_user(restore_proactive_
     assert counters["proactive.failed"] == 1
 
 
-async def test_run_proactive_scan_skips_within_quiet_hours(restore_proactive_config, monkeypatch):
+async def test_run_proactive_scan_skips_within_quiet_hours(
+    restore_proactive_config, monkeypatch
+):
     """Inside quiet hours the scan increments runs but never finds/sends."""
     monkeypatch.setattr(health, "_in_quiet_hours", lambda hour, start, end: True)
 
@@ -211,6 +227,7 @@ async def test_run_proactive_scan_skips_within_quiet_hours(restore_proactive_con
 
 # --- 4. _proactive_loop self-heals -------------------------------------------------------
 
+
 async def test_proactive_loop_self_heals_on_scan_error(monkeypatch):
     """A scan that always raises must not kill the loop (errors are swallowed)."""
     monkeypatch.setattr(
@@ -228,21 +245,28 @@ async def test_proactive_loop_self_heals_on_scan_error(monkeypatch):
 
 # --- 5. _send_proactive_checkin sender paths ---------------------------------------------
 
+
 async def _seed_user_with_memory(user_id: int):
     """Create a profile with a few facts so build_memory_block yields non-empty text."""
     async with connection.db_session() as db:
         await models.ensure_user(db, user_id, "user", "User")
         await db["user_profiles"].update_one(
             {"_id": user_id},
-            {"$set": {"facts": [
-                {"category": "personal", "content": "loves hiking"},
-                {"category": "personal", "content": "works as an engineer"},
-                {"category": "personal", "content": "has a dog named Rex"},
-            ]}},
+            {
+                "$set": {
+                    "facts": [
+                        {"category": "personal", "content": "loves hiking"},
+                        {"category": "personal", "content": "works as an engineer"},
+                        {"category": "personal", "content": "has a dog named Rex"},
+                    ]
+                }
+            },
         )
 
 
-async def test_send_proactive_checkin_includes_time_context(restore_proactive_config, monkeypatch):
+async def test_send_proactive_checkin_includes_time_context(
+    restore_proactive_config, monkeypatch
+):
     """The proactive LLM prompt includes current UTC time, without a fabricated gap."""
     user_id = 90000
     await _seed_user_with_memory(user_id)
@@ -253,7 +277,7 @@ async def test_send_proactive_checkin_includes_time_context(restore_proactive_co
         generate_checkin,
     )
     bot = AsyncMock()
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
 
     outcome = await health._send_proactive_checkin(bot, user_id, now=now)
 
@@ -275,7 +299,7 @@ async def test_send_proactive_checkin_sent(restore_proactive_config, monkeypatch
         AsyncMock(return_value="hey there"),
     )
     bot = AsyncMock()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     outcome = await health._send_proactive_checkin(bot, user_id, now=now)
 
@@ -293,7 +317,9 @@ async def test_send_proactive_checkin_sent(restore_proactive_config, monkeypatch
         # last_proactive_at recorded.
         doc = await db["user_profiles"].find_one({"_id": user_id})
         assert doc["last_proactive_at"] is not None
-        assert abs(doc["last_proactive_at"].replace(tzinfo=None) - now.replace(tzinfo=None)) < timedelta(milliseconds=1)
+        assert abs(
+            doc["last_proactive_at"].replace(tzinfo=None) - now.replace(tzinfo=None)
+        ) < timedelta(milliseconds=1)
 
 
 async def test_send_proactive_checkin_skipped(restore_proactive_config, monkeypatch):
@@ -306,7 +332,7 @@ async def test_send_proactive_checkin_skipped(restore_proactive_config, monkeypa
         AsyncMock(return_value=None),
     )
     bot = AsyncMock()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     outcome = await health._send_proactive_checkin(bot, user_id, now=now)
 
@@ -317,7 +343,9 @@ async def test_send_proactive_checkin_skipped(restore_proactive_config, monkeypa
         assert doc["last_proactive_at"] is not None
 
 
-async def test_send_proactive_checkin_failed_disables_user(restore_proactive_config, monkeypatch):
+async def test_send_proactive_checkin_failed_disables_user(
+    restore_proactive_config, monkeypatch
+):
     """A send exception (e.g. Forbidden) disables proactive for the user; window still held."""
     user_id = 90003
     await _seed_user_with_memory(user_id)
@@ -328,7 +356,7 @@ async def test_send_proactive_checkin_failed_disables_user(restore_proactive_con
     )
     bot = AsyncMock()
     bot.send_message.side_effect = Exception("Forbidden: bot was blocked by the user")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     outcome = await health._send_proactive_checkin(bot, user_id, now=now)
 

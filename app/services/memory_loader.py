@@ -1,5 +1,5 @@
-import json
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from app.config import config
 
 
@@ -21,17 +21,21 @@ def compile_memory_text(doc: dict) -> str:
     mood_str = ""
     if emotional_state:
         mood_str = f"Mood: {emotional_state.get('mood', 'calm')} (intensity: {emotional_state.get('intensity', 0.5)})"
-        trigger = emotional_state.get('trigger')
+        trigger = emotional_state.get("trigger")
         if trigger:
             mood_str += f", Triggered by: {trigger}"
 
     # Format the sections
     lines = []
-    
+
     # Section 1: User Profile
     lines.append("=== USER PROFILE ===")
     lines.append(f"Summary: {profile_summary}")
-    gender_display = {"male": "Male", "female": "Female", "non-binary": "Non-binary"}.get(gender, "Unknown")
+    gender_display = {
+        "male": "Male",
+        "female": "Female",
+        "non-binary": "Non-binary",
+    }.get(gender, "Unknown")
     lines.append(f"Gender: {gender_display}")
     lines.append(f"Communication Style Preference: {comm_style}")
     lines.append("")
@@ -68,9 +72,15 @@ def compile_memory_text(doc: dict) -> str:
     lines.append("=== LIFE EVENTS TIMELINE ===")
     if events:
         for ev in events:
-            date_str = f" ({ev.get('event_date')})" if ev.get('event_date') else ""
-            emotion_str = f" — felt {ev.get('emotional_context')}" if ev.get('emotional_context') else ""
-            lines.append(f"- [{ev.get('significance', 'minor')}] {ev.get('description')}{date_str}{emotion_str}")
+            date_str = f" ({ev.get('event_date')})" if ev.get("event_date") else ""
+            emotion_str = (
+                f" — felt {ev.get('emotional_context')}"
+                if ev.get("emotional_context")
+                else ""
+            )
+            lines.append(
+                f"- [{ev.get('significance', 'minor')}] {ev.get('description')}{date_str}{emotion_str}"
+            )
     else:
         lines.append("(No timeline events logged)")
     lines.append("")
@@ -85,7 +95,7 @@ def compile_memory_text(doc: dict) -> str:
     # Mood trend (Phase 12 emotional continuity; read defensively, bounded).
     mood_history = doc.get("mood_history") or []
     if mood_history:
-        recent = mood_history[-config.MAX_MOOD_HISTORY:]
+        recent = mood_history[-config.MAX_MOOD_HISTORY :]
         trend = ", ".join(m.get("mood", "?") for m in recent)
         lines.append(f"Recent mood trend (oldest→newest): {trend}")
 
@@ -113,7 +123,9 @@ def compile_memory_block(doc: dict) -> tuple[str, bool]:
     return compiled_text, needs_compression
 
 
-async def build_memory_block(db: AsyncIOMotorDatabase, user_id: int) -> tuple[str, bool]:
+async def build_memory_block(
+    db: AsyncIOMotorDatabase, user_id: int
+) -> tuple[str, bool]:
     """
     Loads all components of the user's memory from MongoDB and compiles them into a structured text block.
     Returns:

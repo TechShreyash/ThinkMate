@@ -8,20 +8,23 @@ State is keyed by ``chat_id``. In a DM ``chat_id == user_id`` (and ``sender_id =
 so per-conversation batching collapses to exactly the original per-user behavior; for groups
 a single conversation batches per chat regardless of how many members are speaking.
 """
+
 import asyncio
 import time
-from loguru import logger
+
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import Message, ReactionTypeEmoji
-from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from loguru import logger
+
 from app.config import config
-from app.database.connection import db_session
 from app.database import models
-from app.services.chat_manager import handle_message
-from app.services.metrics import metrics
-from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector
-from app.services.affinity import affinity_cache
+from app.database.connection import db_session
 from app.services import log_forwarder
+from app.services.affinity import affinity_cache
+from app.services.chat_manager import handle_message
+from app.services.group_gate import ambient_gate, implicit_gate, spam_burst_detector
+from app.services.metrics import metrics
 from app.services.telegram_text import send_message_text
 
 # Telegram chat.type values that map to the multi-party group path.
@@ -94,7 +97,9 @@ class UserTaskManager:
         """Lazily start the idle-state eviction loop on the running event loop."""
         if self._sweeper is None or self._sweeper.done():
             try:
-                self._sweeper = asyncio.get_running_loop().create_task(self._sweep_loop())
+                self._sweeper = asyncio.get_running_loop().create_task(
+                    self._sweep_loop()
+                )
             except RuntimeError:
                 pass
 
@@ -111,21 +116,26 @@ class UserTaskManager:
         now = time.time()
         async with self._states_lock:
             stale = [
-                cid for cid, st in self._states.items()
+                cid
+                for cid, st in self._states.items()
                 if st.is_idle() and now - st.last_active > config.USER_STATE_TTL_SECS
             ]
             for cid in stale:
                 del self._states[cid]
             metrics.set_gauge("conversations.active", len(self._states))
         if stale:
-            logger.debug(f"Evicted {len(stale)} idle conversation states (now {len(self._states)} active).")
+            logger.debug(
+                f"Evicted {len(stale)} idle conversation states (now {len(self._states)} active)."
+            )
 
         # Prune the ambient gate and affinity cache so their per-chat/-member maps
         # stay bounded at runtime (they have their own internal state, so this is
         # safe outside the states lock). A prune failure must never break the sweep.
         try:
             gate_pruned = ambient_gate.prune(now)
-            affinity_pruned = affinity_cache.prune(now, max_idle=config.USER_STATE_TTL_SECS * 4)
+            affinity_pruned = affinity_cache.prune(
+                now, max_idle=config.USER_STATE_TTL_SECS * 4
+            )
             implicit_pruned = implicit_gate.prune(now)
             burst_pruned = spam_burst_detector.prune(now)
             if gate_pruned or affinity_pruned or implicit_pruned or burst_pruned:
@@ -167,17 +177,21 @@ class UserTaskManager:
         current_time = state.last_active
 
         if len(state.pending_messages) >= config.MAX_QUEUED_MESSAGES:
-            logger.warning(f"Chat {chat_id} queue at limit ({config.MAX_QUEUED_MESSAGES}); dropping message.")
+            logger.warning(
+                f"Chat {chat_id} queue at limit ({config.MAX_QUEUED_MESSAGES}); dropping message."
+            )
             metrics.incr("queue.drops")
             return
 
-        state.pending_messages.append({
-            "text": text,
-            "message": message,
-            "user_id": user_id,
-            "sender_name": sender_name,
-            "reason": reason,
-        })
+        state.pending_messages.append(
+            {
+                "text": text,
+                "message": message,
+                "user_id": user_id,
+                "sender_name": sender_name,
+                "reason": reason,
+            }
+        )
 
         # Start the typing indicator if not already running.
         if not state.typing_task or state.typing_task.done():
@@ -267,7 +281,11 @@ class UserTaskManager:
                         group_combined_text = "\n".join(m["text"] for m in group)
                         sender_name = group_last["sender_name"]
                         # Addressed reply takes precedence over ambient.
-                        reason = "reply" if any(m["reason"] == "reply" for m in group) else "ambient"
+                        reason = (
+                            "reply"
+                            if any(m["reason"] == "reply" for m in group)
+                            else "ambient"
+                        )
 
                         try:
                             reply_text, reaction = await handle_message(
@@ -287,13 +305,19 @@ class UserTaskManager:
                             # so a decline still holds the window.
                             reply_is_empty = not reply_text or not reply_text.strip()
                             if reason == "ambient" and reply_is_empty:
-                                logger.debug(f"Ambient reply empty for chat {chat_id}; sending nothing.")
+                                logger.debug(
+                                    f"Ambient reply empty for chat {chat_id}; sending nothing."
+                                )
                             else:
                                 if reaction:
                                     try:
-                                        await last_message.react(reaction=[ReactionTypeEmoji(emoji=reaction)])
+                                        await last_message.react(
+                                            reaction=[ReactionTypeEmoji(emoji=reaction)]
+                                        )
                                     except Exception as react_err:  # noqa: BLE001
-                                        logger.warning(f"Failed to send reaction {reaction!r}: {react_err}")
+                                        logger.warning(
+                                            f"Failed to send reaction {reaction!r}: {react_err}"
+                                        )
 
                                 # A non-ambient (reply/DM) path must always answer, but
                                 # the LLM can occasionally yield an empty/blank reply
@@ -326,14 +350,25 @@ class UserTaskManager:
                                 # (Req 6.1). A tracking failure must never break delivery.
                                 if chat_type in _GROUP_CHAT_TYPES:
                                     try:
-                                        implicit_gate.note_bot_spoke(chat_id, time.time())
+                                        implicit_gate.note_bot_spoke(
+                                            chat_id, time.time()
+                                        )
                                     except Exception as track_err:  # noqa: BLE001
-                                        logger.debug(f"note_bot_spoke failed for chat {chat_id}: {track_err}")
+                                        logger.debug(
+                                            f"note_bot_spoke failed for chat {chat_id}: {track_err}"
+                                        )
                         except (TelegramForbiddenError, TelegramBadRequest) as e:
                             # Catch blocked users, restricted write permissions, kicks, etc. (Req 4.11)
                             is_perm = isinstance(e, TelegramForbiddenError) or any(
                                 p in str(e).lower()
-                                for p in ["permission", "write access", "not enough rights", "restricted", "kicked", "blocked"]
+                                for p in [
+                                    "permission",
+                                    "write access",
+                                    "not enough rights",
+                                    "restricted",
+                                    "kicked",
+                                    "blocked",
+                                ]
                             )
                             if is_perm:
                                 logger.info(
@@ -346,30 +381,49 @@ class UserTaskManager:
                                         chat_id,
                                         f"🚫 blocked/restricted: sender={sender_id} chat={chat_id} "
                                         f"— reply skipped"
-                                        + (", proactive disabled" if chat_type == "private" else ""),
+                                        + (
+                                            ", proactive disabled"
+                                            if chat_type == "private"
+                                            else ""
+                                        ),
                                     )
-                                except Exception:  # noqa: BLE001
+                                # Recovery notifications must not abort a message batch.
+                                except Exception:  # noqa: BLE001, S110
                                     pass
                                 if chat_type == "private":
                                     try:
-                                        await models.set_proactive_enabled(db, sender_id, False)
+                                        await models.set_proactive_enabled(
+                                            db, sender_id, False
+                                        )
                                     except Exception as disable_err:  # noqa: BLE001
                                         logger.debug(
                                             f"Failed to disable proactive for blocked user {sender_id}: {disable_err}"
                                         )
                             else:
-                                logger.error(f"Error processing sender {sender_id} batch for chat {chat_id}: {e}")
+                                logger.error(
+                                    f"Error processing sender {sender_id} batch for chat {chat_id}: {e}"
+                                )
                                 try:
-                                    await _reply_to(last_message, "Sorry, I ran into a problem just now — mind trying again?")
-                                except Exception:  # noqa: BLE001
+                                    await _reply_to(
+                                        last_message,
+                                        "Sorry, I ran into a problem just now — mind trying again?",
+                                    )
+                                # Recovery notifications must not abort a message batch.
+                                except Exception:  # noqa: BLE001, S110
                                     pass
                         except Exception as e:  # noqa: BLE001
                             # A failure for one sender group must not abort the rest
                             # of the batch — log, apologize to that group, continue.
-                            logger.error(f"Error processing sender {sender_id} batch for chat {chat_id}: {e}")
+                            logger.error(
+                                f"Error processing sender {sender_id} batch for chat {chat_id}: {e}"
+                            )
                             try:
-                                await _reply_to(last_message, "Sorry, I ran into a problem just now — mind trying again?")
-                            except Exception:  # noqa: BLE001
+                                await _reply_to(
+                                    last_message,
+                                    "Sorry, I ran into a problem just now — mind trying again?",
+                                )
+                            # Recovery notifications must not abort a message batch.
+                            except Exception:  # noqa: BLE001, S110
                                 pass
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Error processing batch for chat {chat_id}: {e}")
@@ -397,6 +451,7 @@ class UserTaskManager:
             return
         async with state.memory_lock:
             from app.services.memory_extractor import extract_and_trim
+
             await extract_and_trim(chat_id, is_group=is_group)
 
     async def run_compressor(self, chat_id: int):
@@ -410,6 +465,7 @@ class UserTaskManager:
             return
         async with state.memory_lock:
             from app.services.memory_compressor import compress_user_memory
+
             await compress_user_memory(chat_id)
         state.last_compression_time = time.time()
 
@@ -426,6 +482,7 @@ class UserTaskManager:
             return
         async with state.memory_lock:
             from app.services.memory_consolidator import consolidate_user_memory
+
             await consolidate_user_memory(chat_id)
 
 

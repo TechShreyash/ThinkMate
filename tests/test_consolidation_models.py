@@ -9,24 +9,25 @@ Covers (mongomock + pytest-asyncio, db_session per tests/test_database.py):
 
 _Requirements: 8.2, 8.3, 8.4, 9.1, 9.2_
 """
-from datetime import datetime, timezone, timedelta
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config import config
 from app.database import connection, models
 from app.services.schemas import (
-    MemoryConsolidation,
-    ConsolidatedInsight,
-    CompressedFact,
     CompressedBelief,
     CompressedEvent,
+    CompressedFact,
+    ConsolidatedInsight,
     EmotionLog,
+    MemoryConsolidation,
 )
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _profile_doc(user_id: int, *, last_consolidated_at, n_items: int) -> dict:
@@ -61,6 +62,7 @@ def _profile_doc(user_id: int, *, last_consolidated_at, n_items: int) -> dict:
 # --------------------------------------------------------------------------------------
 # find_users_due_for_consolidation
 # --------------------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_find_due_selects_null_and_old_excludes_recent_and_item_poor():
@@ -138,13 +140,15 @@ async def test_find_due_counts_across_facts_beliefs_events():
     _Requirements: 8.2_
     """
     async with connection.db_session() as db:
-        await db["user_profiles"].insert_one({
-            "_id": 20,
-            "facts": [{"content": "f1"}, {"content": "f2"}],
-            "beliefs": [{"content": "b1"}, {"content": "b2"}],
-            "events": [{"description": "e1"}, {"description": "e2"}],
-            "insights": [],
-        })  # 6 total
+        await db["user_profiles"].insert_one(
+            {
+                "_id": 20,
+                "facts": [{"content": "f1"}, {"content": "f2"}],
+                "beliefs": [{"content": "b1"}, {"content": "b2"}],
+                "events": [{"description": "e1"}, {"description": "e2"}],
+                "insights": [],
+            }
+        )  # 6 total
 
         due = await models.find_users_due_for_consolidation(
             db, interval_secs=86400, min_items=6, limit=10
@@ -178,6 +182,7 @@ async def test_find_due_respects_limit():
 # apply_consolidation
 # --------------------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_apply_consolidation_writes_coherent_profile_and_truncates_insights():
     """apply_consolidation writes summary/style/items, sets timestamps, and truncates
@@ -201,10 +206,18 @@ async def test_apply_consolidation_writes_coherent_profile_and_truncates_insight
                 CompressedBelief(content="Values work-life balance"),
             ],
             consolidated_events=[
-                CompressedEvent(description="Started a new job", date="2024-01", significance="major"),
+                CompressedEvent(
+                    description="Started a new job",
+                    date="2024-01",
+                    significance="major",
+                ),
             ],
-            insights=[ConsolidatedInsight(content=f"insight {i}") for i in range(extra)],
-            emotional_state=EmotionLog(mood="content", intensity=0.6, trigger="stable routine"),
+            insights=[
+                ConsolidatedInsight(content=f"insight {i}") for i in range(extra)
+            ],
+            emotional_state=EmotionLog(
+                mood="content", intensity=0.6, trigger="stable routine"
+            ),
         )
 
         async with connection.db_session() as db:
@@ -222,7 +235,10 @@ async def test_apply_consolidation_writes_coherent_profile_and_truncates_insight
         assert doc["communication_style"] == "Warm, prefers concise replies."
 
         # Facts / beliefs / events written with expected content.
-        assert [f["content"] for f in doc["facts"]] == ["Lives in Berlin", "Works as an engineer"]
+        assert [f["content"] for f in doc["facts"]] == [
+            "Lives in Berlin",
+            "Works as an engineer",
+        ]
         assert doc["facts"][0]["category"] == "personal"
         assert [b["content"] for b in doc["beliefs"]] == ["Values work-life balance"]
         assert doc["events"][0]["description"] == "Started a new job"
@@ -237,9 +253,13 @@ async def test_apply_consolidation_writes_coherent_profile_and_truncates_insight
 
         # Insights truncated to the cap.
         assert len(doc["insights"]) == config.MAX_INSIGHTS
-        assert [ins["content"] for ins in doc["insights"]] == [f"insight {i}" for i in range(config.MAX_INSIGHTS)]
+        assert [ins["content"] for ins in doc["insights"]] == [
+            f"insight {i}" for i in range(config.MAX_INSIGHTS)
+        ]
         # Each insight carries the stored shape.
-        assert all("created_at" in ins and "updated_at" in ins for ins in doc["insights"])
+        assert all(
+            "created_at" in ins and "updated_at" in ins for ins in doc["insights"]
+        )
     finally:
         config.MAX_INSIGHTS = original_max
 
@@ -255,11 +275,18 @@ async def test_apply_consolidation_skips_summary_and_style_when_absent():
         await models.ensure_user(db, user_id, "u", "U")
         await db["user_profiles"].update_one(
             {"_id": user_id},
-            {"$set": {"profile_summary": "existing summary", "communication_style": "existing style"}},
+            {
+                "$set": {
+                    "profile_summary": "existing summary",
+                    "communication_style": "existing style",
+                }
+            },
         )
 
         consolidation = MemoryConsolidation(
-            consolidated_facts=[CompressedFact(category="hobby", content="Plays chess")],
+            consolidated_facts=[
+                CompressedFact(category="hobby", content="Plays chess")
+            ],
             insights=[ConsolidatedInsight(content="Strategic thinker")],
         )
         await models.apply_consolidation(db, user_id, consolidation)
@@ -301,6 +328,7 @@ async def test_apply_consolidation_with_fewer_insights_than_cap_keeps_all():
 # --------------------------------------------------------------------------------------
 # ensure_user insights initialization
 # --------------------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_ensure_user_initializes_insights_to_empty_list():

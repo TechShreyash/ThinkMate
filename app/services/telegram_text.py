@@ -4,6 +4,7 @@ Telegram text messages have a hard 4096-character limit. These helpers keep all
 bot-generated text below that limit, optionally applying ThinkMate's own
 ``MAX_RESPONSE_CHARS`` cap to LLM-generated replies before chunking.
 """
+
 import html as html_lib
 import re
 

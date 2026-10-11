@@ -1,4 +1,5 @@
 """Validate authored Markdown and local links using only the standard library."""
+
 from __future__ import annotations
 
 import ast
@@ -12,8 +13,15 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED = {
-    ".git", ".venv", ".pytest_cache", ".hypothesis", "__pycache__",
-    "node_modules", "logs", "build", "dist",
+    ".git",
+    ".venv",
+    ".pytest_cache",
+    ".hypothesis",
+    "__pycache__",
+    "node_modules",
+    "logs",
+    "build",
+    "dist",
 }
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -28,8 +36,11 @@ def markdown_files(root: Path) -> list[Path]:
     result = []
     for folder, dirs, files in os.walk(root, followlinks=False):
         dirs[:] = sorted(d for d in dirs if d not in GENERATED)
-        result.extend(Path(folder) / name for name in sorted(files)
-                      if name.lower().endswith(".md"))
+        result.extend(
+            Path(folder) / name
+            for name in sorted(files)
+            if name.lower().endswith(".md")
+        )
     return sorted(result)
 
 
@@ -43,8 +54,11 @@ def outside_fences(source: str) -> tuple[str, list[int]]:
         if active is not None:
             if match:
                 marker = match.group(1)
-                if (marker[0] == active[0] and len(marker) >= len(active)
-                        and not line[match.end():].strip()):
+                if (
+                    marker[0] == active[0]
+                    and len(marker) >= len(active)
+                    and not line[match.end() :].strip()
+                ):
                     active = None
             result.append("")
         elif match:
@@ -67,8 +81,9 @@ def anchor_ids(source: str) -> set[str]:
             continue
         text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", match.group(2))
         text = text.replace("`", "").lower()
-        slug = "".join(c for c in text
-                       if c in "-_ " or unicodedata.category(c)[0] in {"L", "N"})
+        slug = "".join(
+            c for c in text if c in "-_ " or unicodedata.category(c)[0] in {"L", "N"}
+        )
         slug = slug.replace(" ", "-")
         count = counts[slug]
         candidate = f"{slug}-{count}" if count else slug
@@ -172,8 +187,11 @@ def check(root: Path) -> tuple[list[str], int, int]:
         sources[path], anchors[path], graph[path] = visible, anchor_ids(visible), set()
         for number in unclosed:
             report(path, number, "unclosed fenced block")
-        headings = [(i, m) for i, line in enumerate(visible.splitlines(), 1)
-                    if (m := HEADING.match(line))]
+        headings = [
+            (i, m)
+            for i, line in enumerate(visible.splitlines(), 1)
+            if (m := HEADING.match(line))
+        ]
         if sum(len(m.group(1)) == 1 for _, m in headings) != 1:
             report(path, 1, "expected exactly one top-level heading")
         lines = source.splitlines()
@@ -197,7 +215,9 @@ def check(root: Path) -> tuple[list[str], int, int]:
         if "\\" in parsed.path:
             report(path, number, f"use forward slashes in local link: {target}")
             return
-        destination = (path.parent / unquote(parsed.path)).resolve() if parsed.path else path
+        destination = (
+            (path.parent / unquote(parsed.path)).resolve() if parsed.path else path
+        )
         if not destination.is_relative_to(root):
             report(path, number, f"link leaves repository: {target}")
             return
@@ -216,7 +236,9 @@ def check(root: Path) -> tuple[list[str], int, int]:
         definitions = {}
         for match in DEFINITION.finditer(visible):
             definitions[reference_key(match.group(1))] = match.group(2)
-            validate(path, line_at(visible, match.start()), match.group(2), connect=False)
+            validate(
+                path, line_at(visible, match.start()), match.group(2), connect=False
+            )
         for position, target in inline_links(visible):
             validate(path, line_at(visible, position), target)
         for match in REFERENCE.finditer(visible):
@@ -224,7 +246,11 @@ def check(root: Path) -> tuple[list[str], int, int]:
                 continue
             key = reference_key(match.group(2) or match.group(1))
             if key not in definitions:
-                report(path, line_at(visible, match.start()), f"undefined reference: [{key}]")
+                report(
+                    path,
+                    line_at(visible, match.start()),
+                    f"undefined reference: [{key}]",
+                )
             else:
                 validate(path, line_at(visible, match.start()), definitions[key])
 
@@ -246,14 +272,21 @@ def check(root: Path) -> tuple[list[str], int, int]:
     if config.exists() and reference.exists() and sample.exists():
         tree = ast.parse(config.read_text(encoding="utf-8"))
         keys = {
-            n.args[0].value for n in ast.walk(tree)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-            and n.func.id.startswith("_env_") and n.args
-            and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)
+            n.args[0].value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id.startswith("_env_")
+            and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and isinstance(n.args[0].value, str)
         }
         reference_text = reference.read_text(encoding="utf-8")
-        sample_keys = set(re.findall(r"^([A-Z][A-Z0-9_]*)=",
-                                    sample.read_text(encoding="utf-8"), re.MULTILINE))
+        sample_keys = set(
+            re.findall(
+                r"^([A-Z][A-Z0-9_]*)=", sample.read_text(encoding="utf-8"), re.MULTILINE
+            )
+        )
         for key in sorted(keys):
             if not re.search(rf"\b{re.escape(key)}\b", reference_text):
                 report(reference, 1, f"missing configuration setting: {key}")

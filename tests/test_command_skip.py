@@ -15,8 +15,10 @@ command), which confirms the bug exists.
 
 **Validates: Requirements 1.1, 1.2, 1.3**
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import app.handlers.messages as messages_module
 

@@ -5,9 +5,30 @@ build/
 dist/
 wheels/
 *.egg-info
+
+# Local environment configuration (keep templates tracked)
+.env
+.env.*
 *.env
+!.env.example
+!.env.*.example
+
 # Virtual environments
-.venv
+.venv/
+venv/
+
+# Tool caches and test output
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Logs (runtime output, should never be committed)
 logs/

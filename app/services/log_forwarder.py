@@ -7,10 +7,12 @@ forwarding failure can never raise on a hot path. Events whose SOURCE chat is th
 channel are dropped (Req 4.10). Forwarder logs are bound with extra={"no_forward": True}
 so the Error_Log_Sink will not re-forward them (Req 4.9).
 """
-from loguru import logger
 
 import asyncio
 import time
+
+from loguru import logger
+
 from app.config import config
 
 # Forwarder logs must never be re-forwarded by the Error_Log_Sink, so bind a marker.
@@ -91,6 +93,7 @@ async def flush_buffer() -> None:
 
     try:
         from aiogram.types import BufferedInputFile
+
         target = config.LOGS_CHANNEL_ID
         if not target:
             _log.warning("Log clubber: LOGS_CHANNEL_ID not configured, aborting flush.")
@@ -130,7 +133,7 @@ async def close() -> None:
 
 async def send(bot, source_chat_id: int | None, text: str) -> None:
     """Forward `text` to LOGS_CHANNEL_ID. No-op if disabled, recursive, or bot missing."""
-    global _window_start, _window_count, _clubber_activated, _recent_send_times
+    global _window_count, _clubber_activated, _recent_send_times
     try:
         target = config.LOGS_CHANNEL_ID
         if not target:
@@ -154,7 +157,9 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
             _reset_clubber_window(now)
 
         # Clean up recent send times to only count messages in the last window
-        _recent_send_times = [t for t in _recent_send_times if now - t < BURST_LIMIT_WINDOW_SECS]
+        _recent_send_times = [
+            t for t in _recent_send_times if now - t < BURST_LIMIT_WINDOW_SECS
+        ]
 
         # Reset minute window if 60 seconds elapsed since the start of the current window
         if now - _window_start >= 60.0:
@@ -163,10 +168,19 @@ async def send(bot, source_chat_id: int | None, text: str) -> None:
             _reset_clubber_window(now)
 
         # Check burst rate limit or minute rate limit
-        if len(_recent_send_times) >= BURST_LIMIT_COUNT or _window_count >= LOG_LIMIT_PER_MINUTE:
+        if (
+            len(_recent_send_times) >= BURST_LIMIT_COUNT
+            or _window_count >= LOG_LIMIT_PER_MINUTE
+        ):
             _clubber_activated = True
-            reason = "burst detected" if len(_recent_send_times) >= BURST_LIMIT_COUNT else "minute threshold exceeded"
-            _log.info(f"Log clubber: {reason}. Buffering logs until the next flush window.")
+            reason = (
+                "burst detected"
+                if len(_recent_send_times) >= BURST_LIMIT_COUNT
+                else "minute threshold exceeded"
+            )
+            _log.info(
+                f"Log clubber: {reason}. Buffering logs until the next flush window."
+            )
             _buffer_log(now, text)
         else:
             _window_count += 1

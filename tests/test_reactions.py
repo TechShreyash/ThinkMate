@@ -1,7 +1,9 @@
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+
 from app.config import config
 from app.database import connection
 from app.services.llm_service import LLMService
@@ -44,10 +46,16 @@ async def test_generate_reply_bundle_parses_json():
     original = config.ENABLE_MESSAGE_REACTIONS
     config.ENABLE_MESSAGE_REACTIONS = True
     try:
-        with patch.object(llm.client.chat.completions, "create", new_callable=AsyncMock) as mock_create, \
-             patch.object(llm, "_fire_log"):
+        with (
+            patch.object(
+                llm.client.chat.completions, "create", new_callable=AsyncMock
+            ) as mock_create,
+            patch.object(llm, "_fire_log"),
+        ):
             mock_create.return_value = mock_response
-            reply, reaction = await llm.generate_reply_bundle(123, "sys", [{"role": "user", "content": "hi"}])
+            reply, reaction = await llm.generate_reply_bundle(
+                123, "sys", [{"role": "user", "content": "hi"}]
+            )
             assert reply == "yay, congrats!"
             assert reaction == "🎉"
     finally:
@@ -59,19 +67,27 @@ async def test_generate_reply_bundle_keeps_reply_emojis():
     """Emojis in the reply text are preserved; the reaction is an independent channel."""
     llm = LLMService()
     mock_choice = MagicMock()
-    mock_choice.message.content = '{"reply": "haha that is wild 😂 tell me more", "reaction": "😁"}'
+    mock_choice.message.content = (
+        '{"reply": "haha that is wild 😂 tell me more", "reaction": "😁"}'
+    )
     mock_response = MagicMock()
     mock_response.choices = [mock_choice]
 
     original = config.ENABLE_MESSAGE_REACTIONS
     config.ENABLE_MESSAGE_REACTIONS = True
     try:
-        with patch.object(llm.client.chat.completions, "create", new_callable=AsyncMock) as mock_create, \
-             patch.object(llm, "_fire_log"):
+        with (
+            patch.object(
+                llm.client.chat.completions, "create", new_callable=AsyncMock
+            ) as mock_create,
+            patch.object(llm, "_fire_log"),
+        ):
             mock_create.return_value = mock_response
-            reply, reaction = await llm.generate_reply_bundle(123, "sys", [{"role": "user", "content": "hi"}])
+            reply, reaction = await llm.generate_reply_bundle(
+                123, "sys", [{"role": "user", "content": "hi"}]
+            )
             assert reply == "haha that is wild 😂 tell me more"  # reply emoji kept
-            assert reaction == "😁"                              # independent reaction
+            assert reaction == "😁"  # independent reaction
     finally:
         config.ENABLE_MESSAGE_REACTIONS = original
 
@@ -84,10 +100,16 @@ async def test_generate_reply_bundle_falls_back_to_plain_text():
     mock_response = MagicMock()
     mock_response.choices = [mock_choice]
 
-    with patch.object(llm.client.chat.completions, "create", new_callable=AsyncMock) as mock_create, \
-         patch.object(llm, "_fire_log"):
+    with (
+        patch.object(
+            llm.client.chat.completions, "create", new_callable=AsyncMock
+        ) as mock_create,
+        patch.object(llm, "_fire_log"),
+    ):
         mock_create.return_value = mock_response
-        reply, reaction = await llm.generate_reply_bundle(123, "sys", [{"role": "user", "content": "hi"}])
+        reply, reaction = await llm.generate_reply_bundle(
+            123, "sys", [{"role": "user", "content": "hi"}]
+        )
         assert reply == "just plain text, not json"
         assert reaction is None
 
@@ -103,10 +125,16 @@ async def test_generate_reply_bundle_reactions_disabled_yields_none():
     original = config.ENABLE_MESSAGE_REACTIONS
     config.ENABLE_MESSAGE_REACTIONS = False
     try:
-        with patch.object(llm.client.chat.completions, "create", new_callable=AsyncMock) as mock_create, \
-             patch.object(llm, "_fire_log"):
+        with (
+            patch.object(
+                llm.client.chat.completions, "create", new_callable=AsyncMock
+            ) as mock_create,
+            patch.object(llm, "_fire_log"),
+        ):
             mock_create.return_value = mock_response
-            reply, reaction = await llm.generate_reply_bundle(123, "sys", [{"role": "user", "content": "hi"}])
+            reply, reaction = await llm.generate_reply_bundle(
+                123, "sys", [{"role": "user", "content": "hi"}]
+            )
             assert reply == "hello there"
             assert reaction is None
     finally:
@@ -126,9 +154,13 @@ async def test_process_batch_applies_reaction(temp_db):
     original_delay = config.MESSAGE_BATCH_DELAY_SECS
     config.MESSAGE_BATCH_DELAY_SECS = 0.1
     try:
-        with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
+        with patch(
+            "app.services.user_task_manager.handle_message", new_callable=AsyncMock
+        ) as mock_handle:
             mock_handle.return_value = ("Mocked Response", "🎉")
-            await user_task_manager.enqueue_message(mock_bot, user_id, "Hurray!", mock_message)
+            await user_task_manager.enqueue_message(
+                mock_bot, user_id, "Hurray!", mock_message
+            )
             await asyncio.sleep(0.6)
 
             mock_message.react.assert_called_once()
@@ -150,9 +182,13 @@ async def test_process_batch_no_reaction(temp_db):
     original_delay = config.MESSAGE_BATCH_DELAY_SECS
     config.MESSAGE_BATCH_DELAY_SECS = 0.1
     try:
-        with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
+        with patch(
+            "app.services.user_task_manager.handle_message", new_callable=AsyncMock
+        ) as mock_handle:
             mock_handle.return_value = ("Mocked Response", None)
-            await user_task_manager.enqueue_message(mock_bot, user_id, "Hi", mock_message)
+            await user_task_manager.enqueue_message(
+                mock_bot, user_id, "Hi", mock_message
+            )
             await asyncio.sleep(0.6)
 
             mock_message.react.assert_not_called()
@@ -173,9 +209,13 @@ async def test_process_batch_reaction_failure_still_answers(temp_db):
     original_delay = config.MESSAGE_BATCH_DELAY_SECS
     config.MESSAGE_BATCH_DELAY_SECS = 0.1
     try:
-        with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle:
+        with patch(
+            "app.services.user_task_manager.handle_message", new_callable=AsyncMock
+        ) as mock_handle:
             mock_handle.return_value = ("Mocked Response", "🔥")
-            await user_task_manager.enqueue_message(mock_bot, user_id, "Fire!", mock_message)
+            await user_task_manager.enqueue_message(
+                mock_bot, user_id, "Fire!", mock_message
+            )
             await asyncio.sleep(0.6)
 
             mock_message.react.assert_called_once()

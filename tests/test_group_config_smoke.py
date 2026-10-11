@@ -7,6 +7,7 @@ default is applied, covering Req 10.12).
 
 Covers Requirements 4.2, 4.3, 9.7, 10.11, 10.12.
 """
+
 import importlib
 import os
 
@@ -54,16 +55,16 @@ def test_knobs_read_live_from_environment():
             # Override → reloaded config reflects the new value (read live).
             os.environ[name] = override
             reloaded = importlib.reload(config_module)
-            assert getattr(reloaded.config, name) == caster(override), (
-                f"{name} did not reflect env override {override!r}"
-            )
+            assert getattr(reloaded.config, name) == caster(
+                override
+            ), f"{name} did not reflect env override {override!r}"
 
             # Unset → reloaded config falls back to the documented default.
             del os.environ[name]
             reloaded = importlib.reload(config_module)
-            assert getattr(reloaded.config, name) == default, (
-                f"{name} did not fall back to default {default}"
-            )
+            assert (
+                getattr(reloaded.config, name) == default
+            ), f"{name} did not fall back to default {default}"
         finally:
             if had_var:
                 os.environ[name] = prior  # type: ignore[assignment]

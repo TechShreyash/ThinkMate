@@ -9,8 +9,9 @@ Why ``my_chat_member`` rather than the ``new_chat_members`` service message: the
 when Telegram group privacy is ON (which suppresses the service message from reaching the
 bot) — so the intro is sent every time the bot is actually added.
 """
+
 from aiogram import Router, html
-from aiogram.filters import ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.filters import JOIN_TRANSITION, ChatMemberUpdatedFilter
 from aiogram.types import ChatMemberUpdated
 from loguru import logger
 
@@ -86,10 +87,20 @@ async def on_added_to_group(event: ChatMemberUpdated) -> None:
     except Exception as e:  # noqa: BLE001 - a failed intro must never crash the update
         is_perm = any(
             p in str(e).lower()
-            for p in ["forbidden", "permission", "write access", "not enough rights", "restricted", "kicked", "blocked"]
+            for p in [
+                "forbidden",
+                "permission",
+                "write access",
+                "not enough rights",
+                "restricted",
+                "kicked",
+                "blocked",
+            ]
         )
         if is_perm:
-            logger.info(f"Could not send group intro for chat {event.chat.id} (restricted/forbidden): {e}")
+            logger.info(
+                f"Could not send group intro for chat {event.chat.id} (restricted/forbidden): {e}"
+            )
         else:
             logger.warning(f"Failed to send group intro for chat {event.chat.id}: {e}")
 
@@ -100,5 +111,6 @@ async def on_added_to_group(event: ChatMemberUpdated) -> None:
             event.chat.id,
             f"➕ added to group chat={event.chat.id} ({title!r}) — intro sent",
         )
-    except Exception:  # noqa: BLE001
+    # Auxiliary failures must not interrupt message handling.
+    except Exception:  # noqa: BLE001, S110
         pass

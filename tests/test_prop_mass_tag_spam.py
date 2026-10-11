@@ -7,6 +7,7 @@
 
 **Validates: Requirements 9.1, 9.2**
 """
+
 from types import SimpleNamespace
 
 from hypothesis import given, settings
@@ -29,7 +30,9 @@ def _distinct_mention_message(n: int):
     entities = []
     offset = 0
     for part in parts:
-        entities.append(SimpleNamespace(type="mention", offset=offset, length=len(part)))
+        entities.append(
+            SimpleNamespace(type="mention", offset=offset, length=len(part))
+        )
         offset += len(part) + 1  # account for the joining space
     return text, entities
 

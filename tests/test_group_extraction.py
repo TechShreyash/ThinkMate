@@ -13,19 +13,21 @@ patched with ``AsyncMock`` so no network is touched. The extractor calls
 ``llm_service.extract_group_memory`` via the module-level singleton imported into
 ``app.services.memory_extractor``; we patch that exact reference.
 """
+
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from pydantic import ValidationError
-from unittest.mock import AsyncMock, patch
 
 from app.config import config
 from app.database import connection, models
 from app.services import memory_extractor
 from app.services.memory_extractor import extract_and_trim, extract_and_trim_group
 from app.services.schemas import (
+    FactExtract,
     GroupMemoryExtraction,
     GroupMemoryUpdate,
     MemoryExtraction,
-    FactExtract,
 )
 
 # A group chat id is negative in Telegram; use a representative supergroup id.
@@ -37,10 +39,14 @@ BOB_ID, BOB_NAME = 222, "Bob"
 def test_group_extraction_rejects_single_user_top_level_shape():
     """A plain MemoryExtraction JSON must not validate as an empty group extraction."""
     with pytest.raises(ValidationError):
-        GroupMemoryExtraction.model_validate({
-            "new_facts": [{"category": "relationship", "content": "The group plans lunch"}],
-            "updates": [],
-        })
+        GroupMemoryExtraction.model_validate(
+            {
+                "new_facts": [
+                    {"category": "relationship", "content": "The group plans lunch"}
+                ],
+                "updates": [],
+            }
+        )
 
 
 async def _seed_group_buffer(db, *, trim: int):
@@ -56,7 +62,7 @@ async def _seed_group_buffer(db, *, trim: int):
         (ALICE_ID, ALICE_NAME, "I adopted a cat named Miso"),
         (BOB_ID, BOB_NAME, "I just started teaching at the local school"),
         (ALICE_ID, ALICE_NAME, "anyway, what's for lunch"),  # most recent (kept)
-        (BOB_ID, BOB_NAME, "pizza sounds good"),             # most recent (kept)
+        (BOB_ID, BOB_NAME, "pizza sounds good"),  # most recent (kept)
     ]
     for sid, sname, content in seeded:
         await models.add_message_to_buffer(
@@ -77,20 +83,29 @@ async def test_two_speaker_segment_attributes_facts_to_correct_users():
         async with connection.db_session() as db:
             await _seed_group_buffer(db, trim=2)
 
-        group_result = GroupMemoryExtraction(updates=[
-            GroupMemoryUpdate(
-                participant="Alice",
-                extraction=MemoryExtraction(
-                    new_facts=[FactExtract(category="personal", content="Alice has a cat named Miso")]
+        group_result = GroupMemoryExtraction(
+            updates=[
+                GroupMemoryUpdate(
+                    participant="Alice",
+                    extraction=MemoryExtraction(
+                        new_facts=[
+                            FactExtract(
+                                category="personal",
+                                content="Alice has a cat named Miso",
+                            )
+                        ]
+                    ),
                 ),
-            ),
-            GroupMemoryUpdate(
-                participant="Bob",
-                extraction=MemoryExtraction(
-                    new_facts=[FactExtract(category="work", content="Bob is a teacher")]
+                GroupMemoryUpdate(
+                    participant="Bob",
+                    extraction=MemoryExtraction(
+                        new_facts=[
+                            FactExtract(category="work", content="Bob is a teacher")
+                        ]
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
 
         with patch.object(
             memory_extractor.llm_service,
@@ -105,8 +120,12 @@ async def test_two_speaker_segment_attributes_facts_to_correct_users():
         assert mock_extract.await_count == 1
 
         async with connection.db_session() as db:
-            alice_facts = [f["content"] for f in await models.get_active_facts(db, ALICE_ID)]
-            bob_facts = [f["content"] for f in await models.get_active_facts(db, BOB_ID)]
+            alice_facts = [
+                f["content"] for f in await models.get_active_facts(db, ALICE_ID)
+            ]
+            bob_facts = [
+                f["content"] for f in await models.get_active_facts(db, BOB_ID)
+            ]
             group_doc = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
 
         assert alice_facts == ["Alice has a cat named Miso"]
@@ -148,7 +167,9 @@ async def test_group_extraction_saves_shared_group_memory_to_chat_profile():
             await extract_and_trim_group(GROUP_CHAT_ID)
 
         async with connection.db_session() as db:
-            group_facts = [f["content"] for f in await models.get_active_facts(db, GROUP_CHAT_ID)]
+            group_facts = [
+                f["content"] for f in await models.get_active_facts(db, GROUP_CHAT_ID)
+            ]
             group_doc = await db["user_profiles"].find_one({"_id": GROUP_CHAT_ID})
             assert group_facts == ["The group often coordinates lunch plans together"]
             assert group_doc["profile_type"] == "group"
@@ -172,14 +193,20 @@ async def test_unresolved_participant_is_skipped():
         async with connection.db_session() as db:
             await _seed_group_buffer(db, trim=2)
 
-        group_result = GroupMemoryExtraction(updates=[
-            GroupMemoryUpdate(
-                participant="Carol",  # not present in the segment's name->id map
-                extraction=MemoryExtraction(
-                    new_facts=[FactExtract(category="personal", content="Carol likes hiking")]
+        group_result = GroupMemoryExtraction(
+            updates=[
+                GroupMemoryUpdate(
+                    participant="Carol",  # not present in the segment's name->id map
+                    extraction=MemoryExtraction(
+                        new_facts=[
+                            FactExtract(
+                                category="personal", content="Carol likes hiking"
+                            )
+                        ]
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
 
         with patch.object(
             memory_extractor.llm_service,
@@ -219,14 +246,21 @@ async def test_processed_segment_is_trimmed():
         async with connection.db_session() as db:
             seeded = await _seed_group_buffer(db, trim=2)
 
-        group_result = GroupMemoryExtraction(updates=[
-            GroupMemoryUpdate(
-                participant="Alice",
-                extraction=MemoryExtraction(
-                    new_facts=[FactExtract(category="personal", content="Alice has a cat named Miso")]
+        group_result = GroupMemoryExtraction(
+            updates=[
+                GroupMemoryUpdate(
+                    participant="Alice",
+                    extraction=MemoryExtraction(
+                        new_facts=[
+                            FactExtract(
+                                category="personal",
+                                content="Alice has a cat named Miso",
+                            )
+                        ]
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
 
         with patch.object(
             memory_extractor.llm_service,
@@ -237,7 +271,9 @@ async def test_processed_segment_is_trimmed():
             await extract_and_trim_group(GROUP_CHAT_ID)
 
         async with connection.db_session() as db:
-            remaining = [m["content"] for m in await models.get_chat_buffer(db, GROUP_CHAT_ID)]
+            remaining = [
+                m["content"] for m in await models.get_chat_buffer(db, GROUP_CHAT_ID)
+            ]
 
         # The oldest segment (everything but the last CHAT_BUFFER_TRIM) was trimmed; the
         # two most recent messages survive in order.

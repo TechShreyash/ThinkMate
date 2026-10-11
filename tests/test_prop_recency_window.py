@@ -10,6 +10,7 @@
 Pure/deterministic: a fresh ``ImplicitAddressGate()`` per example, an injected
 ``now``, and config knobs overridden with set/restore in ``try/finally``.
 """
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -23,7 +24,9 @@ _MAX_MSGS = 4
 @settings(max_examples=200)
 @given(
     bot_spoke=st.booleans(),
-    elapsed=st.floats(min_value=0.0, max_value=400.0, allow_nan=False, allow_infinity=False),
+    elapsed=st.floats(
+        min_value=0.0, max_value=400.0, allow_nan=False, allow_infinity=False
+    ),
     intervening=st.integers(min_value=0, max_value=10),
 )
 def test_recency_window_implicit_classification(bot_spoke, elapsed, intervening):

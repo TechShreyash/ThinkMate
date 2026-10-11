@@ -7,6 +7,7 @@
 
 **Validates: Requirements 10.1, 10.2**
 """
+
 from types import SimpleNamespace
 
 from hypothesis import given, settings
@@ -56,7 +57,7 @@ def test_burst_similarity_excludes_mention_tokens(base, handle_a, handle_b):
     try:
         chat = 6010
         assert det.observe(chat, text_a, ent_a, now=1.0) is False  # first of pair
-        assert det.observe(chat, text_b, ent_b, now=2.0) is True   # reaches count 2
+        assert det.observe(chat, text_b, ent_b, now=2.0) is True  # reaches count 2
     finally:
         config.GROUP_SPAM_BURST_COUNT = orig_count
         config.GROUP_SPAM_BURST_WINDOW_SECS = orig_window

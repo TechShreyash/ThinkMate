@@ -18,16 +18,18 @@ style) and ``unittest.mock`` — no real LLM, network, or DB.
 
 **Validates: Requirements 2.2, 2.3, 2.4, 2.5, 2.6, 2.7**
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import app.handlers.messages as messages_module
 from app.services.group_gate import is_addressed
 
-
 # ===========================================================================
 # A) Pure unit tests for is_addressed (no mocks).
 # ===========================================================================
+
 
 def test_is_addressed_mention_of_bot_username_returns_true():
     """An @mention of the bot's username classifies as addressed (Req 2.2)."""
@@ -150,7 +152,9 @@ def _patch_deps():
             "enqueue_message",
             new_callable=AsyncMock,
         ),
-        patch.object(messages_module.models, "add_message_to_buffer", new_callable=AsyncMock),
+        patch.object(
+            messages_module.models, "add_message_to_buffer", new_callable=AsyncMock
+        ),
         patch.object(messages_module.affinity_cache, "bump", new_callable=AsyncMock),
         patch.object(messages_module.affinity_cache, "get", new_callable=AsyncMock),
         patch.object(messages_module, "_maybe_ambient_chime", new_callable=AsyncMock),
@@ -174,12 +178,20 @@ async def test_addressed_group_message_enqueues_reply_no_buffer_no_chime():
     db = MagicMock()
     message = _make_group_message("hey @ThinkMateBot hi")
 
-    (p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity) = _patch_deps()
-    with p_enqueue as mock_enqueue, p_buffer as mock_buffer, p_bump as mock_bump, \
-            p_get as mock_get, p_chime as mock_chime, p_identity:
+    p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity = _patch_deps()
+    with (
+        p_enqueue as mock_enqueue,
+        p_buffer as mock_buffer,
+        p_bump,
+        p_get,
+        p_chime as mock_chime,
+        p_identity,
+    ):
         await messages_module.handle_user_message(message, db)
 
-        assert mock_enqueue.call_count == 1, "addressed message should enqueue exactly once"
+        assert (
+            mock_enqueue.call_count == 1
+        ), "addressed message should enqueue exactly once"
         _, kwargs = mock_enqueue.call_args
         # chat_id is passed positionally as the 2nd arg; user_id/reason are kwargs.
         args, _ = mock_enqueue.call_args
@@ -207,15 +219,20 @@ async def test_non_addressed_group_message_hands_off_to_gate_no_reply():
     db = MagicMock()
     message = _make_group_message("just chatting with friends")
 
-    (p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity) = _patch_deps()
-    with p_enqueue as mock_enqueue, p_buffer as mock_buffer, p_bump as mock_bump, \
-            p_get as mock_get, p_chime as mock_chime, p_identity:
+    p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity = _patch_deps()
+    with (
+        p_enqueue as mock_enqueue,
+        p_buffer as mock_buffer,
+        p_bump,
+        p_get,
+        p_chime as mock_chime,
+        p_identity,
+    ):
         await messages_module.handle_user_message(message, db)
 
         # Not enqueued directly as a reply.
         reply_calls = [
-            c for c in mock_enqueue.call_args_list
-            if c.kwargs.get("reason") == "reply"
+            c for c in mock_enqueue.call_args_list if c.kwargs.get("reason") == "reply"
         ]
         assert not reply_calls, "non-addressed message must not enqueue a direct reply"
 
@@ -229,7 +246,9 @@ async def test_non_addressed_group_message_hands_off_to_gate_no_reply():
 
         # Handed off to the ambient gate (the new single owner of the buffer write
         # on the non-addressed path).
-        assert mock_chime.called, "non-addressed message must hand off to the ambient gate"
+        assert (
+            mock_chime.called
+        ), "non-addressed message must hand off to the ambient gate"
         chime_args, _ = mock_chime.call_args
         assert chime_args[0] is message, "chime must receive the original message"
         assert chime_args[1] is db, "chime must receive the db handle"
@@ -241,9 +260,15 @@ async def test_channel_message_is_ignored_entirely():
     db = MagicMock()
     message = _make_group_message("anything in a channel", chat_type="channel")
 
-    (p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity) = _patch_deps()
-    with p_enqueue as mock_enqueue, p_buffer as mock_buffer, p_bump as mock_bump, \
-            p_get as mock_get, p_chime as mock_chime, p_identity:
+    p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity = _patch_deps()
+    with (
+        p_enqueue as mock_enqueue,
+        p_buffer as mock_buffer,
+        p_bump,
+        p_get,
+        p_chime as mock_chime,
+        p_identity,
+    ):
         await messages_module.handle_user_message(message, db)
 
         assert not mock_enqueue.called, "channel update must not enqueue"
@@ -255,10 +280,13 @@ async def test_channel_message_is_ignored_entirely():
 @pytest.mark.parametrize(
     "attr,value",
     [
-        ("is_automatic_forward", True),   # linked-channel post auto-copied into the group
-        ("forward_origin", object()),      # user manually forwarded something in
-        ("forward_date", 1234567890),      # legacy forwarded marker
-        ("sender_chat", object()),         # sent on behalf of a channel/group, not a person
+        (
+            "is_automatic_forward",
+            True,
+        ),  # linked-channel post auto-copied into the group
+        ("forward_origin", object()),  # user manually forwarded something in
+        ("forward_date", 1234567890),  # legacy forwarded marker
+        ("sender_chat", object()),  # sent on behalf of a channel/group, not a person
     ],
 )
 @pytest.mark.asyncio
@@ -273,9 +301,15 @@ async def test_forwarded_or_channel_authored_message_is_ignored(attr, value):
     message = _make_group_message("ThinkMate is live (Beta) ...")
     setattr(message, attr, value)
 
-    (p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity) = _patch_deps()
-    with p_enqueue as mock_enqueue, p_buffer as mock_buffer, p_bump as mock_bump, \
-            p_get as mock_get, p_chime as mock_chime, p_identity:
+    p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity = _patch_deps()
+    with (
+        p_enqueue as mock_enqueue,
+        p_buffer as mock_buffer,
+        p_bump,
+        p_get,
+        p_chime as mock_chime,
+        p_identity,
+    ):
         await messages_module.handle_user_message(message, db)
 
         assert not mock_enqueue.called, f"{attr} message must not enqueue"
@@ -295,9 +329,15 @@ async def test_bot_command_in_group_returns_early(text):
     db = MagicMock()
     message = _make_group_message(text)
 
-    (p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity) = _patch_deps()
-    with p_enqueue as mock_enqueue, p_buffer as mock_buffer, p_bump as mock_bump, \
-            p_get as mock_get, p_chime as mock_chime, p_identity:
+    p_enqueue, p_buffer, p_bump, p_get, p_chime, p_identity = _patch_deps()
+    with (
+        p_enqueue as mock_enqueue,
+        p_buffer as mock_buffer,
+        p_bump,
+        p_get,
+        p_chime as mock_chime,
+        p_identity,
+    ):
         await messages_module.handle_user_message(message, db)
 
         assert not mock_enqueue.called, f"command {text!r} must not enqueue"

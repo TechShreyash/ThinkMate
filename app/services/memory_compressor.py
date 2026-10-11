@@ -14,14 +14,16 @@ Two correctness/efficiency invariants (see hardening_plan.md H2/H3):
   lowest-priority items in memory, then issues a single write — never a per-item
   read/write loop.
 """
+
 from loguru import logger
+
 from app.config import config
-from app.database.connection import db_session
 from app.database import models
+from app.database.connection import db_session
+from app.prompts.compression_prompt import SYSTEM_COMPRESSION_PROMPT
 from app.services.llm_service import llm_service
 from app.services.memory_loader import build_memory_block, compile_memory_text
 from app.services.metrics import metrics
-from app.prompts.compression_prompt import SYSTEM_COMPRESSION_PROMPT
 
 
 async def _enforce_budget(db, user_id: int):
@@ -83,10 +85,14 @@ async def compress_user_memory(user_id: int):
                 f"Your compressed memory profile MUST fit within {target_chars} characters."
             )
 
-            compression = await llm_service.compress_memory(user_id, system_prompt, memory_text)
+            compression = await llm_service.compress_memory(
+                user_id, system_prompt, memory_text
+            )
             if compression is None:
                 # Failed call: keep existing memory untouched rather than wiping it.
-                logger.warning(f"Compression failed for user {user_id}; keeping existing memory.")
+                logger.warning(
+                    f"Compression failed for user {user_id}; keeping existing memory."
+                )
                 return
 
             await models.replace_user_memory(db, user_id, compression)

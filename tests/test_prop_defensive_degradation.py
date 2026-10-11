@@ -7,6 +7,7 @@
 
 **Validates: Requirements 1.6, 9.6, 10.14**
 """
+
 from types import SimpleNamespace
 
 from hypothesis import given, settings
@@ -30,9 +31,15 @@ _junk = st.one_of(
 # A malformed entity-like object with arbitrary (possibly wrong-typed) attrs.
 _malformed_entity = st.builds(
     SimpleNamespace,
-    type=st.one_of(st.none(), st.sampled_from(["mention", "text_mention", "bold"]), st.integers()),
-    offset=st.one_of(st.none(), st.integers(min_value=-5, max_value=50), st.text(max_size=4)),
-    length=st.one_of(st.none(), st.integers(min_value=-5, max_value=50), st.text(max_size=4)),
+    type=st.one_of(
+        st.none(), st.sampled_from(["mention", "text_mention", "bold"]), st.integers()
+    ),
+    offset=st.one_of(
+        st.none(), st.integers(min_value=-5, max_value=50), st.text(max_size=4)
+    ),
+    length=st.one_of(
+        st.none(), st.integers(min_value=-5, max_value=50), st.text(max_size=4)
+    ),
 )
 
 # Entities: junk scalars, or lists mixing junk and malformed entity objects.

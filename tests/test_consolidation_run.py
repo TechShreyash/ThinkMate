@@ -14,21 +14,23 @@ All tests use mongomock + pytest-asyncio per ``tests/conftest.py``. The LLM is p
 ``AsyncMock`` (no network); an autouse ``metrics.reset()`` fixture isolates metric state
 (as in ``tests/test_metrics_instrumentation.py``).
 """
-import pytest
+
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.config import config
 from app.database import connection, models
+from app.services.memory_loader import build_memory_block, compile_memory_text
 from app.services.metrics import metrics
-from app.services.memory_loader import compile_memory_text, build_memory_block
-from app.services.user_task_manager import UserTaskManager
 from app.services.schemas import (
-    MemoryConsolidation,
-    ConsolidatedInsight,
-    CompressedFact,
     CompressedBelief,
     CompressedEvent,
+    CompressedFact,
+    ConsolidatedInsight,
+    MemoryConsolidation,
 )
+from app.services.user_task_manager import UserTaskManager
 
 
 @pytest.fixture(autouse=True)
@@ -52,11 +54,17 @@ def _valid_consolidation() -> MemoryConsolidation:
             CompressedBelief(content="Values craftsmanship over speed."),
         ],
         consolidated_events=[
-            CompressedEvent(description="Moved cities last year.", significance="major"),
+            CompressedEvent(
+                description="Moved cities last year.", significance="major"
+            ),
         ],
         insights=[
-            ConsolidatedInsight(content="Tends to get stressed during deadlines; values reassurance then."),
-            ConsolidatedInsight(content="Processes setbacks by withdrawing first, then talking."),
+            ConsolidatedInsight(
+                content="Tends to get stressed during deadlines; values reassurance then."
+            ),
+            ConsolidatedInsight(
+                content="Processes setbacks by withdrawing first, then talking."
+            ),
         ],
     )
 
@@ -76,7 +84,10 @@ async def test_consolidation_success_applies_and_enforces_budget():
             await models.ensure_user(db, user_id, "u", "U")
             # Seed an OVER-BUDGET profile (many facts).
             facts = [
-                {"category": "personal", "content": f"Fact number {i} about the user here."}
+                {
+                    "category": "personal",
+                    "content": f"Fact number {i} about the user here.",
+                }
                 for i in range(40)
             ]
             await db["user_profiles"].update_one(
@@ -98,7 +109,10 @@ async def test_consolidation_success_applies_and_enforces_budget():
             # Apply happened: insights present + summary refreshed.
             assert doc["profile_summary"] == "A consolidated summary of the user."
             insight_texts = [ins["content"] for ins in doc.get("insights", [])]
-            assert "Tends to get stressed during deadlines; values reassurance then." in insight_texts
+            assert (
+                "Tends to get stressed during deadlines; values reassurance then."
+                in insight_texts
+            )
             # last_consolidated_at set on success.
             assert doc.get("last_consolidated_at") is not None
             # Reused _enforce_budget guarantees the profile ends under budget.
@@ -125,24 +139,31 @@ async def test_consolidation_none_never_wipes_memory():
         await models.ensure_user(db, user_id, "u", "U")
         await db["user_profiles"].update_one(
             {"_id": user_id},
-            {"$set": {
-                "facts": [{"category": "personal", "content": "Has a dog named Bruno."}],
-                "beliefs": [{"content": "Believes family comes first."}],
-                "events": [{"description": "Graduated.", "significance": "major"}],
-                "insights": [{"content": "Pre-existing insight."}],
-            }},
+            {
+                "$set": {
+                    "facts": [
+                        {"category": "personal", "content": "Has a dog named Bruno."}
+                    ],
+                    "beliefs": [{"content": "Believes family comes first."}],
+                    "events": [{"description": "Graduated.", "significance": "major"}],
+                    "insights": [{"content": "Pre-existing insight."}],
+                }
+            },
         )
         before = await db["user_profiles"].find_one({"_id": user_id})
         # last_consolidated_at intentionally absent here (never consolidated).
         assert "last_consolidated_at" not in before
 
-    with patch(
-        "app.services.memory_consolidator.llm_service.consolidate_memory",
-        new_callable=AsyncMock,
-    ) as mock_consolidate, patch(
-        "app.services.memory_consolidator.models.apply_consolidation",
-        new_callable=AsyncMock,
-    ) as mock_apply:
+    with (
+        patch(
+            "app.services.memory_consolidator.llm_service.consolidate_memory",
+            new_callable=AsyncMock,
+        ) as mock_consolidate,
+        patch(
+            "app.services.memory_consolidator.models.apply_consolidation",
+            new_callable=AsyncMock,
+        ) as mock_apply,
+    ):
         mock_consolidate.return_value = None
         await consolidate_user_memory(user_id)
         mock_apply.assert_not_awaited()  # apply must be skipped on None (never-wipe)

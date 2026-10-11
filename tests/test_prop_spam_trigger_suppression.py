@@ -8,6 +8,7 @@
 
 **Validates: Requirements 9.3**
 """
+
 from types import SimpleNamespace
 
 from hypothesis import given, settings

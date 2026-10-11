@@ -9,6 +9,7 @@ The registry itself is synchronous, so these are plain (non-async) tests.
 
 Validates: Requirements 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.10, 7.1, 7.2
 """
+
 from __future__ import annotations
 
 import pytest
@@ -26,10 +27,11 @@ def reset_singleton_metrics():
 
 # --- incr (Requirement 1.2) ------------------------------------------------
 
+
 def test_incr_default_and_explicit_n_accumulate():
     reg = MetricsRegistry()
-    reg.incr("c")          # default n=1
-    reg.incr("c", 3)       # explicit n
+    reg.incr("c")  # default n=1
+    reg.incr("c", 3)  # explicit n
     assert reg.snapshot()["counters"]["c"] == 4
 
 
@@ -48,6 +50,7 @@ def test_incr_on_module_singleton():
 
 # --- set_gauge (Requirement 1.3) -------------------------------------------
 
+
 def test_set_gauge_replaces_rather_than_accumulates():
     reg = MetricsRegistry()
     reg.set_gauge("g", 5)
@@ -56,6 +59,7 @@ def test_set_gauge_replaces_rather_than_accumulates():
 
 
 # --- observe / record_latency (Requirements 1.4, 1.6) ----------------------
+
 
 def test_observe_builds_count_sum_max_and_snapshot_derives_avg():
     reg = MetricsRegistry()
@@ -81,6 +85,7 @@ def test_record_latency_is_an_alias_of_observe():
 
 # --- timer context manager (Requirement 1.5) -------------------------------
 
+
 def test_timer_records_exactly_one_observation_on_normal_exit():
     reg = MetricsRegistry()
     with reg.timer("block"):
@@ -94,9 +99,8 @@ def test_timer_records_exactly_one_observation_on_normal_exit():
 def test_timer_records_once_and_propagates_on_exception():
     reg = MetricsRegistry()
 
-    with pytest.raises(ValueError, match="boom"):
-        with reg.timer("block"):
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), reg.timer("block"):
+        raise ValueError("boom")
 
     # Recorded exactly once even though the block raised.
     agg = reg.snapshot()["timers"]["block"]
@@ -105,6 +109,7 @@ def test_timer_records_once_and_propagates_on_exception():
 
 
 # --- record_llm convenience (Requirements 1.2, 1.4) ------------------------
+
 
 def test_record_llm_success_increments_calls_success_and_latency():
     reg = MetricsRegistry()
@@ -130,6 +135,7 @@ def test_record_llm_failure_increments_calls_and_failure():
 
 # --- snapshot shape (Requirements 1.6, 1.10) -------------------------------
 
+
 def test_snapshot_has_three_sections():
     reg = MetricsRegistry()
     reg.incr("c")
@@ -146,6 +152,7 @@ def test_empty_registry_snapshot_returns_well_formed_empty_sections():
 
 
 # --- reset (Requirement 1.7) -----------------------------------------------
+
 
 def test_reset_clears_everything():
     reg = MetricsRegistry()

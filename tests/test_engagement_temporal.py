@@ -18,20 +18,19 @@ provides ``db``); the reply LLM is patched with ``AsyncMock`` (chat_manager impo
 
 **Validates: Requirements 1.3, 1.4, 1.6, 2.4, 2.5**
 """
-from datetime import datetime, timedelta, timezone
+
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
-import app.services.chat_manager as chat_manager
 from app.database import models
-
+from app.services import chat_manager
 
 # --- Pure gap helper: build_time_context (Requirements 1.4, 1.6) ---
 
+
 def test_build_time_context_always_has_current_time_line():
     """The current-time line is always present, regardless of prior interaction."""
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
     result = chat_manager.build_time_context(now, None)
     assert "Current time (UTC):" in result
     assert "2024-06-01 14:30" in result
@@ -39,7 +38,7 @@ def test_build_time_context_always_has_current_time_line():
 
 def test_build_time_context_first_contact_has_no_gap_line():
     """With ``prev=None`` only the current-time and local-times lines are rendered, no 'Last talked'."""
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
     result = chat_manager.build_time_context(now, None)
     assert "Last talked" not in result
     # Current-time line + local-times line + derivation hint, no gap line.
@@ -49,7 +48,7 @@ def test_build_time_context_first_contact_has_no_gap_line():
 
 def test_build_time_context_days_gap_is_coarse():
     """A ~2-day-old prior interaction renders a coarse 'day(s) ago' line plus the time line."""
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
     prev = now - timedelta(days=2, hours=3)
     result = chat_manager.build_time_context(now, prev)
     assert "Current time (UTC):" in result
@@ -60,7 +59,7 @@ def test_build_time_context_days_gap_is_coarse():
 
 def test_build_time_context_treats_naive_previous_timestamp_as_utc():
     """Mongo-style naive datetimes still render the gap instead of being swallowed."""
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
     prev = (now - timedelta(hours=2)).replace(tzinfo=None)
     result = chat_manager.build_time_context(now, prev)
     assert "Last talked with this user: 2 hour(s) ago" in result
@@ -68,7 +67,7 @@ def test_build_time_context_treats_naive_previous_timestamp_as_utc():
 
 def test_build_time_context_minutes_boundary():
     """A gap under an hour renders coarse minutes (secs < 3600)."""
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
     prev = now - timedelta(minutes=30)
     result = chat_manager.build_time_context(now, prev)
     assert "Last talked with this user: 30 minute(s) ago" in result
@@ -76,13 +75,14 @@ def test_build_time_context_minutes_boundary():
 
 def test_build_time_context_hours_boundary():
     """A gap between an hour and a day renders coarse hours (3600 <= secs < 86400)."""
-    now = datetime(2024, 6, 1, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 6, 1, 14, 30, tzinfo=UTC)
     prev = now - timedelta(hours=5, minutes=15)
     result = chat_manager.build_time_context(now, prev)
     assert "Last talked with this user: 5 hour(s) ago" in result
 
 
 # --- DM hot path records last_interaction_at via one combined round-trip ---
+
 
 async def test_dm_path_records_last_interaction_with_single_combined_call(mock_mongodb):
     """A DM ``handle_message`` records ``last_interaction_at`` (absent before) using the
@@ -101,9 +101,11 @@ async def test_dm_path_records_last_interaction_with_single_combined_call(mock_m
     # Spy on the combined helper while still performing the real single write.
     touch_spy = AsyncMock(side_effect=models.touch_and_get_last_interaction)
 
-    with patch.object(chat_manager.llm_service, "generate_reply_bundle", reply_mock), \
-         patch.object(chat_manager.models, "touch_and_get_last_interaction", touch_spy):
-        reply, reaction = await chat_manager.handle_message(db, chat_id, "hello there")
+    with (
+        patch.object(chat_manager.llm_service, "generate_reply_bundle", reply_mock),
+        patch.object(chat_manager.models, "touch_and_get_last_interaction", touch_spy),
+    ):
+        reply, _reaction = await chat_manager.handle_message(db, chat_id, "hello there")
 
     assert reply == "hi"
     # The combined read-then-set helper was awaited exactly once on the DM path.
@@ -119,6 +121,7 @@ async def test_dm_path_records_last_interaction_with_single_combined_call(mock_m
 
 # --- Group path must NOT touch last_interaction_at (Requirement 2.5) ---
 
+
 async def test_group_path_does_not_touch_last_interaction(mock_mongodb):
     """A group-path ``handle_message`` must not record ``last_interaction_at`` and must not
     call the combined helper. Validates: Requirements 2.5"""
@@ -130,9 +133,11 @@ async def test_group_path_does_not_touch_last_interaction(mock_mongodb):
     reply_mock = AsyncMock(return_value=("hi", None, None))
     touch_spy = AsyncMock(side_effect=models.touch_and_get_last_interaction)
 
-    with patch.object(chat_manager.llm_service, "generate_reply_bundle", reply_mock), \
-         patch.object(chat_manager.models, "touch_and_get_last_interaction", touch_spy):
-        reply, reaction = await chat_manager.handle_message(
+    with (
+        patch.object(chat_manager.llm_service, "generate_reply_bundle", reply_mock),
+        patch.object(chat_manager.models, "touch_and_get_last_interaction", touch_spy),
+    ):
+        reply, _reaction = await chat_manager.handle_message(
             db,
             chat_id,
             "good morning everyone",

@@ -13,8 +13,10 @@ All tests use mongomock + pytest-asyncio per ``tests/conftest.py``. ``readiness`
 delegates to ``app.database.connection.ping_db`` via a lazy import, so the ping is
 controlled by patching ``app.database.connection.ping_db``.
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.config import config
 from app.handlers.commands import cmd_health

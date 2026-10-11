@@ -1,15 +1,17 @@
 """aiogram middlewares: per-user throttling and database-session injection."""
+
 import time
-from typing import Callable, Dict, Any, Awaitable
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject, Message, Update
+from aiogram.types import Message, TelegramObject, Update
+from loguru import logger
+
 from app.config import config
 from app.database.connection import db_session
 from app.services.metrics import metrics
-from app.services import log_forwarder
-from loguru import logger
-
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -34,8 +36,11 @@ class ThrottlingMiddleware(BaseMiddleware):
         cutoff = now - config.RATE_LIMIT_WINDOW_SECS
         self.users = defaultdict(
             list,
-            {uid: recent for uid, ts in self.users.items()
-             if (recent := [t for t in ts if t > cutoff])},
+            {
+                uid: recent
+                for uid, ts in self.users.items()
+                if (recent := [t for t in ts if t > cutoff])
+            },
         )
         # Forget the warned-flag for any user no longer tracked, so memory stays bounded.
         self.warned &= self.users.keys()
@@ -43,9 +48,9 @@ class ThrottlingMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any],
+        data: dict[str, Any],
     ) -> Any:
         message = None
         if isinstance(event, Update) and event.message:
@@ -80,7 +85,10 @@ class ThrottlingMiddleware(BaseMiddleware):
         # STARTUP, not a rolling "now - age": a message sent while the bot is running is
         # ALWAYS processed, even if the bot is lagging minutes behind under heavy load — so
         # a high-throughput bot can never silence itself by marking live traffic "stale".
-        if config.STALE_MESSAGE_SECS > 0 and msg_ts < self._started_at - config.STALE_MESSAGE_SECS:
+        if (
+            config.STALE_MESSAGE_SECS > 0
+            and msg_ts < self._started_at - config.STALE_MESSAGE_SECS
+        ):
             metrics.incr("throttle.stale_dropped")
             return
 
@@ -107,7 +115,9 @@ class ThrottlingMiddleware(BaseMiddleware):
             self._prune(now)
         # Sliding window is computed against the message's send time so catch-up bursts
         # spread across their real timestamps instead of collapsing onto one instant.
-        window = [t for t in self.users[user_id] if msg_ts - t < config.RATE_LIMIT_WINDOW_SECS]
+        window = [
+            t for t in self.users[user_id] if msg_ts - t < config.RATE_LIMIT_WINDOW_SECS
+        ]
 
         if len(window) >= config.RATE_LIMIT_MAX_REQUESTS:
             # Warn at most once per spam episode (tracked via self.warned).
@@ -121,7 +131,8 @@ class ThrottlingMiddleware(BaseMiddleware):
                             "⚠️ *Slow down!* You're sending messages too fast. Give me a sec.",
                             parse_mode="Markdown",
                         )
-                    except Exception:  # noqa: BLE001
+                    # Auxiliary failures must not interrupt message handling.
+                    except Exception:  # noqa: BLE001, S110
                         pass
                 try:
                     chat_id = getattr(getattr(message, "chat", None), "id", None)
@@ -129,7 +140,8 @@ class ThrottlingMiddleware(BaseMiddleware):
                         f"⏳ User {user_id} throttled in chat {chat_id} "
                         f"(>{config.RATE_LIMIT_MAX_REQUESTS} requests in {config.RATE_LIMIT_WINDOW_SECS:g}s) — warned once"
                     )
-                except Exception:  # noqa: BLE001
+                # Auxiliary failures must not interrupt message handling.
+                except Exception:  # noqa: BLE001, S110
                     pass
             window.append(msg_ts)  # extend the window if they keep spamming
             self.users[user_id] = window
@@ -149,9 +161,9 @@ class DbSessionMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any],
+        data: dict[str, Any],
     ) -> Any:
         async with db_session() as db:
             data["db"] = db
@@ -170,16 +182,18 @@ class ProactiveResetMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any],
+        data: dict[str, Any],
     ) -> Any:
         message = event if isinstance(event, Message) else None
         db = data.get("db")
         if message is not None and message.from_user and db is not None:
             try:
                 from app.database import models
+
                 await models.reset_proactive_unanswered(db, message.from_user.id)
-            except Exception:  # noqa: BLE001 - never block command handling
+            # Auxiliary failures must not interrupt message handling.
+            except Exception:  # noqa: BLE001, S110
                 pass
         return await handler(event, data)

@@ -13,12 +13,14 @@ All tests use the mongomock + pytest-asyncio harness from ``tests/conftest.py``;
 client is patched with ``AsyncMock`` (no network) and an autouse ``metrics.reset()`` fixture
 isolates the metric registry per test.
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.prompts.system_prompt import build_system_prompt
-from app.services.memory_loader import compile_memory_text
 from app.services.llm_service import llm_service
+from app.services.memory_loader import compile_memory_text
 from app.services.metrics import metrics
 
 TIME_SECTION_HEADER = "## ⏰ TIME CONTEXT"
@@ -37,7 +39,9 @@ def reset_metrics():
 # --------------------------------------------------------------------------- #
 def test_build_system_prompt_empty_time_context_is_backward_compatible():
     """Omitting time_context equals passing the empty default, byte-for-byte (Req 1.1)."""
-    assert build_system_prompt("P", "M") == build_system_prompt("P", "M", time_context="")
+    assert build_system_prompt("P", "M") == build_system_prompt(
+        "P", "M", time_context=""
+    )
 
 
 def test_build_system_prompt_empty_time_context_renders_no_section():
@@ -72,7 +76,9 @@ def test_build_system_prompt_speaker_block_present_without_user_memory():
 
 def test_build_system_prompt_no_speaker_name_is_backward_compatible():
     """Omitting speaker_name (DM path) renders no speaker anchor, byte-for-byte."""
-    assert build_system_prompt("P", "M") == build_system_prompt("P", "M", speaker_name="")
+    assert build_system_prompt("P", "M") == build_system_prompt(
+        "P", "M", speaker_name=""
+    )
 
 
 def test_build_system_prompt_group_section_explains_multiparty():
@@ -88,7 +94,9 @@ def test_build_system_prompt_no_group_section_in_dm():
     """The DM path (is_group default False) never renders the group multi-party section."""
     prompt = build_system_prompt("P", "M")
     assert "GROUP CHAT" not in prompt
-    assert build_system_prompt("P", "M") == build_system_prompt("P", "M", is_group=False)
+    assert build_system_prompt("P", "M") == build_system_prompt(
+        "P", "M", is_group=False
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -127,9 +135,12 @@ def _fake_response(content: str) -> MagicMock:
 @pytest.mark.asyncio
 async def test_generate_checkin_blank_memory_short_circuits_without_llm_call():
     """Blank memory_text returns None and never calls the client (Req 7.2, 7.3)."""
-    with patch.object(
-        llm_service.client.chat.completions, "create", new_callable=AsyncMock
-    ) as mock_create, patch.object(llm_service, "_fire_log"):
+    with (
+        patch.object(
+            llm_service.client.chat.completions, "create", new_callable=AsyncMock
+        ) as mock_create,
+        patch.object(llm_service, "_fire_log"),
+    ):
         result = await llm_service.generate_checkin(1, "sys", "")
         assert result is None
         mock_create.assert_not_called()
@@ -139,9 +150,12 @@ async def test_generate_checkin_blank_memory_short_circuits_without_llm_call():
 async def test_generate_checkin_returns_text_and_records_success():
     """A normal opener is returned and the proactive_checkin metrics are recorded (Req 7.2, 11.4)."""
     opener = "hey, how did the trek go?"
-    with patch.object(
-        llm_service.client.chat.completions, "create", new_callable=AsyncMock
-    ) as mock_create, patch.object(llm_service, "_fire_log"):
+    with (
+        patch.object(
+            llm_service.client.chat.completions, "create", new_callable=AsyncMock
+        ) as mock_create,
+        patch.object(llm_service, "_fire_log"),
+    ):
         mock_create.return_value = _fake_response(opener)
         result = await llm_service.generate_checkin(1, "sys", "some real memory")
 
@@ -156,9 +170,12 @@ async def test_generate_checkin_returns_text_and_records_success():
 @pytest.mark.parametrize("sentinel", ["NOTHING", "none", "n/a"])
 async def test_generate_checkin_decline_sentinel_returns_none(sentinel):
     """Decline sentinels mean 'send nothing' (Req 7.3)."""
-    with patch.object(
-        llm_service.client.chat.completions, "create", new_callable=AsyncMock
-    ) as mock_create, patch.object(llm_service, "_fire_log"):
+    with (
+        patch.object(
+            llm_service.client.chat.completions, "create", new_callable=AsyncMock
+        ) as mock_create,
+        patch.object(llm_service, "_fire_log"),
+    ):
         mock_create.return_value = _fake_response(sentinel)
         result = await llm_service.generate_checkin(1, "sys", "some real memory")
 
@@ -168,9 +185,12 @@ async def test_generate_checkin_decline_sentinel_returns_none(sentinel):
 @pytest.mark.asyncio
 async def test_generate_checkin_error_returns_none_and_records_failure():
     """A raising call returns None (never raises) and records the failure split (Req 7.4, 11.4)."""
-    with patch.object(
-        llm_service.client.chat.completions, "create", new_callable=AsyncMock
-    ) as mock_create, patch.object(llm_service, "_fire_log"):
+    with (
+        patch.object(
+            llm_service.client.chat.completions, "create", new_callable=AsyncMock
+        ) as mock_create,
+        patch.object(llm_service, "_fire_log"),
+    ):
         mock_create.side_effect = RuntimeError("boom")
         result = await llm_service.generate_checkin(1, "sys", "some real memory")
 

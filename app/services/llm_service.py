@@ -7,38 +7,41 @@ audit logging to ``llm_audit_log`` (off the chat hot path, fire-and-forget).
 
 See docs/development/llm_integration.md and docs/development/hardening_plan.md.
 """
+
+import asyncio
 import json
 import time
-import asyncio
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TypeVar
+
+from loguru import logger
 from openai import (
-    AsyncOpenAI,
-    APITimeoutError,
     APIConnectionError,
-    RateLimitError,
+    APITimeoutError,
+    AsyncOpenAI,
     InternalServerError,
+    RateLimitError,
 )
 from pydantic import BaseModel
-from loguru import logger
+
 from app.config import config
+from app.database import get_db
+from app.prompts.checkin_prompt import SYSTEM_CHECKIN_PROMPT
+from app.services.metrics import metrics
+from app.services.reactions import ALLOWED_REACTIONS, normalize_reaction
 from app.services.schemas import (
-    MemoryExtraction,
+    GroupMemoryExtraction,
     MemoryCompression,
     MemoryConsolidation,
-    ReplyBundle,
-    GroupMemoryExtraction,
+    MemoryExtraction,
 )
-from app.services.reactions import ALLOWED_REACTIONS, normalize_reaction
-from app.services.metrics import metrics
-from app.prompts.checkin_prompt import SYSTEM_CHECKIN_PROMPT
-from app.database import get_db
 
 T = TypeVar("T", bound=BaseModel)
 
 # Transient errors worth retrying; 4xx (e.g. BadRequest) are not retried.
 _RETRYABLE = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
+
 
 # To prevent MongoDB bloat and reduce sensitive-content retention, audit logs store
 # input/output length metadata instead of full prompt or completion text.
@@ -67,9 +70,11 @@ class LLMService:
         """Insert one audit record. ``timestamp`` is a real datetime so a TTL index applies."""
         try:
             db = get_db()
-            
-            input_summary = {k: (len(str(v)) if v is not None else 0) for k, v in inputs.items()}
-            
+
+            input_summary = {
+                k: (len(str(v)) if v is not None else 0) for k, v in inputs.items()
+            }
+
             output_summary = {"raw_text": 0, "parsed_json": 0}
             if outputs:
                 if "raw_text" in outputs and outputs["raw_text"] is not None:
@@ -77,22 +82,26 @@ class LLMService:
                 if "parsed_json" in outputs and outputs["parsed_json"] is not None:
                     output_summary["parsed_json"] = len(str(outputs["parsed_json"]))
 
-            await db["llm_audit_log"].insert_one({
-                "user_id": user_id,
-                "call_type": call_type,
-                "inputs": input_summary,
-                "outputs": output_summary,
-                "status": status,
-                "error": error,
-                "timestamp": datetime.now(timezone.utc),
-            })
+            await db["llm_audit_log"].insert_one(
+                {
+                    "user_id": user_id,
+                    "call_type": call_type,
+                    "inputs": input_summary,
+                    "outputs": output_summary,
+                    "status": status,
+                    "error": error,
+                    "timestamp": datetime.now(UTC),
+                }
+            )
         except Exception as e:  # noqa: BLE001 - logging must never break the caller
             logger.error(f"Failed to log LLM call for user {user_id}: {e}")
 
     def _fire_log(self, *args, **kwargs):
         """Schedule an audit write without blocking the caller (keeps it off the hot path)."""
         try:
-            task = asyncio.get_running_loop().create_task(self._log_llm_call(*args, **kwargs))
+            task = asyncio.get_running_loop().create_task(
+                self._log_llm_call(*args, **kwargs)
+            )
         except RuntimeError:
             return
         self._bg_tasks.add(task)
@@ -111,7 +120,7 @@ class LLMService:
                 last_exc = e
                 if attempt >= config.LLM_MAX_RETRIES:
                     break
-                delay = config.LLM_RETRY_BASE_DELAY_SECS * (2 ** attempt)
+                delay = config.LLM_RETRY_BASE_DELAY_SECS * (2**attempt)
                 logger.warning(
                     f"{what}: transient {type(e).__name__}, retry {attempt + 1}/{config.LLM_MAX_RETRIES} in {delay:.1f}s"
                 )
@@ -129,16 +138,19 @@ class LLMService:
             if s[:4].lower() == "json":
                 s = s[4:]
             s = s.strip()
-            if s.endswith("```"):
-                s = s[:-3]
+            s = s.removesuffix("```")
         return s.strip() or "{}"
 
     # ------------------------------------------------------------------ #
     # Conversational reply (+ optional reaction) — one call
     # ------------------------------------------------------------------ #
     async def generate_reply_bundle(
-        self, user_id: int, system_prompt: str, chat_history: list[dict],
-        *, with_affinity: bool = False,
+        self,
+        user_id: int,
+        system_prompt: str,
+        chat_history: list[dict],
+        *,
+        with_affinity: bool = False,
     ) -> tuple[str, str | None] | tuple[str, str | None, float | None]:
         """Generate the conversational reply and an optional emoji reaction in a single call.
 
@@ -191,7 +203,9 @@ class LLMService:
                 f"{' '.join(sorted(ALLOWED_REACTIONS))}\n"
                 "Output the raw JSON object only — no preamble, no code fences around it."
             )
-        messages = [{"role": "system", "content": system_prompt + format_clause}] + chat_history
+        messages = [
+            {"role": "system", "content": system_prompt + format_clause}
+        ] + chat_history
         # No max_tokens cap: response length is governed by the persona/style rules in
         # the system prompt, not a hard token ceiling. Capping here risked truncating the
         # JSON envelope mid-string (invalid JSON -> raw-text fallback). See
@@ -215,17 +229,29 @@ class LLMService:
             if with_affinity:
                 parsed_json["affinity_delta"] = affinity_delta
             self._fire_log(
-                user_id, "chat_reply", inputs,
+                user_id,
+                "chat_reply",
+                inputs,
                 {"raw_text": raw, "parsed_json": parsed_json},
                 "success",
             )
-            metrics.record_llm("chat_reply", ok=True, latency=time.perf_counter() - start)
+            metrics.record_llm(
+                "chat_reply", ok=True, latency=time.perf_counter() - start
+            )
             if with_affinity:
                 return reply, reaction, affinity_delta
             return reply, reaction
         except Exception as e:
-            metrics.record_llm("chat_reply", ok=False, latency=time.perf_counter() - start)
-            self._fire_log(user_id, "chat_reply", inputs, status="failed", error=traceback.format_exc())
+            metrics.record_llm(
+                "chat_reply", ok=False, latency=time.perf_counter() - start
+            )
+            self._fire_log(
+                user_id,
+                "chat_reply",
+                inputs,
+                status="failed",
+                error=traceback.format_exc(),
+            )
             logger.error(f"Reply generation failed for user {user_id}: {e}")
             raise
 
@@ -244,8 +270,14 @@ class LLMService:
         if not memory_text or not memory_text.strip():
             return None
         messages = [
-            {"role": "system", "content": system_prompt + "\n\n" + SYSTEM_CHECKIN_PROMPT},
-            {"role": "user", "content": "Write the check-in opener now (or reply with NOTHING)."},
+            {
+                "role": "system",
+                "content": system_prompt + "\n\n" + SYSTEM_CHECKIN_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": "Write the check-in opener now (or reply with NOTHING).",
+            },
         ]
         # No max_tokens cap: the check-in length is governed by the persona/check-in
         # prompt, not a hard token ceiling.
@@ -261,16 +293,40 @@ class LLMService:
                 what=f"proactive_checkin u{user_id}",
             )
             raw = (response.choices[0].message.content or "").strip()
-            self._fire_log(user_id, "proactive_checkin", inputs, {"raw_text": raw, "parsed_json": None}, "success")
-            metrics.record_llm("proactive_checkin", ok=True, latency=time.perf_counter() - start)
+            self._fire_log(
+                user_id,
+                "proactive_checkin",
+                inputs,
+                {"raw_text": raw, "parsed_json": None},
+                "success",
+            )
+            metrics.record_llm(
+                "proactive_checkin", ok=True, latency=time.perf_counter() - start
+            )
             # Decline sentinels -> stay silent.
-            if not raw or raw.strip().lower().strip(".!") in ("nothing", "none", "n/a", "na"):
+            if not raw or raw.strip().lower().strip(".!") in (
+                "nothing",
+                "none",
+                "n/a",
+                "na",
+            ):
                 return None
             return raw
-        except Exception as e:
-            metrics.record_llm("proactive_checkin", ok=False, latency=time.perf_counter() - start)
-            self._fire_log(user_id, "proactive_checkin", inputs, status="failed", error=traceback.format_exc())
-            logger.error(f"Proactive check-in generation failed for user {user_id}: {e}")
+        # Best-effort instrumentation must not discard an LLM reply.
+        except Exception as e:  # noqa: BLE001
+            metrics.record_llm(
+                "proactive_checkin", ok=False, latency=time.perf_counter() - start
+            )
+            self._fire_log(
+                user_id,
+                "proactive_checkin",
+                inputs,
+                status="failed",
+                error=traceback.format_exc(),
+            )
+            logger.error(
+                f"Proactive check-in generation failed for user {user_id}: {e}"
+            )
             return None
 
     def _parse_reply_bundle(self, raw: str) -> tuple[str, str | None, float | None]:
@@ -284,14 +340,22 @@ class LLMService:
         cleaned = self._strip_fences(raw)
         try:
             data = json.loads(cleaned)
-            if isinstance(data, dict) and isinstance(data.get("reply"), str) and data["reply"].strip():
-                reaction = normalize_reaction(data.get("reaction")) if config.ENABLE_MESSAGE_REACTIONS else None
+            if (
+                isinstance(data, dict)
+                and isinstance(data.get("reply"), str)
+                and data["reply"].strip()
+            ):
+                reaction = (
+                    normalize_reaction(data.get("reaction"))
+                    if config.ENABLE_MESSAGE_REACTIONS
+                    else None
+                )
                 affinity_delta = None
                 ad = data.get("affinity_delta")
                 if isinstance(ad, (int, float)) and not isinstance(ad, bool):
                     affinity_delta = float(ad)
                 return data["reply"].strip(), reaction, affinity_delta
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
         logger.warning("Reply bundle was not valid JSON; using raw text as the reply.")
         # Fall back to whatever text we got (minus any fences), no reaction, no delta.
@@ -302,8 +366,14 @@ class LLMService:
     # Structured memory calls (extraction / compression)
     # ------------------------------------------------------------------ #
     async def _structured_call(
-        self, *, user_id: int, call_type: str, model: str, messages: list[dict],
-        schema: type[T], timeout: float,
+        self,
+        *,
+        user_id: int,
+        call_type: str,
+        model: str,
+        messages: list[dict],
+        schema: type[T],
+        timeout: float,
     ) -> T | None:
         """Return a validated ``schema`` instance, or ``None`` on failure.
 
@@ -317,7 +387,9 @@ class LLMService:
             try:
                 completion = await self._with_retries(
                     lambda: self.client.beta.chat.completions.parse(
-                        model=model, messages=messages, response_format=schema,
+                        model=model,
+                        messages=messages,
+                        response_format=schema,
                         timeout=timeout,
                     ),
                     what=f"{call_type} parse u{user_id}",
@@ -325,15 +397,26 @@ class LLMService:
                 parsed = completion.choices[0].message.parsed
                 if parsed is not None:
                     self._fire_log(
-                        user_id, call_type, inputs,
-                        {"raw_text": completion.choices[0].message.content, "parsed_json": parsed.model_dump()},
+                        user_id,
+                        call_type,
+                        inputs,
+                        {
+                            "raw_text": completion.choices[0].message.content,
+                            "parsed_json": parsed.model_dump(),
+                        },
                         "success",
                     )
-                    metrics.record_llm(call_type, ok=True, latency=time.perf_counter() - start)
+                    metrics.record_llm(
+                        call_type, ok=True, latency=time.perf_counter() - start
+                    )
                     return parsed
-                logger.warning(f"{call_type}: native parse returned None; falling back to json_object.")
+                logger.warning(
+                    f"{call_type}: native parse returned None; falling back to json_object."
+                )
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"{call_type}: native parse failed ({e}); falling back to json_object.")
+                logger.warning(
+                    f"{call_type}: native parse failed ({e}); falling back to json_object."
+                )
 
         # json_object path (default; works with Gemini/local proxies).
         schema_json = json.dumps(schema.model_json_schema(), indent=2)
@@ -350,7 +433,8 @@ class LLMService:
         try:
             response = await self._with_retries(
                 lambda: self.client.chat.completions.create(
-                    model=model, messages=json_messages,
+                    model=model,
+                    messages=json_messages,
                     response_format={"type": "json_object"},
                     timeout=timeout,
                 ),
@@ -359,14 +443,23 @@ class LLMService:
             raw = response.choices[0].message.content
             parsed = schema.model_validate_json(self._strip_fences(raw))
             self._fire_log(
-                user_id, call_type, inputs,
-                {"raw_text": raw, "parsed_json": parsed.model_dump()}, "success",
+                user_id,
+                call_type,
+                inputs,
+                {"raw_text": raw, "parsed_json": parsed.model_dump()},
+                "success",
             )
             metrics.record_llm(call_type, ok=True, latency=time.perf_counter() - start)
             return parsed
         except Exception as e:  # noqa: BLE001
             metrics.record_llm(call_type, ok=False, latency=time.perf_counter() - start)
-            self._fire_log(user_id, call_type, inputs, status="failed", error=traceback.format_exc())
+            self._fire_log(
+                user_id,
+                call_type,
+                inputs,
+                status="failed",
+                error=traceback.format_exc(),
+            )
             logger.error(f"{call_type}: structured call failed for user {user_id}: {e}")
             return None
 
@@ -387,8 +480,12 @@ class LLMService:
         ]
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
-            user_id=user_id, call_type="memory_extraction", model=model, messages=messages,
-            schema=MemoryExtraction, timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            user_id=user_id,
+            call_type="memory_extraction",
+            model=model,
+            messages=messages,
+            schema=MemoryExtraction,
+            timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
     async def extract_group_memory(
@@ -413,8 +510,11 @@ class LLMService:
         ]
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
-            user_id=user_id_or_chat_id, call_type="group_memory_extraction", model=model,
-            messages=messages, schema=GroupMemoryExtraction,
+            user_id=user_id_or_chat_id,
+            call_type="group_memory_extraction",
+            model=model,
+            messages=messages,
+            schema=GroupMemoryExtraction,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
@@ -433,8 +533,12 @@ class LLMService:
         ]
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
-            user_id=user_id, call_type="memory_compression", model=model, messages=messages,
-            schema=MemoryCompression, timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            user_id=user_id,
+            call_type="memory_compression",
+            model=model,
+            messages=messages,
+            schema=MemoryCompression,
+            timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
     async def consolidate_memory(
@@ -451,8 +555,12 @@ class LLMService:
         ]
         model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
         return await self._structured_call(
-            user_id=user_id, call_type="memory_consolidation", model=model, messages=messages,
-            schema=MemoryConsolidation, timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            user_id=user_id,
+            call_type="memory_consolidation",
+            model=model,
+            messages=messages,
+            schema=MemoryConsolidation,
+            timeout=config.LLM_REQUEST_TIMEOUT_SECS,
         )
 
 

@@ -4,8 +4,10 @@ H2 — a failed compression must never wipe existing memory.
 H3 — budget enforcement must finish under budget using a single read + single write,
      dropping the lowest-priority items first (oldest events -> beliefs -> facts).
 """
-import pytest
+
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.config import config
 from app.database import connection, models
@@ -18,16 +20,21 @@ async def _seed_profile(db, user_id, *, n_facts=0, n_beliefs=0, n_events=0):
     """Create a profile padded with n_* long items in each category."""
     await models.ensure_user(db, user_id, "u", "U")
     facts = [
-        {"category": "personal", "content": f"Fact number {i}: " + "x" * 80,
-         "confidence": 1.0}
+        {
+            "category": "personal",
+            "content": f"Fact number {i}: " + "x" * 80,
+            "confidence": 1.0,
+        }
         for i in range(n_facts)
     ]
-    beliefs = [
-        {"content": f"Belief number {i}: " + "y" * 80} for i in range(n_beliefs)
-    ]
+    beliefs = [{"content": f"Belief number {i}: " + "y" * 80} for i in range(n_beliefs)]
     events = [
-        {"description": f"Event number {i}: " + "z" * 80, "event_date": None,
-         "significance": "minor", "emotional_context": ""}
+        {
+            "description": f"Event number {i}: " + "z" * 80,
+            "event_date": None,
+            "significance": "minor",
+            "emotional_context": "",
+        }
         for i in range(n_events)
     ]
     await db["user_profiles"].update_one(
@@ -46,7 +53,8 @@ async def test_failed_compression_preserves_memory():
         before = await db["user_profiles"].find_one({"_id": user_id})
 
         with patch.object(
-            memory_compressor.llm_service, "compress_memory",
+            memory_compressor.llm_service,
+            "compress_memory",
             new=AsyncMock(return_value=None),
         ):
             await compress_user_memory(user_id)
@@ -54,9 +62,15 @@ async def test_failed_compression_preserves_memory():
         after = await db["user_profiles"].find_one({"_id": user_id})
 
     # Memory is fully preserved: nothing was replaced or trimmed.
-    assert [f["content"] for f in after["facts"]] == [f["content"] for f in before["facts"]]
-    assert [b["content"] for b in after["beliefs"]] == [b["content"] for b in before["beliefs"]]
-    assert [e["description"] for e in after["events"]] == [e["description"] for e in before["events"]]
+    assert [f["content"] for f in after["facts"]] == [
+        f["content"] for f in before["facts"]
+    ]
+    assert [b["content"] for b in after["beliefs"]] == [
+        b["content"] for b in before["beliefs"]
+    ]
+    assert [e["description"] for e in after["events"]] == [
+        e["description"] for e in before["events"]
+    ]
 
 
 @pytest.mark.asyncio

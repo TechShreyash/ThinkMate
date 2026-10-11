@@ -20,6 +20,7 @@ Conventions follow ``tests/test_group_plumbing.py``: mongomock + pytest-asyncio 
 ``AsyncMock``. The DM path uses the real ``build_system_prompt`` so the assertion is
 against the actually-assembled prompt string handed to the reply call.
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -56,9 +57,12 @@ async def test_dm_system_prompt_has_no_per_user_block():
             # And it equals the prompt the DM path would build with no user_memory_text:
             # the per-user block is purely additive, so omitting it yields the same text
             # (modulo the time-context block the DM path always adds).
-            assert build_system_prompt(
-                "p", "m", time_context="", user_memory_text=""
-            ).find(_PER_USER_MARKER) == -1
+            assert (
+                build_system_prompt(
+                    "p", "m", time_context="", user_memory_text=""
+                ).find(_PER_USER_MARKER)
+                == -1
+            )
 
 
 @pytest.mark.asyncio
@@ -100,13 +104,16 @@ async def test_dm_reply_call_is_two_tuple_path_no_affinity():
     """
     user_id = 7003
 
-    with patch(
-        "app.services.chat_manager.llm_service.generate_reply_bundle",
-        new_callable=AsyncMock,
-    ) as mock_reply, patch(
-        "app.services.chat_manager.affinity_cache.bump",
-        new_callable=AsyncMock,
-    ) as mock_bump:
+    with (
+        patch(
+            "app.services.chat_manager.llm_service.generate_reply_bundle",
+            new_callable=AsyncMock,
+        ) as mock_reply,
+        patch(
+            "app.services.chat_manager.affinity_cache.bump",
+            new_callable=AsyncMock,
+        ) as mock_bump,
+    ):
         mock_reply.return_value = ("ok", None)
 
         async with connection.db_session() as db:
@@ -142,13 +149,17 @@ async def test_dm_router_enqueues_without_identity_capture():
     message.is_automatic_forward = False
     db = MagicMock()
 
-    with patch.object(
-        messages_module.user_task_manager, "enqueue_message", new_callable=AsyncMock
-    ) as mock_enqueue, patch.object(
-        models, "refresh_identity_if_changed", new_callable=AsyncMock
-    ) as mock_identity, patch.object(
-        messages_module.log_forwarder, "send", new_callable=AsyncMock
-    ) as mock_forward:
+    with (
+        patch.object(
+            messages_module.user_task_manager, "enqueue_message", new_callable=AsyncMock
+        ) as mock_enqueue,
+        patch.object(
+            models, "refresh_identity_if_changed", new_callable=AsyncMock
+        ) as mock_identity,
+        patch.object(
+            messages_module.log_forwarder, "send", new_callable=AsyncMock
+        ) as mock_forward,
+    ):
         await messages_module.handle_user_message(message, db)
 
         mock_enqueue.assert_called_once_with(

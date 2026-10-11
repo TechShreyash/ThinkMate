@@ -9,6 +9,7 @@ pattern in ``tests/test_hardening.py``).
 
 Covers Requirements 3.1, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.10.
 """
+
 from app.config import config
 from app.services.group_gate import AmbientGate
 
@@ -107,14 +108,22 @@ def test_dice_roll_respects_probability():
 
         # draw 0.1 < 0.25 → pass
         chime, stage = gate.decide(
-            101, affinity=1.0, mode="auto", triggered=True, now=5.0,
+            101,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=5.0,
             rng=FixedRng(0.1),
         )
         assert (chime, stage) == (True, "pass")
 
         # draw 0.9 >= 0.25 → dice drop (distinct chat so no cooldown carryover)
         chime, stage = gate.decide(
-            202, affinity=1.0, mode="auto", triggered=True, now=5.0,
+            202,
+            affinity=1.0,
+            mode="auto",
+            triggered=True,
+            now=5.0,
             rng=FixedRng(0.9),
         )
         assert (chime, stage) == (False, "dice")
@@ -203,7 +212,11 @@ def test_mark_chimed_holds_window_regardless_of_reply():
     gate.mark_chimed(chat, t)
 
     chime, stage = gate.decide(
-        chat, affinity=1.0, mode="auto", triggered=True, now=t + 1.0,
+        chat,
+        affinity=1.0,
+        mode="auto",
+        triggered=True,
+        now=t + 1.0,
         rng=FixedRng(0.0),
     )
     assert (chime, stage) == (False, "cooldown")

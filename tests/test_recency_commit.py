@@ -12,6 +12,7 @@ Covers Task 8 of the implicit-bot-addressing spec:
 Mirrors the existing pure/deterministic test style (mocked ``handle_message``,
 config knobs overridden with set/restore in ``try/finally``).
 """
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -43,8 +44,14 @@ async def test_sent_group_reply_calls_note_bot_spoke():
     original_delay = config.MESSAGE_BATCH_DELAY_SECS
     config.MESSAGE_BATCH_DELAY_SECS = 0.1
     try:
-        with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle, \
-             patch("app.services.user_task_manager.implicit_gate.note_bot_spoke") as mock_note:
+        with (
+            patch(
+                "app.services.user_task_manager.handle_message", new_callable=AsyncMock
+            ) as mock_handle,
+            patch(
+                "app.services.user_task_manager.implicit_gate.note_bot_spoke"
+            ) as mock_note,
+        ):
             mock_handle.return_value = ("Hey there!", None)
 
             await manager.enqueue_message(
@@ -78,8 +85,14 @@ async def test_suppressed_ambient_empty_reply_does_not_call_note_bot_spoke():
     original_delay = config.MESSAGE_BATCH_DELAY_SECS
     config.MESSAGE_BATCH_DELAY_SECS = 0.1
     try:
-        with patch("app.services.user_task_manager.handle_message", new_callable=AsyncMock) as mock_handle, \
-             patch("app.services.user_task_manager.implicit_gate.note_bot_spoke") as mock_note:
+        with (
+            patch(
+                "app.services.user_task_manager.handle_message", new_callable=AsyncMock
+            ) as mock_handle,
+            patch(
+                "app.services.user_task_manager.implicit_gate.note_bot_spoke"
+            ) as mock_note,
+        ):
             # Ambient chime-in declined: empty reply text => nothing is sent.
             mock_handle.return_value = ("", None)
 
@@ -107,10 +120,16 @@ async def test_evict_idle_prunes_implicit_gate_and_spam_burst_detector():
     """The idle sweep prunes the implicit gate and the spam-burst detector (Req 6.4, 10.13)."""
     manager = UserTaskManager()
 
-    with patch("app.services.user_task_manager.ambient_gate.prune", return_value=0), \
-         patch("app.services.user_task_manager.affinity_cache.prune", return_value=0), \
-         patch("app.services.user_task_manager.implicit_gate.prune", return_value=0) as mock_implicit_prune, \
-         patch("app.services.user_task_manager.spam_burst_detector.prune", return_value=0) as mock_burst_prune:
+    with (
+        patch("app.services.user_task_manager.ambient_gate.prune", return_value=0),
+        patch("app.services.user_task_manager.affinity_cache.prune", return_value=0),
+        patch(
+            "app.services.user_task_manager.implicit_gate.prune", return_value=0
+        ) as mock_implicit_prune,
+        patch(
+            "app.services.user_task_manager.spam_burst_detector.prune", return_value=0
+        ) as mock_burst_prune,
+    ):
         await manager._evict_idle()
 
         mock_implicit_prune.assert_called_once()

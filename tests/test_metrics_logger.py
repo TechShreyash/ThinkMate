@@ -10,6 +10,7 @@ backing ``_metrics_logger_loop`` without any DB or LLM access:
 All tests cancel/await the background task in a ``finally`` so no task leaks
 between tests, and any temporary loguru sink added is removed in ``finally``.
 """
+
 import asyncio
 from contextlib import suppress
 
@@ -41,6 +42,7 @@ async def _cancel(task):
 
 # --- Requirement 5.3: disabled when interval <= 0 ---
 
+
 async def test_disabled_when_interval_zero(restore_interval):
     """Interval of 0.0 starts no task (returns None). Validates: Requirements 5.3"""
     config.METRICS_LOG_INTERVAL_SECS = 0.0
@@ -63,6 +65,7 @@ async def test_disabled_when_interval_negative(restore_interval):
 
 # --- Requirement 5.2: enabled emits one summary line per interval ---
 
+
 async def test_enabled_emits_metrics_log_line(restore_interval):
     """Enabled logger emits at least one ``[metrics]`` line. Validates: Requirements 5.2"""
     config.METRICS_LOG_INTERVAL_SECS = 0.02
@@ -84,6 +87,7 @@ async def test_enabled_emits_metrics_log_line(restore_interval):
 
 
 # --- Requirement 5.4: self-heals on error inside an iteration ---
+
 
 async def test_loop_self_heals_on_error(restore_interval, monkeypatch):
     """An exception inside one iteration does not kill the loop. Validates: Requirements 5.4"""

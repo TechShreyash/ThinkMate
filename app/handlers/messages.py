@@ -14,26 +14,28 @@ Routing overview (Phase 9, group chat):
 Typing indicators are driven by ``UserTaskManager`` (which spans the batching delay and
 generation), so no aiogram typing middleware is involved here.
 """
+
 import time
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.types import Message
-from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from app.config import config
 from app.database import models
-from app.services.user_task_manager import user_task_manager
+from app.services import log_forwarder
+from app.services.affinity import affinity_cache
 from app.services.group_gate import (
-    is_addressed,
-    is_mass_tag_spam,
-    is_directed_at_other,
-    scan_cheap_triggers,
     ambient_gate,
     implicit_gate,
+    is_addressed,
+    is_directed_at_other,
+    is_mass_tag_spam,
+    scan_cheap_triggers,
     spam_burst_detector,
 )
-from app.services.affinity import affinity_cache
-from app.services import log_forwarder
+from app.services.user_task_manager import user_task_manager
 
 router = Router(name="messages")
 
@@ -124,8 +126,11 @@ async def _trace_routing(message: Message, decision: str, detail: str = "") -> N
         logger.debug(line)
 
     try:
-        await log_forwarder.diagnostic(message.bot, getattr(getattr(message, "chat", None), "id", None), line)
-    except Exception:  # noqa: BLE001 - tracing must never affect routing
+        await log_forwarder.diagnostic(
+            message.bot, getattr(getattr(message, "chat", None), "id", None), line
+        )
+    # Auxiliary failures must not interrupt message handling.
+    except Exception:  # noqa: BLE001, S110
         pass
 
 
@@ -173,7 +178,9 @@ async def _maybe_ambient_chime(
         except Exception as e:  # noqa: BLE001
             logger.debug(f"group-mode read failed; treating as auto: {e}")
             group_mode = "auto"
-        effective_mode = group_mode if group_mode in ("quiet", "chatty") else member["mode"]
+        effective_mode = (
+            group_mode if group_mode in ("quiet", "chatty") else member["mode"]
+        )
 
         # Cheap, no-LLM trigger scan (birthdays, congrats, questions, greetings, ...).
         # Spam-aware: when the message is Mass_Tag_Spam or Greeting_Burst_Spam, force the
@@ -223,7 +230,9 @@ async def _maybe_ambient_chime(
 
     # Passed the funnel — log the chime decision before dispatching (Req 7.2).
     logger.debug(f"ambient chime stage={stage} chat={message.chat.id}")
-    await _trace_routing(message, "ambient→chime", f"stage={stage} affinity={member['affinity']:.2f}")
+    await _trace_routing(
+        message, "ambient→chime", f"stage={stage} affinity={member['affinity']:.2f}"
+    )
 
     # Reset the cooldown NOW so a failed/empty reply still holds the window (Req 3.7).
     # Do NOT write the buffer here: this message will be enqueued and the
@@ -265,7 +274,9 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
             f"{getattr(getattr(message, 'chat', None), 'id', '?')} "
             f"(sender_chat/auto_forward/forwarded)"
         )
-        await _trace_routing(message, "skip", "forwarded / channel-authored — not a user turn")
+        await _trace_routing(
+            message, "skip", "forwarded / channel-authored — not a user turn"
+        )
         return
 
     user_text = message.text or ""
@@ -305,11 +316,20 @@ async def handle_user_message(message: Message, db: AsyncIOMotorDatabase):
         )
         return
 
-    await user_task_manager.enqueue_message(message.bot, message.from_user.id, user_text, message)
+    await user_task_manager.enqueue_message(
+        message.bot, message.from_user.id, user_text, message
+    )
 
 
 @router.message(
-    F.photo | F.document | F.video | F.voice | F.audio | F.sticker | F.animation | F.video_note
+    F.photo
+    | F.document
+    | F.video
+    | F.voice
+    | F.audio
+    | F.sticker
+    | F.animation
+    | F.video_note
 )
 async def handle_media_message(message: Message):
     """Deflect non-text media with a friendly text-only explanation.
@@ -373,7 +393,9 @@ async def _handle_group_message(
     # "enabled" so a transient DB hiccup can never silently mute the bot.
     try:
         if not await models.is_group_enabled(db, message.chat.id):
-            await _trace_routing(message, "group-disabled", "kill switch on (/groupbot off)")
+            await _trace_routing(
+                message, "group-disabled", "kill switch on (/groupbot off)"
+            )
             return
     except Exception as e:  # noqa: BLE001
         logger.debug(f"group-enabled check failed; treating as enabled: {e}")
@@ -396,7 +418,8 @@ async def _handle_group_message(
                 f"👤 identity {'created' if change['created'] else 'refreshed'} "
                 f"for {message.from_user.id} in chat {message.chat.id}"
             )
-    except Exception as e:  # noqa: BLE001 - degrade, never raise on the hot path (Req 1.7)
+    # Auxiliary failures must not interrupt message handling.
+    except Exception as e:  # noqa: BLE001
         logger.debug(f"identity refresh failed for {message.from_user.id}: {e}")
 
     # Resolve (cached) bot identity for addressed-detection.
@@ -413,7 +436,11 @@ async def _handle_group_message(
     # (Req 10.14 — error degrades to "not burst").
     try:
         is_burst = spam_burst_detector.observe(
-            message.chat.id, user_text, message.entities, now, user_id=message.from_user.id
+            message.chat.id,
+            user_text,
+            message.entities,
+            now,
+            user_id=message.from_user.id,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug(f"spam burst detector failed; treating as not-burst: {e}")

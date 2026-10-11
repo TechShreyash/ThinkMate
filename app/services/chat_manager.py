@@ -5,18 +5,25 @@ assemble the system prompt (cached persona + compiled memory), generate the repl
 optional reaction in a single LLM call, persist the reply, and trigger background
 compression (rate-limited) when the memory profile outgrows its budget.
 """
-import os
+
 import asyncio
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import UTC, datetime, timedelta
+
 from loguru import logger
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from app.config import config
 from app.database import models
+from app.prompts.system_prompt import build_system_prompt
 from app.services.affinity import affinity_cache
 from app.services.group_gate import scan_negative_signal
 from app.services.llm_service import llm_service
-from app.services.memory_loader import build_memory_block, load_profile_doc, compile_memory_block
-from app.prompts.system_prompt import build_system_prompt
+from app.services.memory_loader import (
+    build_memory_block,
+    compile_memory_block,
+    load_profile_doc,
+)
 
 # Representative UTC offsets so the model never needs to do its own timezone math.
 # Covers: South Asia, US East/West, UK, Central Europe, Gulf, East Asia.
@@ -51,7 +58,7 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
                 isinstance(last_interaction_at, datetime)
                 and last_interaction_at.tzinfo is None
             ):
-                last_interaction_at = last_interaction_at.replace(tzinfo=timezone.utc)
+                last_interaction_at = last_interaction_at.replace(tzinfo=UTC)
             delta = now - last_interaction_at
             secs = max(0, int(delta.total_seconds()))
             if secs < 3600:
@@ -61,7 +68,8 @@ def build_time_context(now: datetime, last_interaction_at) -> str:
             else:
                 ago = f"{secs // 86400} day(s) ago"
             lines.append(f"Last talked with this user: {ago}")
-        except Exception:
+        # Optional metadata must not interrupt reply handling.
+        except Exception:  # noqa: BLE001, S110
             pass
     return "\n".join(lines)
 
@@ -167,7 +175,9 @@ async def handle_message(
             content = f"{name}: {m['content']}" if name else m["content"]
             active_history.append({"role": m["role"], "content": content})
     else:
-        active_history = [{"role": m["role"], "content": m["content"]} for m in messages]
+        active_history = [
+            {"role": m["role"], "content": m["content"]} for m in messages
+        ]
 
     # 2. Buffer overflow -> non-blocking background extraction. Keyed by chat_id; the
     #    known group flag is passed through to the extractor so extraction dispatch is
@@ -176,15 +186,22 @@ async def handle_message(
     #    builds quickly; established users use the normal CHAT_BUFFER_MAX_CHARS threshold.
     extraction_threshold = config.CHAT_BUFFER_MAX_CHARS
     try:
-        if await models.count_memory_items(db, chat_id) < config.NEW_USER_MEMORY_THRESHOLD:
+        if (
+            await models.count_memory_items(db, chat_id)
+            < config.NEW_USER_MEMORY_THRESHOLD
+        ):
             extraction_threshold = min(
                 config.NEW_USER_EXTRACTION_CHARS, config.CHAT_BUFFER_MAX_CHARS
             )
-    except Exception as e:  # noqa: BLE001 - never let the threshold check break the hot path
-        logger.debug(f"new-user extraction threshold check failed for chat {chat_id}: {e}")
+    # Optional metadata must not interrupt reply handling.
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            f"new-user extraction threshold check failed for chat {chat_id}: {e}"
+        )
 
     if buffer_chars >= extraction_threshold:
         from app.services.user_task_manager import user_task_manager
+
         logger.info(
             f"Buffer overflow for chat {chat_id} ({buffer_chars} chars >= "
             f"{extraction_threshold}); launching extraction."
@@ -193,7 +210,7 @@ async def handle_message(
 
     # 3. Assemble system prompt (cached persona + compiled memory).
     persona = _load_persona()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Whether the bot may add an emoji reaction to THIS sender's message (/reactions
     # opt-out, default enabled). Read for free from the sender's profile doc that the
@@ -220,8 +237,13 @@ async def handle_message(
         # group block (Req 3.3, 3.5).
         time_context = build_time_context(now, None)
         system_prompt = build_system_prompt(
-            persona, group_block, time_context=time_context, user_memory_text=user_block,
-            speaker_name=sender_name, is_group=True, bot_name=config.bot_display_name,
+            persona,
+            group_block,
+            time_context=time_context,
+            user_memory_text=user_block,
+            speaker_name=sender_name,
+            is_group=True,
+            bot_name=config.bot_display_name,
         )
     else:
         # DM path: byte-for-byte unchanged (Req 3.6, 5.2). The single profile read here
@@ -234,7 +256,9 @@ async def handle_message(
         # (no extra LLM call, no upsert).
         prev = await models.touch_and_get_last_interaction(db, chat_id, now=now)
         time_context = build_time_context(now, prev)
-        system_prompt = build_system_prompt(persona, memory_block, time_context=time_context)
+        system_prompt = build_system_prompt(
+            persona, memory_block, time_context=time_context
+        )
 
     # 4. Single LLM call -> reply + optional reaction (+ optional affinity_delta for groups).
     if is_group:
@@ -251,7 +275,9 @@ async def handle_message(
         # (a) Fold the reply bundle's optional ``affinity_delta`` into the speaker's
         #     affinity (Requirement 4.6). Skip no-op deltas (None / 0).
         if affinity_delta is not None and affinity_delta != 0:
-            new_affinity = await affinity_cache.bump(db, chat_id, sender_id, affinity_delta)
+            new_affinity = await affinity_cache.bump(
+                db, chat_id, sender_id, affinity_delta
+            )
             logger.debug(
                 f"affinity signal=reply_delta chat={chat_id} sender={sender_id} "
                 f"delta={affinity_delta:+.3f} -> {new_affinity:.3f} (reason={reason})"
@@ -269,16 +295,24 @@ async def handle_message(
                 f"delta={_NEGATIVE_AFFINITY_STEP:+.3f} -> {new_affinity:.3f}"
             )
     else:
-        reply_text, reaction = await llm_service.generate_reply_bundle(chat_id, system_prompt, active_history)
+        reply_text, reaction = await llm_service.generate_reply_bundle(
+            chat_id, system_prompt, active_history
+        )
 
     # 5. Persist the assistant reply with sender attribution (DM: just adds two fields).
     await models.add_message_to_buffer(
-        db, chat_id, "assistant", reply_text, sender_id=0, sender_name=config.bot_display_name
+        db,
+        chat_id,
+        "assistant",
+        reply_text,
+        sender_id=0,
+        sender_name=config.bot_display_name,
     )
 
     # 6. Memory over budget -> rate-limited background compression.
     if needs_compression:
         from app.services.user_task_manager import user_task_manager
+
         asyncio.create_task(user_task_manager.run_compressor(chat_id))
 
     # Per-user reaction opt-out (/reactions off): drop the reaction here so the sender

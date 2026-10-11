@@ -18,6 +18,7 @@ the forwarder/sink dispatch contract and the command config/registry wiring.
   enabled commands under their resolved triggers and leaves disabled commands unmatched;
   ``cmd_health`` / ``cmd_metrics`` stay admin-gated after a rename (Req 7.3, 7.4, 7.6).
 """
+
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,7 +27,7 @@ from aiogram import Router
 from aiogram.filters.command import Command
 from loguru import logger
 
-from app.config import config, resolve_command_config, _BUILTIN_COMMANDS
+from app.config import _BUILTIN_COMMANDS, config, resolve_command_config
 from app.handlers import commands as commands_module
 from app.services import log_forwarder
 from app.services.error_log_sink import make_error_log_sink
@@ -231,7 +232,7 @@ def test_register_commands_binds_enabled_only_under_resolved_triggers():
     """Exactly the enabled commands are bound under their triggers; disabled are absent."""
     resolved = {key: (key, True) for key in _BUILTIN_COMMANDS}
     resolved["reactions"] = ("reactions", False)  # disabled
-    resolved["start"] = ("hello", True)           # renamed
+    resolved["start"] = ("hello", True)  # renamed
 
     router = Router(name="test")
     with patch.object(config, "COMMANDS", resolved):

@@ -3,6 +3,7 @@
 These helpers are pure and deterministic, so the tests are plain synchronous
 functions with no mocks. Covers Requirements 2.1, 2.2, 2.3, 9.1, 9.6.
 """
+
 from types import SimpleNamespace
 
 from app.services.group_gate import (
@@ -31,6 +32,7 @@ def _text_mention(offset: int, length: int, user_id: int):
 # count_distinct_mentions
 # ---------------------------------------------------------------------------
 
+
 def test_count_distinct_mentions_dedups_by_handle():
     """Tagging the same @handle twice counts once (case-insensitive)."""
     text = "hi @alice and @Alice again"
@@ -49,8 +51,8 @@ def test_count_distinct_mentions_mixed_mention_and_text_mention():
     """Mention handles and text_mention user ids both contribute, de-duplicated."""
     text = "@alice @bob carol"
     entities = [
-        _mention(0, 6),       # @alice
-        _mention(7, 4),       # @bob
+        _mention(0, 6),  # @alice
+        _mention(7, 4),  # @bob
         _text_mention(12, 5, 7),  # carol (user 7)
     ]
     assert count_distinct_mentions(text, entities) == 3
@@ -83,6 +85,7 @@ def test_count_distinct_mentions_malformed_and_none_return_zero():
 # is_mass_tag_spam (strict > boundary)
 # ---------------------------------------------------------------------------
 
+
 def test_is_mass_tag_spam_strict_boundary():
     """Threshold N: exactly N mentions is NOT spam, N+1 IS spam (strict >)."""
     text = "@a @b @c @d @e @f"
@@ -106,6 +109,7 @@ def test_is_mass_tag_spam_defensive_returns_false():
 # ---------------------------------------------------------------------------
 # is_directed_at_other
 # ---------------------------------------------------------------------------
+
 
 def test_is_directed_at_other_reply_to_other_true():
     """A reply to a non-bot message is Directed_At_Other (Req 2.2)."""

@@ -35,7 +35,8 @@ def build_system_prompt(
 ) -> str:
     base = DEFAULT_SYSTEM_PROMPT_TEMPLATE.format(
         persona_content=persona_content,
-        active_memory_text=active_memory_text or "No memories recorded yet. Start chatting to build a profile!",
+        active_memory_text=active_memory_text
+        or "No memories recorded yet. Start chatting to build a profile!",
     )
     # Group-only multi-party section: explain the named-transcript format and demand
     # correct per-speaker attribution. Without this the model can mistake the "Name:"

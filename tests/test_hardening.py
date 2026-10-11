@@ -1,14 +1,17 @@
 """Regression tests for the production-hardening fixes (see docs/development/hardening_plan.md)."""
-import time
+
 import asyncio
-import pytest
+import time
 from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from app.config import config
 from app.database import connection, models
-from app.services.memory_loader import build_memory_block
 from app.services.memory_compressor import _enforce_budget
+from app.services.memory_loader import build_memory_block
+from app.services.schemas import FactExtract, MemoryExtraction
 from app.services.user_task_manager import UserTaskManager
-from app.services.schemas import MemoryExtraction, FactExtract
 
 
 @pytest.mark.asyncio
@@ -60,10 +63,24 @@ async def test_normalized_dedup_on_extraction():
         user_id = 70003
         await models.ensure_user(db, user_id, "u", "U")
         await models.save_extracted_memories(
-            db, user_id, MemoryExtraction(new_facts=[FactExtract(category="preference", content="Enjoys green tea")])
+            db,
+            user_id,
+            MemoryExtraction(
+                new_facts=[
+                    FactExtract(category="preference", content="Enjoys green tea")
+                ]
+            ),
         )
         await models.save_extracted_memories(
-            db, user_id, MemoryExtraction(new_facts=[FactExtract(category="preference", content="  ENJOYS   green   tea ")])
+            db,
+            user_id,
+            MemoryExtraction(
+                new_facts=[
+                    FactExtract(
+                        category="preference", content="  ENJOYS   green   tea "
+                    )
+                ]
+            ),
         )
         facts = await models.get_active_facts(db, user_id)
         assert len(facts) == 1
@@ -89,8 +106,16 @@ async def test_enforce_budget_terminates_under_budget():
         async with connection.db_session() as db:
             user_id = 70005
             await models.ensure_user(db, user_id, "u", "U")
-            facts = [{"category": "personal", "content": f"Fact number {i} about the user here."} for i in range(40)]
-            await db["user_profiles"].update_one({"_id": user_id}, {"$set": {"facts": facts}})
+            facts = [
+                {
+                    "category": "personal",
+                    "content": f"Fact number {i} about the user here.",
+                }
+                for i in range(40)
+            ]
+            await db["user_profiles"].update_one(
+                {"_id": user_id}, {"$set": {"facts": facts}}
+            )
 
             _, over = await build_memory_block(db, user_id)
             assert over  # precondition: over budget
@@ -107,7 +132,9 @@ async def test_compression_cooldown_skips_recent():
     """run_compressor must skip when a compression ran within the cooldown window."""
     mgr = UserTaskManager()
     user_id = 70006
-    with patch("app.services.memory_compressor.compress_user_memory", new_callable=AsyncMock) as mock_compress:
+    with patch(
+        "app.services.memory_compressor.compress_user_memory", new_callable=AsyncMock
+    ) as mock_compress:
         state = await mgr.get_state(user_id)
         state.last_compression_time = time.time()  # just compressed
         await mgr.run_compressor(user_id)
@@ -157,7 +184,9 @@ async def test_extraction_retries_and_folds_in_new_messages():
                 # New messages arrive while the first (failing) call is in flight.
                 async with connection.db_session() as db:
                     for j in range(3):
-                        await models.add_message_to_buffer(db, user_id, "user", f"new{j}")
+                        await models.add_message_to_buffer(
+                            db, user_id, "user", f"new{j}"
+                        )
                 return None  # signal failure -> triggers a retry
             captured["text"] = user_history_text
             return MemoryExtraction()
@@ -167,6 +196,7 @@ async def test_extraction_retries_and_folds_in_new_messages():
             new=AsyncMock(side_effect=fake_extract),
         ):
             from app.services.memory_extractor import extract_and_trim
+
             await extract_and_trim(user_id)
 
         assert calls["n"] == 2  # retried exactly once after the failure
@@ -177,7 +207,9 @@ async def test_extraction_retries_and_folds_in_new_messages():
 
         # Buffer trimmed down to the newest CHAT_BUFFER_TRIM messages.
         async with connection.db_session() as db:
-            remaining = [m["content"] for m in await models.get_chat_buffer(db, user_id)]
+            remaining = [
+                m["content"] for m in await models.get_chat_buffer(db, user_id)
+            ]
         assert remaining == ["new1", "new2"]
     finally:
         config.CHAT_BUFFER_TRIM = original_trim
@@ -199,21 +231,30 @@ async def test_extraction_all_attempts_fail_still_trims():
             for i in range(5):
                 await models.add_message_to_buffer(db, user_id, "user", f"old{i}")
 
-        with patch(
-            "app.services.llm_service.LLMService.extract_memory",
-            new_callable=AsyncMock,
-        ) as mock_extract, patch(
-            "app.database.models.save_extracted_memories", new_callable=AsyncMock
-        ) as mock_save:
+        with (
+            patch(
+                "app.services.llm_service.LLMService.extract_memory",
+                new_callable=AsyncMock,
+            ) as mock_extract,
+            patch(
+                "app.database.models.save_extracted_memories", new_callable=AsyncMock
+            ) as mock_save,
+        ):
             mock_extract.return_value = None  # always fail
-            from app.services.memory_extractor import extract_and_trim, MAX_EXTRACTION_ATTEMPTS
+            from app.services.memory_extractor import (
+                MAX_EXTRACTION_ATTEMPTS,
+                extract_and_trim,
+            )
+
             await extract_and_trim(user_id)
 
             assert mock_extract.await_count == MAX_EXTRACTION_ATTEMPTS  # 3 calls max
             mock_save.assert_not_awaited()  # never write memory on failure
 
         async with connection.db_session() as db:
-            remaining = [m["content"] for m in await models.get_chat_buffer(db, user_id)]
+            remaining = [
+                m["content"] for m in await models.get_chat_buffer(db, user_id)
+            ]
         # Trimmed to the newest CHAT_BUFFER_TRIM messages despite total failure.
         assert remaining == ["old3", "old4"]
     finally:

@@ -8,8 +8,10 @@ mongomock + pytest-asyncio per ``tests/conftest.py``: the autouse ``mock_mongodb
 fixture provides the mongomock-backed db, which is passed directly to the command
 handlers (they take ``db`` as a parameter). No real LLM or network.
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.config import config
 from app.database import models
@@ -63,6 +65,7 @@ def _is_plain_text(text: str) -> bool:
 
 # --- 1. /onboard ------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_onboard_sets_flag_answers_plain_text_and_no_llm(mock_mongodb):
     db = mock_mongodb
@@ -88,6 +91,7 @@ async def test_onboard_sets_flag_answers_plain_text_and_no_llm(mock_mongodb):
 
 
 # --- 2. /start /onboard-nudge logic -----------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_start_nudges_onboard_for_fresh_user(mock_mongodb):
@@ -119,6 +123,7 @@ async def test_start_does_not_nudge_onboard_once_onboarded(mock_mongodb):
 
 # --- 2b. /help direct command list ------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_help_shows_beginner_command_sheet_without_admin_commands(mock_mongodb):
     db = mock_mongodb
@@ -139,6 +144,7 @@ async def test_help_shows_beginner_command_sheet_without_admin_commands(mock_mon
 
 
 # --- 3. /checkins on / off / status -----------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_checkins_on_off_toggles_proactive_enabled(mock_mongodb):
