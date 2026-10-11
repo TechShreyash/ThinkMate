@@ -34,6 +34,7 @@ Recommended reading order: [architecture](architecture.md) → [repository map](
 | [Observability](development/observability.md) | Health, metrics, audit records, logs, and Telegram forwarding. |
 | [Performance and scaling](development/performance_and_scaling.md) | Batching, latency, resource bounds, and the single-process deployment model. |
 | [Safeguards and limitations](development/hardening_plan.md) | Implemented protections and remaining gaps. |
+| [Project audit and implementation backlog](project-audit.md) | Detailed findings, essential gaps, future options, dependencies, and acceptance checks reviewed on 11 October 2026. |
 | [Roadmap](roadmap.md) | Current capabilities and proposed next steps. |
 
 ## Sources of truth

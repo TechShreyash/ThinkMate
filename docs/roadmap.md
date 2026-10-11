@@ -2,6 +2,8 @@
 
 This page separates what exists in the repository from possible improvements. It replaces the old phase-by-phase build checklist, which mixed implemented behavior with acceptance targets that had not been demonstrated. Proposed work below has no committed schedule.
 
+For the detailed development backlog, use the [project audit](project-audit.md), reviewed on 11 October 2026. It provides stable finding IDs, priorities, source evidence, dependencies, acceptance checks, essential gaps, and optional future directions. This page remains the short capability overview; record completed audit items and update both documents as behavior changes.
+
 ## Implemented capabilities
 
 | Area | Current implementation | Reference |
