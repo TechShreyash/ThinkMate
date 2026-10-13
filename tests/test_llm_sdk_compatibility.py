@@ -33,7 +33,17 @@ async def sdk_service(monkeypatch):
     monkeypatch.setattr(config, "LLM_BASE_URL", "https://llm.example.invalid/v1")
     monkeypatch.setattr(config, "LLM_API_KEY", "sdk-test-placeholder")
     monkeypatch.setattr(config, "LLM_MODEL", "sdk-test-model")
-    monkeypatch.setattr(config, "LLM_EXTRACTION_MODEL", "")
+    for name in (
+        "LLM_CHAT_MODEL",
+        "LLM_EXTRACTION_MODEL",
+        "LLM_CHAT_FALLBACK_MODEL",
+        "LLM_EXTRACTION_FALLBACK_MODEL",
+        "LLM_CHAT_REASONING_EFFORT",
+        "LLM_EXTRACTION_REASONING_EFFORT",
+        "LLM_CHAT_FALLBACK_REASONING_EFFORT",
+        "LLM_EXTRACTION_FALLBACK_REASONING_EFFORT",
+    ):
+        monkeypatch.setattr(config, name, "")
     monkeypatch.setattr(config, "LLM_MAX_RETRIES", 1)
     monkeypatch.setattr(config, "LLM_RETRY_BASE_DELAY_SECS", 0)
     monkeypatch.setattr(config, "LLM_STRUCTURED_MODE", "json_object")

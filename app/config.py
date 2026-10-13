@@ -12,7 +12,7 @@ from typing import Self
 
 from dotenv import load_dotenv
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Load environment variables from .env if present
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -83,6 +83,10 @@ _BUILTIN_COMMANDS: tuple[str, ...] = (
 # invalid configured trigger names (e.g. containing spaces, "/", or punctuation).
 _CMD_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
+_REASONING_EFFORTS = frozenset(
+    {"", "none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
 
 def resolve_command_config() -> dict[str, tuple[str, bool]]:
     """Resolve {command_key: (trigger_name, enabled)} for every Built_In_Command.
@@ -150,9 +154,32 @@ class Config(BaseModel):
         default_factory=lambda: _env_str("LLM_BASE_URL", "http://localhost:1234/v1")
     )
     LLM_API_KEY: str = Field(default_factory=lambda: _env_str("LLM_API_KEY", "none"))
+    # Legacy shared model; chat uses it when no explicit chat model is set.
     LLM_MODEL: str = Field(default_factory=lambda: _env_str("LLM_MODEL", "gpt-4o"))
+    LLM_CHAT_MODEL: str = Field(default_factory=lambda: _env_str("LLM_CHAT_MODEL", ""))
     LLM_EXTRACTION_MODEL: str = Field(
         default_factory=lambda: _env_str("LLM_EXTRACTION_MODEL", "")
+    )
+    # Blank fallbacks disable failover for their respective workload.
+    LLM_CHAT_FALLBACK_MODEL: str = Field(
+        default_factory=lambda: _env_str("LLM_CHAT_FALLBACK_MODEL", "")
+    )
+    LLM_EXTRACTION_FALLBACK_MODEL: str = Field(
+        default_factory=lambda: _env_str("LLM_EXTRACTION_FALLBACK_MODEL", "")
+    )
+    # Blank effort omits the API field. Each model has its own setting, including
+    # fallbacks, so a fallback never inherits an incompatible primary effort.
+    LLM_CHAT_REASONING_EFFORT: str = Field(
+        default_factory=lambda: _env_str("LLM_CHAT_REASONING_EFFORT", "")
+    )
+    LLM_EXTRACTION_REASONING_EFFORT: str = Field(
+        default_factory=lambda: _env_str("LLM_EXTRACTION_REASONING_EFFORT", "")
+    )
+    LLM_CHAT_FALLBACK_REASONING_EFFORT: str = Field(
+        default_factory=lambda: _env_str("LLM_CHAT_FALLBACK_REASONING_EFFORT", "")
+    )
+    LLM_EXTRACTION_FALLBACK_REASONING_EFFORT: str = Field(
+        default_factory=lambda: _env_str("LLM_EXTRACTION_FALLBACK_REASONING_EFFORT", "")
     )
     # Structured-output strategy: "json_object" (works with Gemini/local proxies) or
     # "native_parse" (OpenAI structured outputs via beta.chat.completions.parse).
@@ -393,8 +420,36 @@ class Config(BaseModel):
         default_factory=lambda: _env_int("PROACTIVE_QUIET_END_HOUR", 2), ge=0, le=23
     )
 
+    @field_validator(
+        "LLM_MODEL",
+        "LLM_CHAT_MODEL",
+        "LLM_EXTRACTION_MODEL",
+        "LLM_CHAT_FALLBACK_MODEL",
+        "LLM_EXTRACTION_FALLBACK_MODEL",
+    )
+    @classmethod
+    def normalize_model_names(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator(
+        "LLM_CHAT_REASONING_EFFORT",
+        "LLM_EXTRACTION_REASONING_EFFORT",
+        "LLM_CHAT_FALLBACK_REASONING_EFFORT",
+        "LLM_EXTRACTION_FALLBACK_REASONING_EFFORT",
+    )
+    @classmethod
+    def validate_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in _REASONING_EFFORTS:
+            raise ValueError(
+                "reasoning effort must be blank, none, minimal, low, medium, high, xhigh, or max"
+            )
+        return normalized
+
     @model_validator(mode="after")
     def validate_runtime_relationships(self) -> Self:
+        if not self.chat_model:
+            raise ValueError("LLM_CHAT_MODEL or LLM_MODEL must specify a chat model")
         if self.CHAT_BUFFER_TRIM >= self.CHAT_BUFFER_HARD_CAP:
             raise ValueError("CHAT_BUFFER_TRIM must be less than CHAT_BUFFER_HARD_CAP")
         if self.GROUP_SPAM_BURST_COUNT > self.GROUP_SPAM_BURST_TRACK_MAX:
@@ -409,6 +464,16 @@ class Config(BaseModel):
                 "CONSOLIDATION_SCAN_INTERVAL_SECS must be positive when consolidation is enabled"
             )
         return self
+
+    @property
+    def chat_model(self) -> str:
+        """Explicit chat model, falling back to the legacy shared model."""
+        return self.LLM_CHAT_MODEL or self.LLM_MODEL
+
+    @property
+    def extraction_model(self) -> str:
+        """Explicit extraction model, falling back to the resolved chat model."""
+        return self.LLM_EXTRACTION_MODEL or self.chat_model
 
     @property
     def bot_display_name(self) -> str:

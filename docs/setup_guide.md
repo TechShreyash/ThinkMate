@@ -63,14 +63,22 @@ MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB=thinkmate_db
 LLM_BASE_URL=http://localhost:1234/v1
 LLM_API_KEY=replace-with-your-provider-key-or-local-placeholder
-LLM_MODEL=replace-with-a-model-your-server-serves
+LLM_CHAT_MODEL=replace-with-a-chat-model-your-server-serves
 LLM_EXTRACTION_MODEL=
+LLM_CHAT_FALLBACK_MODEL=
+LLM_EXTRACTION_FALLBACK_MODEL=
+LLM_CHAT_REASONING_EFFORT=
+LLM_EXTRACTION_REASONING_EFFORT=
+LLM_CHAT_FALLBACK_REASONING_EFFORT=
+LLM_EXTRACTION_FALLBACK_REASONING_EFFORT=
 LLM_STRUCTURED_MODE=json_object
 ADMIN_USER_IDS=replace-with-your-numeric-telegram-user-id
 ```
 
 - MongoDB must be running and accessible from the bot process. For a hosted database, configure authentication, network access, and TLS as required by that service.
-- Use the exact model ID exposed by your endpoint. Both the conversational model and extraction model need to support ThinkMate's structured requests. Blank `LLM_EXTRACTION_MODEL` falls back to `LLM_MODEL`; the template's `gpt-4o-mini` is an example override.
+- Use exact model IDs exposed by your endpoint. `LLM_CHAT_MODEL` serves replies and check-ins; `LLM_EXTRACTION_MODEL` serves extraction, compression, and consolidation. Blank extraction model uses the resolved chat model; blank chat model uses the legacy `LLM_MODEL` (default `gpt-4o`). The template's `gpt-4o-mini` extraction model is an example override. Models used for structured calls must support those requests.
+- Set `LLM_CHAT_FALLBACK_MODEL` and `LLM_EXTRACTION_FALLBACK_MODEL` if you want each path to try another model after primary failure. Blank disables fallback; a fallback identical to its primary is skipped. All models share the configured endpoint and credential.
+- Set reasoning separately with `LLM_CHAT_REASONING_EFFORT`, `LLM_EXTRACTION_REASONING_EFFORT`, `LLM_CHAT_FALLBACK_REASONING_EFFORT`, and `LLM_EXTRACTION_FALLBACK_REASONING_EFFORT`. Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, with whitespace/case normalized. Blank omits the request field and uses the provider default; explicit `none` sends that value. Check support for each model/provider; reasoning does not inherit between these four settings.
 - `LLM_BASE_URL` is the API base, usually including `/v1`, not the complete `/chat/completions` URL. Local LM Studio commonly uses `http://localhost:1234/v1`; Ollama's documented compatible base is `http://localhost:11434/v1`. Check the endpoint's actual configuration.
 - `json_object` is the default structured mode. An endpoint exposing a compatible URL is not proof that its model supports every request field; inspect [LLM integration](development/llm_integration.md) when choosing or troubleshooting a provider.
 - `ADMIN_USER_IDS` is a comma-separated list of numeric Telegram user IDs. Blank means any private-chat user can access health/metrics. Invalid entries are ignored, so verify the value carefully.

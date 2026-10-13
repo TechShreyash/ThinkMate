@@ -34,12 +34,18 @@ TELEGRAM_BOT_TOKEN=replace-with-your-bot-token
 MONGODB_URI=mongodb://localhost:27017
 LLM_BASE_URL=http://localhost:1234/v1
 LLM_API_KEY=replace-with-your-provider-key-or-local-placeholder
-LLM_MODEL=replace-with-a-model-served-by-your-endpoint
+LLM_CHAT_MODEL=replace-with-a-chat-model-served-by-your-endpoint
 LLM_EXTRACTION_MODEL=
+LLM_CHAT_FALLBACK_MODEL=
+LLM_EXTRACTION_FALLBACK_MODEL=
+LLM_CHAT_REASONING_EFFORT=
+LLM_EXTRACTION_REASONING_EFFORT=
+LLM_CHAT_FALLBACK_REASONING_EFFORT=
+LLM_EXTRACTION_FALLBACK_REASONING_EFFORT=
 ADMIN_USER_IDS=replace-with-your-numeric-telegram-user-id
 ```
 
-Leaving `LLM_EXTRACTION_MODEL` blank uses `LLM_MODEL`. The template contains example model IDs; they must match your provider. `ADMIN_USER_IDS` takes numeric IDs, not usernames. See [configuration](docs/development/configuration.md) for defaults and validation limits.
+Set chat and extraction models independently; blank `LLM_EXTRACTION_MODEL` uses the chat model. Existing `LLM_MODEL` settings still work when `LLM_CHAT_MODEL` is blank. Each path has an optional fallback model and separate reasoning settings for its primary and fallback. Blank fallback model disables it; blank reasoning uses the provider default. Model IDs and reasoning levels must be supported by your endpoint. Restart after editing `.env`. `ADMIN_USER_IDS` takes numeric IDs, not usernames. See [configuration](docs/development/configuration.md) for accepted reasoning levels, defaults, and validation limits.
 
 ```bash
 uv run --locked main.py

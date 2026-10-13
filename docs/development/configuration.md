@@ -16,7 +16,7 @@ Tables below show **code defaults when a variable is unset**, not values promise
 | Variable | Code default | Example value |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Empty string | Placeholder that must be replaced |
-| `LLM_EXTRACTION_MODEL` | Empty; falls back to `LLM_MODEL` | `gpt-4o-mini` |
+| `LLM_EXTRACTION_MODEL` | Empty; reuses the resolved chat model | `gpt-4o-mini` |
 | `BOT_NAME` | Empty | `ThinkMate` |
 | `RATE_LIMIT_MAX_REQUESTS` | `10` | `5` |
 | `RATE_LIMIT_WINDOW_SECS` | `5.0` | `10` |
@@ -29,7 +29,10 @@ positive; retry counts, retained-buffer counts, and cooldowns allow zero. Probab
 and similarity settings must be in `[0, 1]`, and quiet-hour settings in `0`–`23`.
 Startup also checks that `CHAT_BUFFER_TRIM < CHAT_BUFFER_HARD_CAP` and that the burst
 tracking cap can hold `GROUP_SPAM_BURST_COUNT` messages. Documented `<= 0` feature
-switches remain valid. URL/model strings are not checked for endpoint support at startup.
+switches remain valid. Model IDs are stripped of surrounding whitespace; either
+`LLM_CHAT_MODEL` or `LLM_MODEL` must provide a nonblank chat model. Reasoning
+settings are stripped and lowercased; unsupported values stop startup. URL/model
+strings and accepted reasoning levels are not checked for endpoint support at startup.
 
 ## Telegram, identity, and persona
 
@@ -51,16 +54,37 @@ in the persona file. See [Telegram behavior](telegram_bot.md).
 | --- | --- | --- | --- |
 | `LLM_BASE_URL` | String | `http://localhost:1234/v1` | OpenAI-compatible API base URL. |
 | `LLM_API_KEY` | String | `none` | API key supplied to the client; local endpoints may accept a placeholder. |
-| `LLM_MODEL` | String | `gpt-4o` | Replies and proactive check-ins model; must exist at the configured endpoint. |
-| `LLM_EXTRACTION_MODEL` | String | Empty | Extraction, group extraction, compression, and consolidation model; empty reuses `LLM_MODEL`. |
+| `LLM_MODEL` | String | `gpt-4o` | Legacy chat-model setting, used when `LLM_CHAT_MODEL` is empty. |
+| `LLM_CHAT_MODEL` | String | Empty | Replies and proactive check-ins model; empty uses `LLM_MODEL`. Must exist at the configured endpoint. |
+| `LLM_EXTRACTION_MODEL` | String | Empty | Extraction, group extraction, compression, and consolidation model; empty reuses the resolved chat model. |
+| `LLM_CHAT_FALLBACK_MODEL` | String | Empty | Optional alternate model for replies/check-ins after primary request failure. Empty disables it; identical to the resolved primary is skipped. |
+| `LLM_EXTRACTION_FALLBACK_MODEL` | String | Empty | Optional alternate model for memory work after primary request or output-validation failure. Empty disables it; identical to the resolved primary is skipped. |
+| `LLM_CHAT_REASONING_EFFORT` | String | Empty | Reasoning effort for the primary chat model. |
+| `LLM_EXTRACTION_REASONING_EFFORT` | String | Empty | Reasoning effort for the primary extraction model, even when its model ID inherits from chat. |
+| `LLM_CHAT_FALLBACK_REASONING_EFFORT` | String | Empty | Reasoning effort for the chat fallback model. |
+| `LLM_EXTRACTION_FALLBACK_REASONING_EFFORT` | String | Empty | Reasoning effort for the extraction fallback model. |
 | `LLM_STRUCTURED_MODE` | String | `json_object` | Memory calls use JSON-object mode. `native_parse` attempts SDK schema parsing first, then JSON-object fallback. Reply bundles always use JSON-object mode. |
-| `LLM_MAX_RETRIES` | Integer | `2` | Retries after the first request for transient connection, timeout, 429, and server errors; SDK retries are disabled. Use a non-negative value. |
+| `LLM_MAX_RETRIES` | Integer | `2` | Retries after the first request for transient connection, timeout, 429, and server errors, per model and structured mode; SDK retries are disabled. Use a non-negative value. |
 | `LLM_RETRY_BASE_DELAY_SECS` | Float | `0.5` | Exponential retry delay: base multiplied by `2 ** attempt`. |
 | `LLM_REQUEST_TIMEOUT_SECS` | Float | `610.0` | Timeout per request, not an entire reply deadline. Choose for your server; the code default does not establish a universal provider limit. |
 
+Each reasoning setting accepts blank, `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, or `max`. Blank omits `reasoning_effort` and uses the provider default;
+`none` is sent literally. Each primary/fallback reasoning setting is independent,
+with no inheritance. The endpoint and model must support the selected value; accepted
+configuration does not guarantee provider support. See the
+[OpenAI Chat Completions reference](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)
+and your endpoint's own documentation.
+
+All primary and fallback models share `LLM_BASE_URL` and `LLM_API_KEY`. Transient
+errors exhaust a model's retry budget before fallback; other request errors move to
+fallback immediately. Memory validation failure can also trigger the extraction
+fallback, after the configured structured modes have failed for the primary model.
+
 No `max_tokens` limit is sent. `MAX_RESPONSE_CHARS` truncates delivery after generation
-and does not cap inference cost. Retry attempts and native-parse fallback can multiply
-requests. See [LLM integration](llm_integration.md).
+and does not cap inference cost. Retries, structured-mode fallback, and model fallback
+can multiply requests and latency. See [LLM integration](llm_integration.md) for call
+counts and output policies. Restart the bot after changing these settings.
 
 ## MongoDB and audit retention
 

@@ -5,6 +5,126 @@ from pydantic import ValidationError
 
 from app.config import _BUILTIN_COMMANDS, Config, resolve_command_config
 
+_LLM_MODEL_FIELDS = (
+    "LLM_MODEL",
+    "LLM_CHAT_MODEL",
+    "LLM_EXTRACTION_MODEL",
+    "LLM_CHAT_FALLBACK_MODEL",
+    "LLM_EXTRACTION_FALLBACK_MODEL",
+)
+_LLM_REASONING_FIELDS = (
+    "LLM_CHAT_REASONING_EFFORT",
+    "LLM_EXTRACTION_REASONING_EFFORT",
+    "LLM_CHAT_FALLBACK_REASONING_EFFORT",
+    "LLM_EXTRACTION_FALLBACK_REASONING_EFFORT",
+)
+
+
+@pytest.fixture
+def clear_llm_model_environment(monkeypatch):
+    for field in (*_LLM_MODEL_FIELDS, *_LLM_REASONING_FIELDS):
+        monkeypatch.delenv(field, raising=False)
+
+
+def test_legacy_model_config_remains_shared(clear_llm_model_environment):
+    settings = Config(LLM_MODEL="legacy-model")
+    assert settings.chat_model == "legacy-model"
+    assert settings.extraction_model == "legacy-model"
+    assert settings.LLM_CHAT_FALLBACK_MODEL == ""
+    assert settings.LLM_EXTRACTION_FALLBACK_MODEL == ""
+    assert all(getattr(settings, field) == "" for field in _LLM_REASONING_FIELDS)
+
+
+def test_chat_and_extraction_models_can_be_set_independently(
+    clear_llm_model_environment,
+):
+    settings = Config(
+        LLM_MODEL="legacy-model",
+        LLM_CHAT_MODEL="chat-model",
+        LLM_EXTRACTION_MODEL="extraction-model",
+        LLM_CHAT_FALLBACK_MODEL="chat-backup",
+        LLM_EXTRACTION_FALLBACK_MODEL="extraction-backup",
+    )
+    assert settings.chat_model == "chat-model"
+    assert settings.extraction_model == "extraction-model"
+    assert settings.LLM_CHAT_FALLBACK_MODEL == "chat-backup"
+    assert settings.LLM_EXTRACTION_FALLBACK_MODEL == "extraction-backup"
+
+
+def test_extraction_defaults_to_explicit_chat_model(clear_llm_model_environment):
+    settings = Config(LLM_MODEL="legacy-model", LLM_CHAT_MODEL="chat-model")
+    assert settings.extraction_model == "chat-model"
+
+
+@pytest.mark.parametrize("field", _LLM_MODEL_FIELDS)
+def test_model_names_are_trimmed_from_environment(
+    monkeypatch, clear_llm_model_environment, field
+):
+    monkeypatch.setenv(field, "  provider/model-name  ")
+    settings = Config()
+    assert getattr(settings, field) == "provider/model-name"
+
+
+def test_whitespace_optional_models_use_the_documented_defaults(
+    clear_llm_model_environment,
+):
+    settings = Config(
+        LLM_MODEL="  legacy-model  ",
+        LLM_CHAT_MODEL="  ",
+        LLM_EXTRACTION_MODEL="\t",
+        LLM_CHAT_FALLBACK_MODEL="\n",
+        LLM_EXTRACTION_FALLBACK_MODEL="  ",
+    )
+    assert settings.chat_model == "legacy-model"
+    assert settings.extraction_model == "legacy-model"
+    assert settings.LLM_CHAT_FALLBACK_MODEL == ""
+    assert settings.LLM_EXTRACTION_FALLBACK_MODEL == ""
+
+
+def test_blank_legacy_model_is_allowed_when_chat_is_explicit(
+    clear_llm_model_environment,
+):
+    settings = Config(LLM_MODEL="  ", LLM_CHAT_MODEL="chat-model")
+    assert settings.chat_model == "chat-model"
+
+
+def test_missing_chat_model_is_rejected(clear_llm_model_environment):
+    with pytest.raises(ValidationError, match="LLM_CHAT_MODEL or LLM_MODEL"):
+        Config(LLM_MODEL="  ", LLM_CHAT_MODEL=" ", LLM_EXTRACTION_MODEL="extraction")
+
+
+@pytest.mark.parametrize("field", _LLM_REASONING_FIELDS)
+@pytest.mark.parametrize(
+    "effort", ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+)
+def test_reasoning_efforts_are_normalized_and_accepted(
+    monkeypatch, clear_llm_model_environment, field, effort
+):
+    monkeypatch.setenv(field, f"  {effort.upper()}  ")
+    assert getattr(Config(), field) == effort
+
+
+@pytest.mark.parametrize("field", _LLM_REASONING_FIELDS)
+def test_unknown_reasoning_efforts_are_rejected_at_startup(
+    monkeypatch, clear_llm_model_environment, field
+):
+    monkeypatch.setenv(field, "extreme")
+    with pytest.raises(ValidationError, match=field):
+        Config()
+
+
+def test_reasoning_efforts_do_not_inherit_between_models(clear_llm_model_environment):
+    settings = Config(
+        LLM_CHAT_REASONING_EFFORT="high",
+        LLM_EXTRACTION_REASONING_EFFORT="low",
+        LLM_CHAT_FALLBACK_MODEL="chat-backup",
+        LLM_EXTRACTION_FALLBACK_MODEL="extraction-backup",
+    )
+    assert settings.LLM_CHAT_REASONING_EFFORT == "high"
+    assert settings.LLM_EXTRACTION_REASONING_EFFORT == "low"
+    assert settings.LLM_CHAT_FALLBACK_REASONING_EFFORT == ""
+    assert settings.LLM_EXTRACTION_FALLBACK_REASONING_EFFORT == ""
+
 
 @pytest.mark.parametrize(
     "field",

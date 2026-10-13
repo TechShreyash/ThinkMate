@@ -1,8 +1,9 @@
 """LLM client wrapper.
 
 Wraps an OpenAI-compatible endpoint and centralizes: structured-output handling
-(``json_object`` by default — the only mode our Gemini proxy accepts; ``native_parse``
-for true OpenAI deployments), bounded retries with backoff for transient failures, and
+(``json_object`` by default; ``native_parse`` for supported deployments), separate
+chat/memory model profiles with reasoning effort and optional fallback models,
+bounded retries with backoff for transient failures, and
 audit logging to ``llm_audit_log`` (off the chat hot path, fire-and-forget).
 
 See docs/development/llm_integration.md and docs/development/hardening_plan.md.
@@ -143,6 +144,66 @@ class LLMService:
         raise last_exc
 
     @staticmethod
+    def _model_kwargs(model: str, reasoning_effort: str) -> dict[str, str]:
+        """Leave reasoning to the endpoint unless the profile explicitly sets it."""
+        kwargs = {"model": model}
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        return kwargs
+
+    async def _with_model_fallback(
+        self,
+        make_call,
+        *,
+        model: str,
+        reasoning_effort: str,
+        fallback_model: str,
+        fallback_reasoning_effort: str,
+        what: str,
+    ):
+        """Try the primary profile, then at most one distinct fallback profile.
+
+        ``make_call`` owns transport retries and output validation for each model.
+        Cancellation propagates without issuing a fallback request.
+        """
+        try:
+            return await make_call(model, reasoning_effort)
+        except Exception as exc:
+            if not fallback_model or fallback_model == model:
+                raise
+            logger.warning(
+                "{}: model {} failed ({}); trying fallback model {}",
+                what,
+                model,
+                type(exc).__name__,
+                fallback_model,
+            )
+        return await make_call(fallback_model, fallback_reasoning_effort)
+
+    async def _chat_completion(self, *, messages: list[dict], what: str, **kwargs):
+        """Use the chat profile for replies and proactive check-ins."""
+
+        async def make_call(model: str, reasoning_effort: str):
+            return await self._with_retries(
+                lambda: self.client.chat.completions.create(
+                    **self._model_kwargs(model, reasoning_effort),
+                    messages=messages,
+                    timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+                    **kwargs,
+                ),
+                what=f"{what} model={model}",
+            )
+
+        return await self._with_model_fallback(
+            make_call,
+            model=config.chat_model,
+            reasoning_effort=config.LLM_CHAT_REASONING_EFFORT,
+            fallback_model=config.LLM_CHAT_FALLBACK_MODEL,
+            fallback_reasoning_effort=config.LLM_CHAT_FALLBACK_REASONING_EFFORT,
+            what=what,
+        )
+
+    @staticmethod
     def _strip_fences(raw: str | None) -> str:
         """Strip ```json ... ``` fences some models add around JSON output."""
         if not raw:
@@ -229,13 +290,9 @@ class LLMService:
 
         try:
             start = time.perf_counter()
-            response = await self._with_retries(
-                lambda: self.client.chat.completions.create(
-                    model=config.LLM_MODEL,
-                    messages=messages,
-                    timeout=config.LLM_REQUEST_TIMEOUT_SECS,
-                    response_format={"type": "json_object"},
-                ),
+            response = await self._chat_completion(
+                messages=messages,
+                response_format={"type": "json_object"},
                 what=f"reply_bundle u{user_id}",
             )
             raw = (response.choices[0].message.content or "").strip()
@@ -299,12 +356,8 @@ class LLMService:
         inputs = {"system_prompt": system_prompt, "messages": messages}
         start = time.perf_counter()
         try:
-            response = await self._with_retries(
-                lambda: self.client.chat.completions.create(
-                    model=config.LLM_MODEL,
-                    messages=messages,
-                    timeout=config.LLM_REQUEST_TIMEOUT_SECS,
-                ),
+            response = await self._chat_completion(
+                messages=messages,
                 what=f"proactive_checkin u{user_id}",
             )
             raw = (response.choices[0].message.content or "").strip()
@@ -411,56 +464,20 @@ class LLMService:
         schema: type[T],
         timeout: float,
         required_fields: tuple[str, ...] = (),
+        reasoning_effort: str = "",
+        fallback_model: str = "",
+        fallback_reasoning_effort: str = "",
     ) -> T | None:
         """Return a validated ``schema`` instance, or ``None`` on failure.
 
         Honors ``LLM_STRUCTURED_MODE``: ``native_parse`` first (OpenAI structured outputs),
         otherwise/falling back to ``json_object`` with schema instructions appended.
+        If both formats fail for the primary model, try its configured model fallback.
         For destructive replacement calls, ``required_fields`` must be explicitly
         supplied by the model; Pydantic defaults must not turn partial output into a wipe.
         """
         inputs = {"system_prompt": messages[0]["content"], "messages": messages}
         start = time.perf_counter()
-
-        if config.LLM_STRUCTURED_MODE == "native_parse":
-            try:
-                completion = await self._with_retries(
-                    lambda: self.client.beta.chat.completions.parse(
-                        model=model,
-                        messages=messages,
-                        response_format=schema,
-                        timeout=timeout,
-                    ),
-                    what=f"{call_type} parse u{user_id}",
-                )
-                parsed = completion.choices[0].message.parsed
-                if parsed is not None:
-                    missing = set(required_fields) - parsed.model_fields_set
-                    if missing:
-                        raise ValueError(
-                            f"Missing replacement fields: {', '.join(sorted(missing))}"
-                        )
-                    self._fire_log(
-                        user_id,
-                        call_type,
-                        inputs,
-                        {
-                            "raw_text": completion.choices[0].message.content,
-                            "parsed_json": parsed.model_dump(),
-                        },
-                        "success",
-                    )
-                    metrics.record_llm(
-                        call_type, ok=True, latency=time.perf_counter() - start
-                    )
-                    return parsed
-                logger.warning(
-                    f"{call_type}: native parse returned None; falling back to json_object."
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"{call_type}: native parse failed ({e}); falling back to json_object."
-                )
 
         # json_object path (default; works with Gemini/local proxies).
         schema_definition = schema.model_json_schema()
@@ -479,15 +496,46 @@ class LLMService:
                 "No explanation or preamble. Return ONLY the raw JSON."
             ),
         }
-        try:
+
+        async def make_call(model: str, reasoning_effort: str) -> tuple[T, str | None]:
+            model_kwargs = self._model_kwargs(model, reasoning_effort)
+            if config.LLM_STRUCTURED_MODE == "native_parse":
+                try:
+                    completion = await self._with_retries(
+                        lambda: self.client.beta.chat.completions.parse(
+                            **model_kwargs,
+                            messages=messages,
+                            response_format=schema,
+                            timeout=timeout,
+                        ),
+                        what=f"{call_type} parse u{user_id} model={model}",
+                    )
+                    parsed = completion.choices[0].message.parsed
+                    if parsed is not None:
+                        missing = set(required_fields) - parsed.model_fields_set
+                        if missing:
+                            raise ValueError(
+                                f"Missing replacement fields: {', '.join(sorted(missing))}"
+                            )
+                        return parsed, completion.choices[0].message.content
+                    logger.warning(
+                        f"{call_type}: model {model} native parse returned None; "
+                        "falling back to json_object."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"{call_type}: model {model} native parse failed ({exc}); "
+                        "falling back to json_object."
+                    )
+
             response = await self._with_retries(
                 lambda: self.client.chat.completions.create(
-                    model=model,
+                    **model_kwargs,
                     messages=json_messages,
                     response_format={"type": "json_object"},
                     timeout=timeout,
                 ),
-                what=f"{call_type} json u{user_id}",
+                what=f"{call_type} json u{user_id} model={model}",
             )
             raw = response.choices[0].message.content
             cleaned = self._strip_fences(raw)
@@ -501,6 +549,17 @@ class LLMService:
                         f"Missing replacement fields: {', '.join(sorted(missing))}"
                     )
             parsed = schema.model_validate_json(cleaned)
+            return parsed, raw
+
+        try:
+            parsed, raw = await self._with_model_fallback(
+                make_call,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                fallback_model=fallback_model,
+                fallback_reasoning_effort=fallback_reasoning_effort,
+                what=f"{call_type} u{user_id}",
+            )
             self._fire_log(
                 user_id,
                 call_type,
@@ -537,7 +596,7 @@ class LLMService:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_history_text},
         ]
-        model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
+        model = config.extraction_model
         return await self._structured_call(
             user_id=user_id,
             call_type="memory_extraction",
@@ -545,6 +604,9 @@ class LLMService:
             messages=messages,
             schema=MemoryExtraction,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            reasoning_effort=config.LLM_EXTRACTION_REASONING_EFFORT,
+            fallback_model=config.LLM_EXTRACTION_FALLBACK_MODEL,
+            fallback_reasoning_effort=config.LLM_EXTRACTION_FALLBACK_REASONING_EFFORT,
         )
 
     async def extract_group_memory(
@@ -568,7 +630,7 @@ class LLMService:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_history_text},
         ]
-        model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
+        model = config.extraction_model
         return await self._structured_call(
             user_id=user_id_or_chat_id,
             call_type="group_memory_extraction",
@@ -576,6 +638,9 @@ class LLMService:
             messages=messages,
             schema=GroupMemoryExtraction,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            reasoning_effort=config.LLM_EXTRACTION_REASONING_EFFORT,
+            fallback_model=config.LLM_EXTRACTION_FALLBACK_MODEL,
+            fallback_reasoning_effort=config.LLM_EXTRACTION_FALLBACK_REASONING_EFFORT,
         )
 
     async def compress_memory(
@@ -591,7 +656,7 @@ class LLMService:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": raw_memory_text},
         ]
-        model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
+        model = config.extraction_model
         return await self._structured_call(
             user_id=user_id,
             call_type="memory_compression",
@@ -599,6 +664,9 @@ class LLMService:
             messages=messages,
             schema=MemoryCompression,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            reasoning_effort=config.LLM_EXTRACTION_REASONING_EFFORT,
+            fallback_model=config.LLM_EXTRACTION_FALLBACK_MODEL,
+            fallback_reasoning_effort=config.LLM_EXTRACTION_FALLBACK_REASONING_EFFORT,
             required_fields=(
                 "compressed_facts",
                 "compressed_beliefs",
@@ -618,7 +686,7 @@ class LLMService:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": raw_memory_text},
         ]
-        model = config.LLM_EXTRACTION_MODEL or config.LLM_MODEL
+        model = config.extraction_model
         return await self._structured_call(
             user_id=user_id,
             call_type="memory_consolidation",
@@ -626,6 +694,9 @@ class LLMService:
             messages=messages,
             schema=MemoryConsolidation,
             timeout=config.LLM_REQUEST_TIMEOUT_SECS,
+            reasoning_effort=config.LLM_EXTRACTION_REASONING_EFFORT,
+            fallback_model=config.LLM_EXTRACTION_FALLBACK_MODEL,
+            fallback_reasoning_effort=config.LLM_EXTRACTION_FALLBACK_REASONING_EFFORT,
             required_fields=(
                 "consolidated_facts",
                 "consolidated_beliefs",
