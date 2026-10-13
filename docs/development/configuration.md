@@ -63,7 +63,8 @@ in the persona file. See [Telegram behavior](telegram_bot.md).
 | `LLM_EXTRACTION_REASONING_EFFORT` | String | Empty | Reasoning effort for the primary extraction model, even when its model ID inherits from chat. |
 | `LLM_CHAT_FALLBACK_REASONING_EFFORT` | String | Empty | Reasoning effort for the chat fallback model. |
 | `LLM_EXTRACTION_FALLBACK_REASONING_EFFORT` | String | Empty | Reasoning effort for the extraction fallback model. |
-| `LLM_STRUCTURED_MODE` | String | `json_object` | Memory calls use JSON-object mode. `native_parse` attempts SDK schema parsing first, then JSON-object fallback. Reply bundles always use JSON-object mode. |
+| `LLM_STRUCTURED_MODE` | String | `json_object` | Memory calls use JSON-object mode. `native_parse` attempts SDK schema parsing first, then JSON-object fallback. Reply bundles have their own chat structured-mode setting. |
+| `LLM_CHAT_STRUCTURED_MODE` | String | `json_object` | Reply envelopes use `json_object`, or `json_schema` to send a strict reply/reaction schema to a compatible endpoint. Group schema adds required nullable affinity. Check-ins remain plain text. |
 | `LLM_MAX_RETRIES` | Integer | `2` | Retries after the first request for transient connection, timeout, 429, and server errors, per model and structured mode; SDK retries are disabled. Use a non-negative value. |
 | `LLM_RETRY_BASE_DELAY_SECS` | Float | `0.5` | Exponential retry delay: base multiplied by `2 ** attempt`. |
 | `LLM_REQUEST_TIMEOUT_SECS` | Float | `610.0` | Timeout per request, not an entire reply deadline. Choose for your server; the code default does not establish a universal provider limit. |
@@ -80,6 +81,11 @@ All primary and fallback models share `LLM_BASE_URL` and `LLM_API_KEY`. Transien
 errors exhaust a model's retry budget before fallback; other request errors move to
 fallback immediately. Memory validation failure can also trigger the extraction
 fallback, after the configured structured modes have failed for the primary model.
+
+`LLM_CHAT_STRUCTURED_MODE` accepts `json_object` or `json_schema`, normalized for
+whitespace and case. Schema mode sends an explicit JSON Schema through Chat
+Completions and keeps the existing reply parser; it does not use SDK native parsing
+or retry usable plain-text replies. Schema enforcement requires endpoint support.
 
 No `max_tokens` limit is sent. `MAX_RESPONSE_CHARS` truncates delivery after generation
 and does not cap inference cost. Retries, structured-mode fallback, and model fallback

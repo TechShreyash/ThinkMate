@@ -145,6 +145,7 @@ async def routing_service(monkeypatch):
         "LLM_MAX_RETRIES": 1,
         "LLM_RETRY_BASE_DELAY_SECS": 0,
         "LLM_STRUCTURED_MODE": "json_object",
+        "LLM_CHAT_STRUCTURED_MODE": "json_object",
     }
     for name, value in settings.items():
         monkeypatch.setattr(config, name, value)
@@ -512,9 +513,11 @@ async def test_native_replacement_defaults_cannot_skip_missing_field_guard(
         ('{"reply":null}', ("", None)),
     ],
 )
+@pytest.mark.parametrize("chat_mode", ("json_object", "json_schema"))
 async def test_reply_output_policies_do_not_call_fallback(
-    routing_service, content, expected
+    routing_service, monkeypatch, content, expected, chat_mode
 ):
+    monkeypatch.setattr(config, "LLM_CHAT_STRUCTURED_MODE", chat_mode)
     bodies = []
 
     def handler(request):
@@ -539,6 +542,77 @@ async def test_chat_fallback_preserves_group_affinity_contract(routing_service):
     )
     assert result == ("Hello!", None, 0.05)
     assert [body["model"] for body in bodies] == ["chat-primary", "chat-backup"]
+
+
+@pytest.mark.parametrize("with_affinity", (False, True))
+@pytest.mark.parametrize("primary_fails", (False, True))
+async def test_chat_json_schema_is_preserved_for_each_profile(
+    routing_service, monkeypatch, with_affinity, primary_fails
+):
+    monkeypatch.setattr(config, "LLM_CHAT_STRUCTURED_MODE", "json_schema")
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        if primary_fails and len(bodies) == 1:
+            return _error()
+        content = {"reply": "Hello!", "reaction": ""}
+        if with_affinity:
+            content["affinity_delta"] = None
+        return _completion(json.dumps(content))
+
+    result = await routing_service(handler).generate_reply_bundle(
+        123,
+        "Voice example: hey! what's up?",
+        [
+            {"role": "assistant", "content": "An earlier plain-text reply."},
+            {"role": "user", "content": "Hi"},
+        ],
+        with_affinity=with_affinity,
+    )
+
+    assert result == (("Hello!", None, None) if with_affinity else ("Hello!", None))
+    assert [body["model"] for body in bodies] == (
+        ["chat-primary", "chat-backup"] if primary_fails else ["chat-primary"]
+    )
+    response_format = bodies[0]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    schema = response_format["json_schema"]["schema"]
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    expected_fields = {"reply", "reaction"}
+    if with_affinity:
+        expected_fields.add("affinity_delta")
+        assert schema["properties"]["affinity_delta"] == {
+            "type": ["number", "null"],
+            "minimum": -0.2,
+            "maximum": 0.2,
+        }
+    assert set(schema["properties"]) == set(schema["required"]) == expected_fields
+    assert all(body["response_format"] == response_format for body in bodies)
+    system_text = bodies[0]["messages"][0]["content"]
+    assert 'belong inside "reply"' in system_text
+    if with_affinity:
+        assert "Use null when neutral or unknown." in system_text
+
+
+@pytest.mark.parametrize("operation", ("checkin", "extract_memory"))
+async def test_chat_schema_mode_does_not_change_checkin_or_extraction(
+    routing_service, monkeypatch, operation
+):
+    monkeypatch.setattr(config, "LLM_CHAT_STRUCTURED_MODE", "json_schema")
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return _success(operation)
+
+    _assert_success(operation, await _invoke(routing_service(handler), operation))
+    if operation == "checkin":
+        assert "response_format" not in bodies[0]
+    else:
+        assert bodies[0]["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.parametrize("operation", ("extract_memory", "extract_group_memory"))

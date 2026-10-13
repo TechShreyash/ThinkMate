@@ -47,6 +47,7 @@ async def sdk_service(monkeypatch):
     monkeypatch.setattr(config, "LLM_MAX_RETRIES", 1)
     monkeypatch.setattr(config, "LLM_RETRY_BASE_DELAY_SECS", 0)
     monkeypatch.setattr(config, "LLM_STRUCTURED_MODE", "json_object")
+    monkeypatch.setattr(config, "LLM_CHAT_STRUCTURED_MODE", "json_object")
     monkeypatch.setattr(llm_module.metrics, "record_llm", lambda *args, **kwargs: None)
 
     def make_service(handler):

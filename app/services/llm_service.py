@@ -204,6 +204,34 @@ class LLMService:
         )
 
     @staticmethod
+    def _reply_response_format(*, with_affinity: bool) -> dict:
+        if config.LLM_CHAT_STRUCTURED_MODE == "json_object":
+            return {"type": "json_object"}
+        properties = {
+            "reply": {"type": "string"},
+            "reaction": {"type": "string"},
+        }
+        if with_affinity:
+            properties["affinity_delta"] = {
+                "type": ["number", "null"],
+                "minimum": -0.2,
+                "maximum": 0.2,
+            }
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "reply_bundle",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(properties),
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+    @staticmethod
     def _strip_fences(raw: str | None) -> str:
         """Strip ```json ... ``` fences some models add around JSON output."""
         if not raw:
@@ -230,25 +258,29 @@ class LLMService:
     ) -> tuple[str, str | None] | tuple[str, str | None, float | None]:
         """Generate the conversational reply and an optional emoji reaction in a single call.
 
-        Uses ``json_object`` mode (verified to preserve reply quality on the configured
-        Gemini proxy). Falls back to treating the raw output as the reply if JSON parsing
-        fails, so the user always gets an answer.
+        Uses the configured chat JSON mode, optionally enforcing a reply schema at the
+        endpoint. Falls back to the raw reply if parsing fails, without another request.
 
         ``with_affinity`` controls the return contract:
 
-        - ``False`` (default, DM/addressed path): the prompt and the returned value are
-          byte-for-byte unchanged from the original behavior — returns ``(reply, reaction)``.
-        - ``True`` (group path): the format clause additionally asks for an optional
-          ``affinity_delta`` number in ``[-0.2, 0.2]``, and the method returns
-          ``(reply, reaction, affinity_delta)`` where ``affinity_delta`` is a ``float`` or
-          ``None`` when the model omits it.
+        - ``False`` (default, DM/addressed path): returns ``(reply, reaction)``.
+        - ``True`` (group path): additionally asks for an ``affinity_delta`` number in
+          ``[-0.2, 0.2]`` (optional in JSON-object mode, required/nullable in schema
+          mode). Returns ``(reply, reaction, affinity_delta)`` with a float or ``None``.
         """
         if with_affinity:
-            # Group variant: same reply/reaction contract, plus an optional affinity_delta.
+            schema_mode = config.LLM_CHAT_STRUCTURED_MODE == "json_schema"
+            affinity_example = "<number or null>" if schema_mode else "<number or omit>"
+            affinity_presence = "REQUIRED" if schema_mode else "OPTIONAL"
+            affinity_neutral = (
+                "Use null when neutral or unknown.\n"
+                if schema_mode
+                else "Omit it or use 0 when neutral.\n"
+            )
             format_clause = (
                 "\n\n---\n## RESPONSE FORMAT (STRICT)\n"
                 'Respond with ONLY a JSON object: {"reply": "<message>", "reaction": "<emoji or empty>", '
-                '"affinity_delta": <number or omit>}.\n'
+                f'"affinity_delta": {affinity_example}}}.\n'
                 '- "reply": your natural conversational message, obeying every style rule above. '
                 "Telegram text only. Minimal bullets, numbered steps, or short code snippets are "
                 "okay when the user asks or the task clearly needs them; avoid heavy markdown. "
@@ -258,10 +290,10 @@ class LLMService:
                 "message, separate from your reply). Choose ONLY from this list, or an empty string "
                 "when no reaction fits (most messages need none):\n"
                 f"{' '.join(sorted(ALLOWED_REACTIONS))}\n"
-                '- "affinity_delta": OPTIONAL signed number in [-0.2, 0.2] expressing how much the '
+                f'- "affinity_delta": {affinity_presence} signed number in [-0.2, 0.2] expressing how much the '
                 "latest speaker's warmth toward you should shift based on their message (positive when "
                 "they engage warmly or invite you in, negative when they are dismissive or want less). "
-                "Omit it or use 0 when neutral.\n"
+                f"{affinity_neutral}"
                 "Output the raw JSON object only — no preamble, no code fences around it."
             )
         else:
@@ -279,6 +311,11 @@ class LLMService:
                 f"{' '.join(sorted(ALLOWED_REACTIONS))}\n"
                 "Output the raw JSON object only — no preamble, no code fences around it."
             )
+        format_clause += (
+            "\nPersona examples and the conversational text in earlier assistant messages "
+            'belong inside "reply". Always wrap the current answer in this JSON envelope. '
+            'Only the text inside "reply" is displayed to the user.'
+        )
         messages = [
             {"role": "system", "content": system_prompt + format_clause}
         ] + chat_history
@@ -292,7 +329,9 @@ class LLMService:
             start = time.perf_counter()
             response = await self._chat_completion(
                 messages=messages,
-                response_format={"type": "json_object"},
+                response_format=self._reply_response_format(
+                    with_affinity=with_affinity
+                ),
                 what=f"reply_bundle u{user_id}",
             )
             raw = (response.choices[0].message.content or "").strip()

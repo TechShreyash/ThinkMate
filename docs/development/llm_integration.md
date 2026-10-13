@@ -38,7 +38,7 @@ Accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `ma
 normalized for whitespace and case. Supported values depend on the endpoint and model;
 see the [OpenAI Chat Completions reference](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create).
 
-All calls are non-streaming and pass `LLM_REQUEST_TIMEOUT_SECS` (default `610`). Requests do not set `max_tokens` or temperature. `MAX_RESPONSE_CHARS` is an application delivery cap, applied after generation and before saving reply history; it does not limit model generation cost or context size. Telegram delivery additionally chunks text to fit its message limit. Restart after changing model or reasoning settings.
+All calls are non-streaming and pass `LLM_REQUEST_TIMEOUT_SECS` (default `610`). Requests do not set `max_tokens` or temperature. `MAX_RESPONSE_CHARS` is an application delivery cap, applied after generation and before saving reply history; it does not limit model generation cost or context size. Telegram delivery additionally chunks text to fit its message limit. Restart after changing model, reasoning, or structured-mode settings.
 
 Set the client timeout with the actual provider/proxy ceiling in mind. A client timeout can abandon a generation that continues upstream, and a retry may start duplicate work. The repository does not define or prove the external server's timeout.
 
@@ -61,13 +61,22 @@ The extraction pipeline separately retries a `None` result up to three logical a
 
 ## Conversational reply parsing
 
-Reply generation always requests `response_format={"type": "json_object"}`, independently of `LLM_STRUCTURED_MODE`. The prompt asks for:
+Reply generation uses `LLM_CHAT_STRUCTURED_MODE`, independently of the memory
+setting `LLM_STRUCTURED_MODE`. The default `json_object` requests
+`response_format={"type": "json_object"}`. Opt-in `json_schema` sends an explicit
+strict JSON Schema requiring `reply` and `reaction` strings, rejecting extra fields.
+The group schema additionally requires `affinity_delta` as a number in `[-0.2, 0.2]`
+or `null`. Both modes use the same existing parser and failure policies; no SDK
+native parsing or output-repair request is introduced. Endpoint support is required
+to enforce the schema.
+
+The prompt asks for:
 
 ```json
 {"reply": "Hi!", "reaction": "", "affinity_delta": 0.05}
 ```
 
-`affinity_delta` is requested and returned only when the group caller sets `with_affinity=True`. The DM contract has two values.
+`affinity_delta` is requested and returned only when the group caller sets `with_affinity=True`. JSON-object mode permits its omission; schema mode uses `null` for no shift. The DM contract has two values. Persona examples and earlier assistant text describe the text inside `reply`; the prompt explicitly keeps the JSON envelope required.
 
 Replies use a custom JSON parser, not Pydantic `ReplyBundle` validation. The parser strips optional Markdown fences and accepts a dictionary with a nonblank string `reply`:
 
@@ -152,7 +161,8 @@ fallback routing, independent reasoning effort, retry ordering, native-to-JSON
 format fallback, replacement-output validation, and cancellation through the real
 SDK with mocked HTTP transport. [test_config_validation.py](../../tests/test_config_validation.py)
 checks model resolution and reasoning-setting validation.
-The routing suite also loads the GeminiProxy chat/extraction environment settings
+The routing suite verifies DM/group schemas on primary/fallback requests and
+unchanged check-in and memory formats. It also loads the GeminiProxy chat/extraction environment settings
 and verifies family aliases, reasoning efforts, and Gemma fallbacks at the SDK's
 HTTP boundary when a legacy fixed-version `LLM_MODEL` remains configured.
 

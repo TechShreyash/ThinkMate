@@ -186,6 +186,10 @@ class Config(BaseModel):
     LLM_STRUCTURED_MODE: str = Field(
         default_factory=lambda: _env_str("LLM_STRUCTURED_MODE", "json_object")
     )
+    # Reply envelopes can opt into a provider-enforced JSON schema. Check-ins stay text.
+    LLM_CHAT_STRUCTURED_MODE: str = Field(
+        default_factory=lambda: _env_str("LLM_CHAT_STRUCTURED_MODE", "json_object")
+    )
     LLM_MAX_RETRIES: int = Field(
         default_factory=lambda: _env_int("LLM_MAX_RETRIES", 2), ge=0
     )
@@ -444,6 +448,14 @@ class Config(BaseModel):
             raise ValueError(
                 "reasoning effort must be blank, none, minimal, low, medium, high, xhigh, or max"
             )
+        return normalized
+
+    @field_validator("LLM_CHAT_STRUCTURED_MODE")
+    @classmethod
+    def validate_chat_structured_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"json_object", "json_schema"}:
+            raise ValueError("chat structured mode must be json_object or json_schema")
         return normalized
 
     @model_validator(mode="after")

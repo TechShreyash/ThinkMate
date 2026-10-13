@@ -22,7 +22,11 @@ _LLM_REASONING_FIELDS = (
 
 @pytest.fixture
 def clear_llm_model_environment(monkeypatch):
-    for field in (*_LLM_MODEL_FIELDS, *_LLM_REASONING_FIELDS):
+    for field in (
+        *_LLM_MODEL_FIELDS,
+        *_LLM_REASONING_FIELDS,
+        "LLM_CHAT_STRUCTURED_MODE",
+    ):
         monkeypatch.delenv(field, raising=False)
 
 
@@ -124,6 +128,26 @@ def test_reasoning_efforts_do_not_inherit_between_models(clear_llm_model_environ
     assert settings.LLM_EXTRACTION_REASONING_EFFORT == "low"
     assert settings.LLM_CHAT_FALLBACK_REASONING_EFFORT == ""
     assert settings.LLM_EXTRACTION_FALLBACK_REASONING_EFFORT == ""
+
+
+def test_chat_structured_mode_defaults_preserve_existing_behavior(
+    clear_llm_model_environment,
+):
+    settings = Config()
+    assert settings.LLM_CHAT_STRUCTURED_MODE == "json_object"
+
+
+@pytest.mark.parametrize("mode", ("json_object", "json_schema"))
+def test_chat_structured_modes_are_normalized(monkeypatch, mode):
+    monkeypatch.setenv("LLM_CHAT_STRUCTURED_MODE", f" {mode.upper()} ")
+    assert Config().LLM_CHAT_STRUCTURED_MODE == mode
+
+
+@pytest.mark.parametrize("mode", ("", "native_parse", "text"))
+def test_unsupported_chat_structured_modes_are_rejected(monkeypatch, mode):
+    monkeypatch.setenv("LLM_CHAT_STRUCTURED_MODE", mode)
+    with pytest.raises(ValidationError, match="LLM_CHAT_STRUCTURED_MODE"):
+        Config()
 
 
 @pytest.mark.parametrize(
